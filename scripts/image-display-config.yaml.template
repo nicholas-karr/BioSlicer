@@ -1,0 +1,11 @@
+# Image Display Server Configuration
+
+# Network settings
+host: '0.0.0.0'  # Listen on all interfaces
+port: 5555       # TCP port number
+
+# Display settings - fill out at least one of the following
+# List your current monitors with "python image-display.py --enum-monitors"
+monitor_index: 0  # Which monitor to use
+# monitor_size: [1920, 1080]  # Size of the monitor in pixels (width, height)
+# monitor_position: [0, 0]  # Position of the monitor (x, y)
