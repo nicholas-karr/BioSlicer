@@ -488,7 +488,8 @@ if (UNIX AND NOT APPLE)
     find_package(GTK${SLIC3R_GTK} REQUIRED)
     find_package(PkgConfig REQUIRED)
 
-    pkg_search_module(WEBKIT2GTK REQUIRED IMPORTED_TARGET webkit2gtk-4.0 webkit2gtk-4.1)
+    # Prefer WebKitGTK 4.1 (libsoup3); fall back to 4.0 when 4.1 is unavailable.
+    pkg_search_module(WEBKIT2GTK REQUIRED IMPORTED_TARGET webkit2gtk-4.1 webkit2gtk-4.0)
     target_link_libraries(libslic3r_gui PUBLIC ${GTK${SLIC3R_GTK}_LIBRARIES} fontconfig PkgConfig::WEBKIT2GTK)
 endif ()
 
