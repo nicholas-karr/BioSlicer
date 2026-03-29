@@ -207,6 +207,9 @@ private:
         // Formats and write into a file the given data. 
         void write_format(const char* format, ...);
 
+        // Reserve checksum line as second line and start hashing subsequent output.
+        void checksum_begin();
+
     private:
         FILE             *f { nullptr };
         // Find-replace post-processor to be called before GCodePostProcessor.

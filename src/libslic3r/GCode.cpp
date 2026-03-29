@@ -66,6 +66,8 @@
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/cstdlib.hpp>
 
+#include <openssl/evp.h>
+
 #include "SVG.hpp"
 
 #include <tbb/parallel_for.h>
@@ -455,6 +457,7 @@ std::vector<std::pair<coordf_t, GCodeGenerator::ObjectsLayerToPrint>> GCodeGener
 
 // free functions called by GCodeGenerator::do_export()
 namespace DoExport {
+    static void patch_checksum_in_gcode_file(const std::string &file_path);
 //    static void update_print_estimated_times_stats(const GCodeProcessor& processor, PrintStatistics& print_statistics)
 //    {
 //        const GCodeProcessorResult& result = processor.get_result();
@@ -582,6 +585,7 @@ GCodeGenerator::GCodeGenerator(const Print* print) :
 void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     CNumericLocalesSetter locales_setter;
+    const bool export_to_binary_gcode = print->full_print_config().option<ConfigOptionBool>("binary_gcode")->value;
 
     // Does the file exist? If so, we hope that it is still valid.
     {
@@ -659,6 +663,8 @@ void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorRes
     m_processor.finalize(true);
 //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
     DoExport::update_print_estimated_stats(m_processor, m_writer.extruders(), print->m_print_statistics);
+    if (! export_to_binary_gcode)
+        DoExport::patch_checksum_in_gcode_file(path_tmp);
     if (result != nullptr) {
         *result = std::move(m_processor.extract_result());
         // set the filename to the correct value
@@ -685,6 +691,88 @@ namespace DoExport {
         processor.initialize_result_moves();
         processor.apply_config(config);
         processor.enable_stealth_time_estimator(silent_time_estimator_enabled);
+    }
+
+    static void patch_checksum_in_gcode_file(const std::string &file_path)
+    {
+        FILE *file = boost::nowide::fopen(file_path.c_str(), "r+b");
+        if (! file)
+            throw Slic3r::RuntimeError(std::string("Failed to open G-code for checksum patching: ") + file_path);
+
+        try {
+            int ch = 0;
+            while ((ch = ::fgetc(file)) != EOF && ch != '\n') {}
+            if (ch == EOF)
+                throw Slic3r::RuntimeError("Failed to locate checksum line.");
+
+            const long line2_start = ::ftell(file);
+            if (line2_start < 0)
+                throw Slic3r::RuntimeError("Failed to get checksum line start offset.");
+
+            static const std::string checksum_prefix = "; SHA256: ";
+            std::string line2;
+            while ((ch = ::fgetc(file)) != EOF && ch != '\n')
+                line2.push_back(char(ch));
+            if (ch == EOF)
+                throw Slic3r::RuntimeError("Failed to read checksum line.");
+
+            if (line2.rfind(checksum_prefix, 0) != 0 || line2.size() != checksum_prefix.size() + 64)
+                throw Slic3r::RuntimeError("Invalid checksum line format.");
+
+            EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+            if (! ctx)
+                throw Slic3r::RuntimeError("Failed to initialize SHA256 context.");
+
+            if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+                EVP_MD_CTX_free(ctx);
+                throw Slic3r::RuntimeError("Failed to initialize SHA256 digest.");
+            }
+
+            std::vector<unsigned char> buffer(64 * 1024);
+            size_t n = 0;
+            while ((n = ::fread(buffer.data(), 1, buffer.size(), file)) > 0) {
+                if (EVP_DigestUpdate(ctx, buffer.data(), n) != 1) {
+                    EVP_MD_CTX_free(ctx);
+                    throw Slic3r::RuntimeError("Failed to update SHA256 digest.");
+                }
+            }
+
+            if (::ferror(file)) {
+                EVP_MD_CTX_free(ctx);
+                throw Slic3r::RuntimeError("Failed to read G-code payload for checksum.");
+            }
+
+            unsigned char digest[EVP_MAX_MD_SIZE];
+            unsigned int digest_len = 0;
+            if (EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1) {
+                EVP_MD_CTX_free(ctx);
+                throw Slic3r::RuntimeError("Failed to finalize SHA256 digest.");
+            }
+            EVP_MD_CTX_free(ctx);
+
+            if (digest_len != 32)
+                throw Slic3r::RuntimeError("Unexpected SHA256 digest length.");
+
+            static const char *hex_chars = "0123456789abcdef";
+            std::string checksum_hex(64, '0');
+            for (unsigned int i = 0; i < digest_len; ++ i) {
+                checksum_hex[2 * i + 0] = hex_chars[(digest[i] >> 4) & 0x0f];
+                checksum_hex[2 * i + 1] = hex_chars[digest[i] & 0x0f];
+            }
+
+            const long checksum_hex_offset = line2_start + long(checksum_prefix.size());
+            if (::fseek(file, checksum_hex_offset, SEEK_SET) != 0)
+                throw Slic3r::RuntimeError("Failed to seek checksum output location.");
+
+            if (::fwrite(checksum_hex.data(), 1, checksum_hex.size(), file) != checksum_hex.size())
+                throw Slic3r::RuntimeError("Failed to write checksum value.");
+
+            ::fflush(file);
+            ::fclose(file);
+        } catch (...) {
+            ::fclose(file);
+            throw;
+        }
     }
 
 	static double autospeed_volumetric_limit(const Print &print)
@@ -1041,6 +1129,7 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     if (!export_to_binary_gcode) {
         // Write information on the generator.
         file.write_format("; %s\n", Slic3r::header_slic3r_generated().c_str());
+        file.checksum_begin();
         if (! prepared_by_info.empty())
             file.write_format("; prepared by %s\n", prepared_by_info.c_str());
         file.write_format("\n");
@@ -3244,6 +3333,16 @@ void GCodeGenerator::GCodeOutputStream::write(const char *what)
         fwrite(gcode.c_str(), 1, gcode.size(), this->f);
         m_processor.process_buffer(gcode);
     }
+}
+
+void GCodeGenerator::GCodeOutputStream::checksum_begin()
+{
+    static const std::string checksum_prefix = "; SHA256: ";
+    const std::string checksum_placeholder_line = checksum_prefix + std::string(64, '0') + "\n";
+
+    if (::fwrite(checksum_placeholder_line.data(), 1, checksum_placeholder_line.size(), this->f) != checksum_placeholder_line.size())
+        throw Slic3r::RuntimeError("Failed to write checksum placeholder line.");
+    m_processor.process_buffer(checksum_placeholder_line);
 }
 
 void GCodeGenerator::GCodeOutputStream::writeln(const std::string &what)
