@@ -1,260 +1,128 @@
-# Image Display Server Scripts
+# Image and Video Display Scripts
 
-This directory contains a client-server system for remotely displaying images on a dedicated monitor. You can run the client and server on the same machine, or on different machines. The installation steps are the same for both.
+Minimal TCP display stack for BioSlicer SLA video workflows.
 
-## Overview
+## Quick Start
 
-- **`image-display.py`** - Server that listens for commands and displays images in fullscreen
-- **`send-image.py`** - Client that sends commands to the server
-- **`image-display-config.yaml.template`** - Configuration template for the server
-
-## Installation
-
-### Prerequisites
-- Python 3.7 or later
-
-### Step 1: Install Python
-
-#### Windows
-
-1. **Open PowerShell:**
-   - Press `Win + X` and select **Windows PowerShell** or **Terminal**
-   - Or search for "PowerShell" in the Start menu
-   - (Admin privileges are not required - winget will prompt when needed)
-
-2. **Install Python using winget:**
-   ```powershell
-   winget install Python.Python.3.12
-   ```
-   Winget will automatically prompt for admin privileges if needed.
-
-3. **Restart PowerShell/Terminal:**
-   Close the terminal completely and open a new one. This allows the terminal to recognize the new Python installation and PATH updates.
-
-4. **Verify installation:**
-   ```powershell
-   python --version
-   ```
-
-#### macOS
-
-1. **Open Terminal:**
-   - Press `Cmd + Space` and type "Terminal", then press Enter
-   - Or open Applications → Utilities → Terminal
-
-2. **Install Python using Homebrew (if not already installed):**
-   ```bash
-   # First install Homebrew if needed
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   
-   # Then install Python
-   brew install python@3.12
-   ```
-
-3. **Verify installation:**
-   ```bash
-   python3 --version
-   ```
-
-#### Linux
-
-1. **Open Terminal:**
-   - Press `Ctrl + Alt + T` (Ubuntu/Debian)
-   - Or search for "Terminal" in your application menu
-
-2. **Install Python:**
-
-   **Ubuntu/Debian:**
-   ```bash
-   sudo apt update
-   sudo apt install python3 python3-venv python3-pip
-   ```
-
-   **Fedora/RHEL:**
-   ```bash
-   sudo dnf install python3 python3-venv python3-pip
-   ```
-
-3. **Verify installation:**
-   ```bash
-   python3 --version
-   ```
-
-### Step 2: Navigate to the Scripts Directory
-
-In your terminal, navigate to the scripts directory:
-
-**Windows (PowerShell):**
-```powershell
-cd "C:\yourpathhere\BioSlicer\scripts"
-```
-
-**macOS/Linux:**
 ```bash
-cd /yourpathhere/BioSlicer/scripts
-```
-
-### Step 3: Create and Activate a Virtual Environment
-
-1. **Create virtual environment:**
-
-   On Windows:
-   ```powershell
-   python -m venv venv
-   ```
-
-   On macOS/Linux:
-   ```bash
-   python3 -m venv venv
-   ```
-
-2. **Activate virtual environment:**
-
-   On Windows (PowerShell):
-   ```powershell
-   .\venv\Scripts\Activate.ps1
-   ```
-
-   On macOS/Linux:
-   ```bash
-   source venv/bin/activate
-   ```
-
-   You should see `(venv)` appear at the beginning of your terminal prompt when activated.
-
-### Step 4: Install Dependencies
-
-With the virtual environment activated, run:
-```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### Step 5: Create Configuration File
-
-```bash
 cp image-display-config.yaml.template image-display-config.yaml
+python image-display.py
 ```
 
-### Step 6: Customize Configuration
+## MainsailOS (Pi 4) Defaults
 
-Edit `image-display-config.yaml` with your preferred text editor (see Configuration section below)
+The template defaults are tuned for MainsailOS:
 
-## Configuration Guide
+- `video_cache_dir`: `/home/pi/printer_data/cache/bioslicer-sla-video-cache`
+- `monitor_auto_detect`: `true`
 
-Create `image-display-config.yaml` from the template and configure the following:
+Optional monitor probe:
 
-### Network Settings
-```yaml
-host: '0.0.0.0'   # Listen on all interfaces (or specify a specific IP)
-port: 5555        # TCP port number for the server
-```
-
-### Finding Your Monitor Configuration
-
-To see available monitors and their settings, run:
 ```bash
 python image-display.py --enum-monitors
 ```
 
-This will output something like:
-```
-Available Monitors: index: widthxheight@(x,y)
-Monitor 0: 1920x1080@(0,0)
-Monitor 1: 2560x1440@(1920,0)
-```
+## Systemd Service
 
-### Monitor Selection
-
-Choose one of the following options to select which monitor to display on:
-
-#### Option 1: By Index (Simplest)
-```yaml
-monitor_index: 0  # Use the first monitor, 1 for second, etc.
-```
-
-#### Option 2: By Size
-```yaml
-monitor_size: [1920, 1080]  # Width and height in pixels
-```
-
-#### Option 3: By Position
-```yaml
-monitor_position: [0, 0]  # X and Y coordinates
-```
-
-#### Option 4: By Size and Position
-```yaml
-monitor_size: [1920, 1080]
-monitor_position: [0, 0]
-```
-
-## Usage
-
-### Starting the Server
+Install and start the service:
 
 ```bash
-python image-display.py
+sudo ./install-image-display-service.sh
 ```
 
-The server will:
-- Load the configuration from `image-display-config.yaml`
-- Start listening on the configured host and port
-- Display a fullscreen image window on the selected monitor
-- Accept incoming commands via TCP
+Override user/path/display if needed:
 
-**To stop the server:** Press `ESC` on the image display window.
-
-### Sending Commands
-
-In a separate terminal/window, use `send-image.py` to send commands to the running server.
-
-#### Display a Local Image
 ```bash
-python send-image.py localhost 5555 '{"type":"DISPLAY_IMAGE","path":"C:\Users\yourusername\Pictures\photo.png"}'
+sudo SERVICE_USER=pi SCRIPTS_DIR=/home/pi/BioSlicer/scripts DISPLAY_VALUE=:0 ./install-image-display-service.sh
 ```
 
-#### Display an Image from URL
-```bash
-python send-image.py localhost 5555 '{"type":"DISPLAY_IMAGE","path":"https://picsum.photos/1920/1080"}'
-```
+Default unit name: `bioslicer-image-display.service`.
 
-#### Rotate Image
-Add the `rotation` parameter (0, 90, 180, 270):
-```bash
-python send-image.py localhost 5555 '{"type":"DISPLAY_IMAGE","path":"photo.png","rotation":180}'
-```
+## Command Examples
 
-#### Clear the Display
 ```bash
+python send-image.py localhost 5555 '{"type":"DISPLAY_IMAGE","path":"/data/frame.png"}'
+python send-image.py localhost 5555 '{"type":"LOAD_VIDEOS_FROM_GCODE","gcode_path":"/data/job.gcode"}'
+python send-image.py localhost 5555 '{"type":"SHOW_VIDEO_FRAME","name":"resin_a","frame":240}'
 python send-image.py localhost 5555 '{"type":"CLEAR"}'
 ```
 
-**Command Types:**
-- `DISPLAY_IMAGE` - Display an image (local path or URL)
-- `CLEAR` - Clear the display
+On localhost, `send-image.py` will try to start `bioslicer-image-display.service` if the first connection is refused.
+Disable autostart with:
 
-**Fields:**
-- `type` (required) - Command type
-- `path` (required for DISPLAY_IMAGE) - Local file path or HTTP(S) URL
-- `rotation` (optional) - Rotation in degrees: 0, 90, 180, 270
+```bash
+python send-image.py localhost 5555 --no-ensure-running '{"type":"CLEAR"}'
+```
 
-## Troubleshooting
+## Commands
 
-### Server Won't Start
-- Check that `image-display-config.yaml` exists and is properly formatted
-- Verify the port is not already in use
-- Try a different port number
+- `DISPLAY_IMAGE`
+- `CLEAR`
+- `LOAD_VIDEO`
+- `LOAD_VIDEOS_FROM_GCODE`
+- `SHOW_VIDEO_FRAME`
+- `LIST_VIDEOS`
+- `UNLOAD_VIDEO`
 
-### Monitor Not Found
-- Run `python image-display.py --enum-monitors` to list available monitors
-- Update the configuration with the correct monitor_index, monitor_size, or monitor_position
+## Typical SLA Flow
 
-### Connection Refused
-- Ensure the server is running before sending commands
-- Check the host and port match the server configuration
-- Verify firewall settings allow the connection
+1. Configure SLA video fields in slicer custom G-code settings.
+2. Export G-code.
+3. Start the display server (or service).
+4. Run macros from `scripts/macros/` to load videos and show frames during SLA steps.
 
-### Image Not Displaying
-- Check the file path is correct and the file exists
-- For URLs, ensure internet connectivity
-- Verify the image format is supported (PNG, JPG, GIF, BMP, etc.)
+## Hybrid Multi-Material Generators
+
+Each script below generates both a `.3mf` and sliced `.gcode` in `build/generated/`.
+They are designed for up to three FFF materials plus one SLA material, with geometry bounded to at most `50x50x50 mm`.
+
+### 1) Tricolor Waffle Tower + SLA Stitch Nodes
+
+```bash
+python scripts/gen_hybrid_tricolor_waffle_tower.py
+```
+
+### 2) Braided Tri-Color Column + SLA Spine
+
+```bash
+python scripts/gen_hybrid_braided_column.py
+```
+
+### 3) Voxel Moire Block + SLA Marker Lattice
+
+```bash
+python scripts/gen_hybrid_voxel_moire_block.py
+```
+
+All scripts support:
+
+```bash
+--prusa-slicer <path>
+--output-dir <dir>
+--name <base_name>
+--machine-settings-ini <ini>
+--sla-synth-width <px>
+--sla-synth-height <px>
+--sla-synth-fps <fps>
+--sla-synth-lossless
+```
+
+## Channel Setup Overrides (Scalable Logical Extruders)
+
+For high-channel printers (for example 100 logical channels), generate one override INI per physical setup:
+
+```bash
+python scripts/gen_channel_setup_override.py \
+	--output build/generated/setup_A_100ch.ini \
+	--channels 100 \
+	--default-nozzle 0.4 \
+	--nozzle-map 1=0.4,2=0.6,3=0.25,4=0.8 \
+	--sla-channels 2,17 \
+	--embed-sla-video \
+	--synthesize-sla-video
+```
+
+This writes vector options such as `nozzle_diameter`, `sla_material_extruder`, and `toolchange_gcode` so one printer profile can be reused across many hardware setups.

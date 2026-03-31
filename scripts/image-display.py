@@ -7,9 +7,14 @@ Run with "python image-display.py" after filling out "image-display-config.yaml"
 Close by pressing ESC.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
+import os
+import re
+import subprocess
 import sys
 from typing import Optional
 import urllib.request
@@ -21,6 +26,8 @@ import pyglet
 from PIL import Image
 import numpy as np
 
+from sla_video_runtime import VideoRegistry
+
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +35,165 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+PROJECTOR_HINTS = (
+    'projector',
+    'epson',
+    'benq',
+    'optoma',
+    'viewsonic',
+    'vivitek',
+    'infocus',
+    'nec',
+)
+
+
+def default_video_cache_dir() -> str:
+    """Pick a cache directory that matches common MainsailOS layouts."""
+    candidate_roots = [
+        os.environ.get('BIOSLICER_CACHE_ROOT'),
+        '/home/pi/printer_data/cache',
+        os.path.join(os.path.expanduser('~'), 'printer_data', 'cache'),
+    ]
+
+    for root in candidate_roots:
+        if root and os.path.isdir(root):
+            return os.path.join(root, 'bioslicer-sla-video-cache')
+
+    return '/tmp/bioslicer-sla-video-cache'
+
+
+def _screen_signature(screen) -> tuple[int, int, int, int]:
+    return (int(screen.width), int(screen.height), int(screen.x), int(screen.y))
+
+
+def _parse_geometry(text: Optional[str]) -> Optional[tuple[int, int, int, int]]:
+    if not text:
+        return None
+    match = re.match(r'^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$', text)
+    if not match:
+        return None
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        int(match.group(4)),
+    )
+
+
+def _xrandr_connected_outputs() -> list[dict]:
+    try:
+        result = subprocess.run(
+            ['xrandr', '--query', '--verbose'],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    outputs = []
+    current = None
+    line_re = re.compile(
+        r'^([A-Za-z0-9_.-]+)\s+connected(?:\s+primary)?(?:\s+(\d+x\d+\+-?\d+\+-?\d+))?'
+    )
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.rstrip('\n')
+        match = line_re.match(line)
+        if match:
+            current = {
+                'name': match.group(1),
+                'primary': ' primary ' in f' {line} ',
+                'geometry': _parse_geometry(match.group(2)),
+                'descriptor': match.group(1).lower(),
+            }
+            outputs.append(current)
+            continue
+
+        if current and line.startswith((' ', '\t')):
+            lower = line.strip().lower()
+            if any(key in lower for key in ('monitor name', 'identifier', 'model', 'vendor', 'manufacturer')):
+                current['descriptor'] += f' {lower}'
+
+    return outputs
+
+
+def _score_projector_output(output: dict) -> int:
+    name = output.get('name', '').lower()
+    descriptor = output.get('descriptor', '')
+    geometry = output.get('geometry')
+
+    score = 0
+    if any(hint in descriptor for hint in PROJECTOR_HINTS):
+        score += 300
+    if name.startswith('hdmi'):
+        score += 70
+    elif name.startswith('dp'):
+        score += 35
+    if not output.get('primary', False):
+        score += 45
+    if geometry and (geometry[2] != 0 or geometry[3] != 0):
+        score += 30
+    if geometry and geometry[0] * geometry[1] >= 1920 * 1080:
+        score += 15
+
+    return score
+
+
+def guess_projector_monitor(screens):
+    outputs = _xrandr_connected_outputs()
+    best = None
+    best_score = -1
+
+    for output in outputs:
+        geometry = output.get('geometry')
+        if not geometry:
+            continue
+        matched_screen = next((s for s in screens if _screen_signature(s) == geometry), None)
+        if not matched_screen:
+            continue
+
+        score = _score_projector_output(output)
+        if score > best_score:
+            best = (matched_screen, output)
+            best_score = score
+
+    if best is not None:
+        screen, output = best
+        logger.info(
+            'Auto-selected monitor using xrandr heuristic: %s %sx%s@(%s,%s)',
+            output.get('name', 'unknown'),
+            screen.width,
+            screen.height,
+            screen.x,
+            screen.y,
+        )
+        return screen
+
+    secondary_screens = [s for s in screens if (int(s.x), int(s.y)) != (0, 0)]
+    if secondary_screens:
+        chosen = max(secondary_screens, key=lambda s: int(s.width) * int(s.height))
+        logger.info(
+            'Auto-selected non-primary monitor fallback: %sx%s@(%s,%s)',
+            chosen.width,
+            chosen.height,
+            chosen.x,
+            chosen.y,
+        )
+        return chosen
+
+    chosen = max(screens, key=lambda s: int(s.width) * int(s.height))
+    logger.info(
+        'Auto-selected largest monitor fallback: %sx%s@(%s,%s)',
+        chosen.width,
+        chosen.height,
+        chosen.x,
+        chosen.y,
+    )
+    return chosen
 
 
 def enumerate_monitors():
@@ -38,8 +204,13 @@ def enumerate_monitors():
     for i, screen in enumerate(screens):
         print(f"Monitor {i}: {screen.width}x{screen.height}@({screen.x},{screen.y})")
 
+    if screens:
+        guessed = guess_projector_monitor(screens)
+        idx = next((i for i, screen in enumerate(screens) if screen == guessed), 0)
+        print(f"Auto-detect guess: Monitor {idx}")
 
-def find_monitor(display, monitor_index=None, monitor_size=None, monitor_position=None):
+
+def find_monitor(display, monitor_index=None, monitor_size=None, monitor_position=None, monitor_auto_detect=True):
     screens = display.get_screens()
     
     if not screens:
@@ -69,9 +240,23 @@ def find_monitor(display, monitor_index=None, monitor_size=None, monitor_positio
                 logger.info(f"Selected monitor by position {monitor_position}")
                 return screen
         logger.warning(f"Monitor at position {monitor_position} not found, using fallback")
+
+    if monitor_index is None and monitor_auto_detect:
+        return guess_projector_monitor(screens)
+
+    if monitor_index is not None:
+        try:
+            monitor_index = int(monitor_index)
+        except (TypeError, ValueError):
+            logger.warning("Invalid monitor index %r, using monitor 0", monitor_index)
+            monitor_index = 0
     
     # Fallback to index
     if monitor_index is None:
+        monitor_index = 0
+
+    if monitor_index < 0:
+        logger.warning(f"Negative monitor index {monitor_index} is invalid, using monitor 0")
         monitor_index = 0
     
     if monitor_index >= len(screens):
@@ -113,6 +298,23 @@ class ImageDisplayWindow(pyglet.window.Window):
         
         if self.current_sprite:
             self.current_sprite.draw()
+
+    def _set_texture(self, texture, width: int, height: int):
+        image_aspect = width / height
+        window_aspect = self.width / self.height
+
+        if image_aspect > window_aspect:
+            scale = self.width / width
+        else:
+            scale = self.height / height
+
+        self.current_sprite = pyglet.sprite.Sprite(texture, x=0, y=0)
+        self.current_sprite.scale = scale
+
+        scaled_width = width * scale
+        scaled_height = height * scale
+        self.current_sprite.x = (self.width - scaled_width) / 2
+        self.current_sprite.y = (self.height - scaled_height) / 2
         
     def load_image(self, image_path: str, rotation: int = 0):
         """Load an image from path or URL.
@@ -150,34 +352,34 @@ class ImageDisplayWindow(pyglet.window.Window):
             )
             
             texture = pyglet_image.get_texture()
+
+            self._set_texture(texture, width, height)
             
-            # Calculate scaling to fit window while maintaining aspect ratio
-            image_aspect = width / height
-            window_aspect = self.width / self.height
-            
-            if image_aspect > window_aspect:
-                # Image is wider than window
-                scale = self.width / width
-            else:
-                # Image is taller than window
-                scale = self.height / height
-            
-            self.current_sprite = pyglet.sprite.Sprite(
-                texture,
-                x=0, y=0
-            )
-            self.current_sprite.scale = scale
-            
-            # Center the sprite
-            scaled_width = width * scale
-            scaled_height = height * scale
-            self.current_sprite.x = (self.width - scaled_width) / 2
-            self.current_sprite.y = (self.height - scaled_height) / 2
-            
-            logger.info(f"Image loaded successfully: {width}x{height}, scale={scale:.2f}, rotation={rotation}°")
+            logger.info(f"Image loaded successfully: {width}x{height}, rotation={rotation}°")
             
         except Exception as e:
             logger.error(f"Failed to load image: {e}")
+            raise
+
+    def load_rgba_frame(self, width: int, height: int, frame_rgba: bytes):
+        """Load a raw RGBA frame and render it fullscreen."""
+        try:
+            frame = np.frombuffer(frame_rgba, dtype=np.uint8)
+            frame = frame.reshape((height, width, 4))
+            frame = np.flipud(frame)
+
+            pyglet_image = pyglet.image.ImageData(
+                width,
+                height,
+                'RGBA',
+                frame.tobytes(),
+                pitch=-width * 4
+            )
+
+            texture = pyglet_image.get_texture()
+            self._set_texture(texture, width, height)
+        except Exception as e:
+            logger.error(f"Failed to load RGBA frame: {e}")
             raise
     
     def clear_image(self):
@@ -192,9 +394,22 @@ class ImageDisplayServer:
         self.config = config
         self.host = config.get('host', '0.0.0.0')
         self.port = config.get('port', 5555)
+        self.require_exact_resolution = bool(config.get('require_exact_resolution', True))
+        self.monitor_auto_detect = bool(config.get('monitor_auto_detect', True))
+
+        cache_dir = config.get('video_cache_dir')
+        if not cache_dir:
+            cache_dir = default_video_cache_dir()
+            logger.info("Using default video cache dir: %s", cache_dir)
         
         self.window: Optional[ImageDisplayWindow] = None
         self.server = None
+
+        self.video_registry = VideoRegistry(
+            cache_dir=cache_dir,
+            hwaccel=config.get('ffmpeg_hwaccel', 'auto'),
+            hw_decoder=config.get('ffmpeg_hw_decoder'),
+        )
         
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
@@ -240,6 +455,16 @@ class ImageDisplayServer:
         
         if cmd_type == 'DISPLAY_IMAGE':
             return await self.handle_display_image(command)
+        elif cmd_type == 'LOAD_VIDEO':
+            return await self.handle_load_video(command)
+        elif cmd_type == 'LOAD_VIDEOS_FROM_GCODE':
+            return await self.handle_load_videos_from_gcode(command)
+        elif cmd_type == 'SHOW_VIDEO_FRAME':
+            return await self.handle_show_video_frame(command)
+        elif cmd_type == 'UNLOAD_VIDEO':
+            return await self.handle_unload_video(command)
+        elif cmd_type == 'LIST_VIDEOS':
+            return await self.handle_list_videos()
         elif cmd_type == 'CLEAR':
             return await self.handle_clear()
         else:
@@ -268,7 +493,7 @@ class ImageDisplayServer:
                 rotated_size = (width, height)
 
             expected_size = (self.window.width, self.window.height)
-            if rotated_size != expected_size:
+            if self.require_exact_resolution and rotated_size != expected_size:
                 logger.error(
                     "Rejected image: %sx%s (rot=%s) != screen %sx%s",
                     width, height, rotation, expected_size[0], expected_size[1]
@@ -296,6 +521,102 @@ class ImageDisplayServer:
                 'status': 'error',
                 'message': str(e)
             }
+
+    async def handle_load_video(self, command: dict) -> dict:
+        try:
+            name = command.get('name')
+            path = command.get('path')
+            if not name:
+                return {'status': 'error', 'message': 'Missing name parameter'}
+            if not path:
+                return {'status': 'error', 'message': 'Missing path parameter'}
+
+            meta = await asyncio.to_thread(
+                self.video_registry.load_video,
+                str(name),
+                str(path),
+                command.get('hwaccel'),
+                command.get('hw_decoder'),
+            )
+            return {'status': 'success', 'video': meta}
+        except Exception as e:
+            logger.error(f"Error loading video: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_load_videos_from_gcode(self, command: dict) -> dict:
+        try:
+            gcode_path = command.get('gcode_path')
+            if not gcode_path:
+                return {'status': 'error', 'message': 'Missing gcode_path parameter'}
+
+            loaded = await asyncio.to_thread(
+                self.video_registry.load_videos_from_gcode,
+                str(gcode_path),
+            )
+            return {'status': 'success', 'loaded': loaded}
+        except Exception as e:
+            logger.error(f"Error loading videos from G-code: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_show_video_frame(self, command: dict) -> dict:
+        try:
+            name = command.get('name')
+            frame = command.get('frame')
+            if not name:
+                return {'status': 'error', 'message': 'Missing name parameter'}
+            if frame is None:
+                return {'status': 'error', 'message': 'Missing frame parameter'}
+
+            frame_index = int(frame)
+            width, height, rgba = await asyncio.to_thread(
+                self.video_registry.get_frame,
+                str(name),
+                frame_index,
+            )
+
+            expected_size = (self.window.width, self.window.height)
+            if self.require_exact_resolution and (width, height) != expected_size:
+                return {
+                    'status': 'error',
+                    'message': (
+                        f'Frame size {width}x{height} does not match screen '
+                        f'{expected_size[0]}x{expected_size[1]}'
+                    )
+                }
+
+            pyglet.clock.schedule_once(
+                lambda dt: self.window.load_rgba_frame(width, height, rgba),
+                0,
+            )
+            return {
+                'status': 'success',
+                'message': f'Displayed frame {frame_index} from {name}',
+                'frame': frame_index,
+                'name': name,
+            }
+        except Exception as e:
+            logger.error(f"Error showing video frame: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_unload_video(self, command: dict) -> dict:
+        try:
+            name = command.get('name')
+            if not name:
+                return {'status': 'error', 'message': 'Missing name parameter'}
+
+            unloaded = await asyncio.to_thread(self.video_registry.unload_video, str(name))
+            if unloaded:
+                return {'status': 'success', 'message': f'Unloaded {name}'}
+            return {'status': 'error', 'message': f'Video not loaded: {name}'}
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_list_videos(self) -> dict:
+        try:
+            videos = await asyncio.to_thread(self.video_registry.list_videos)
+            return {'status': 'success', 'videos': videos}
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
 
     def _resolve_image_path(self, image_path: str) -> str:
         if image_path.startswith(('http://', 'https://')):
@@ -349,7 +670,8 @@ class ImageDisplayServer:
             display,
             monitor_index=self.config.get('monitor_index'),
             monitor_size=self.config.get('monitor_size'),
-            monitor_position=self.config.get('monitor_position')
+            monitor_position=self.config.get('monitor_position'),
+            monitor_auto_detect=self.monitor_auto_detect,
         )
         self.window = ImageDisplayWindow(screen=screen)
         logger.info("Display window created")
@@ -416,6 +738,7 @@ def main():
     finally:
         if server.server:
             loop.call_soon_threadsafe(server.server.close)
+        server.video_registry.close()
         logger.info("Shutdown complete")
 
 
