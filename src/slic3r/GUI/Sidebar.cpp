@@ -68,6 +68,8 @@ using Slic3r::GUI::format_wxstr;
 namespace Slic3r {
 namespace GUI {
 
+static wxString make_filament_combo_tag(int extr_idx);
+
 class ObjectInfo : public wxStaticBoxSizer
 {
     std::string m_warning_icon_name{ "exclamation" };
@@ -236,6 +238,10 @@ void Sidebar::show_preset_comboboxes()
     for (size_t i = 4; i < 8; ++i)
         m_presets_sizer->Show(i, showSLA);
 
+    // Keep SLA material selector visible in FFF mode to support hybrid tool setups.
+    m_presets_sizer->Show(6, true);
+    m_presets_sizer->Show(7, true);
+
     m_frequently_changed_parameters->Show(!showSLA);
 
     m_scrolled_panel->GetParent()->Layout();
@@ -387,6 +393,10 @@ Sidebar::Sidebar(Plater *parent)
                 sizer_presets->Add(tmp_h_sizer, 0, wxBOTTOM, int(0.3 * wxGetApp().em_unit()));
             }
         } else {
+            auto *channel_tag = new wxStaticText(m_presets_panel, wxID_ANY, make_filament_combo_tag(0));
+            channel_tag->SetFont(wxGetApp().small_font());
+            combo_and_btn_sizer->Insert(0, channel_tag, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                                        int(0.35 * wxGetApp().em_unit()));
             sizer_filaments->Add(combo_and_btn_sizer, 0, wxEXPAND |
 #ifdef __WXGTK3__
                 wxRIGHT, margin_5);
@@ -394,6 +404,7 @@ Sidebar::Sidebar(Plater *parent)
                 wxBOTTOM, 1);
 #endif // __WXGTK3__
             (*combo)->set_extruder_idx(0);
+            m_filament_combo_tags.push_back(channel_tag);
             sizer_filaments->ShowItems(false);
             sizer_presets->Add(sizer_filaments, 1, wxEXPAND);
         }
@@ -588,15 +599,80 @@ Sidebar::Sidebar(Plater *parent)
 
 Sidebar::~Sidebar() {}
 
+static wxString make_filament_combo_tag(int extr_idx)
+{
+    const int display_idx = extr_idx + 1;
+    wxString tag = wxString::Format("Channel %d", display_idx);
+
+    const Preset &printer_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
+
+    double nozzle = 0.0;
+    if (const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(printer_preset.config.option("nozzle_diameter"))) {
+        if (extr_idx >= 0 && size_t(extr_idx) < nozzles->values.size())
+            nozzle = nozzles->values[size_t(extr_idx)];
+    }
+    if (nozzle > 0.0)
+        tag += wxString::Format(" %.1fmm", nozzle);
+
+    int sla_bucket_idx = 0;
+    bool is_sla_channel = false;
+    if (const auto *sla_channels = dynamic_cast<const ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"))) {
+        const size_t upto = std::min<size_t>(size_t(std::max(0, extr_idx)) + 1, sla_channels->values.size());
+        for (size_t i = 0; i < upto; ++i) {
+            if (sla_channels->values[i]) {
+                ++sla_bucket_idx;
+                if (int(i) == extr_idx)
+                    is_sla_channel = true;
+            }
+        }
+    }
+
+    if (is_sla_channel) {
+        tag += wxString::Format(" | SLA Bucket %d", sla_bucket_idx);
+
+        if (const auto *sla_video_names = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_names"))) {
+            if (extr_idx >= 0 && size_t(extr_idx) < sla_video_names->values.size()) {
+                wxString sla_name = from_u8(sla_video_names->values[size_t(extr_idx)]);
+                sla_name.Trim(true).Trim(false);
+                if (!sla_name.IsEmpty())
+                    tag += wxString::Format(" | %s", sla_name);
+            }
+        }
+    }
+    else {
+        tag += " | FFF";
+    }
+
+    if (nozzle > 0.0)
+        tag += wxString::Format(" | %.1fmm nozzle", nozzle);
+
+    return tag;
+}
+
+void Sidebar::refresh_filament_combo_tags()
+{
+    const size_t count = std::min(m_filament_combo_tags.size(), m_combos_filament.size());
+    for (size_t i = 0; i < count; ++i) {
+        if (m_filament_combo_tags[i] != nullptr)
+            m_filament_combo_tags[i]->SetLabel(make_filament_combo_tag(int(i)));
+    }
+}
+
 void Sidebar::init_filament_combo(PlaterPresetComboBox** combo, int extr_idx)
 {
     *combo = new PlaterPresetComboBox(m_presets_panel, Slic3r::Preset::TYPE_FILAMENT);
     (*combo)->set_extruder_idx(extr_idx);
 
+    auto *channel_tag = new wxStaticText(m_presets_panel, wxID_ANY, make_filament_combo_tag(extr_idx));
+    channel_tag->SetFont(wxGetApp().small_font());
+
     auto combo_and_btn_sizer = new wxBoxSizer(wxHORIZONTAL);
+    combo_and_btn_sizer->Add(channel_tag, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, int(0.35 * wxGetApp().em_unit()));
     combo_and_btn_sizer->Add(*combo, 1, wxEXPAND);
     combo_and_btn_sizer->Add((*combo)->edit_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT,
                             int(0.3*wxGetApp().em_unit()));
+
+    m_filament_combo_tags.push_back(channel_tag);
 
     this->m_filaments_sizer->Add(combo_and_btn_sizer, 1, wxEXPAND |
 #ifdef __WXGTK3__
@@ -614,6 +690,11 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
     while (m_combos_filament.size() > current_extruder_count) {
         const int last = m_combos_filament.size() - 1;
         sizer_filaments->Remove(last);
+        if (size_t(last) < m_filament_combo_tags.size()) {
+            if (m_filament_combo_tags[size_t(last)] != nullptr)
+                m_filament_combo_tags[size_t(last)]->Destroy();
+            m_filament_combo_tags.pop_back();
+        }
         (*m_combos_filament[last]).Destroy();
         m_combos_filament.pop_back();
     }
@@ -635,8 +716,8 @@ void Sidebar::update_all_preset_comboboxes()
         m_combo_print->update();
     else {
         m_combo_sla_print->update();
-        m_combo_sla_material->update();
     }
+    m_combo_sla_material->update();
     // Update the printer choosers, update the dirty flags.
     m_combo_printer->update();
     // Update the filament choosers to only contain the compatible presets, update the color preview,
@@ -660,8 +741,7 @@ void Sidebar::update_presets(Preset::Type preset_type)
     switch (preset_type) {
     case Preset::TYPE_FILAMENT:
     {
-        const size_t extruder_cnt = print_tech != ptFFF ? 1 :
-                                dynamic_cast<ConfigOptionFloats*>(preset_bundle.printers.get_edited_preset().config.option("nozzle_diameter"))->values.size();
+        const size_t extruder_cnt = static_cast<size_t>(wxGetApp().extruders_edited_cnt());
         const size_t filament_cnt = m_combos_filament.size() > extruder_cnt ? extruder_cnt : m_combos_filament.size();
 
         for (size_t i = 0; i < filament_cnt; i++)
@@ -685,6 +765,7 @@ void Sidebar::update_presets(Preset::Type preset_type)
     case Preset::TYPE_PRINTER:
     {
         update_all_preset_comboboxes();
+        refresh_filament_combo_tags();
 #if 1 // #ysFIXME_delete_after_test_of (PS 2.6.2) >> it looks like CallAfter() is no need [issue with disapearing of comboboxes are not reproducible]
         show_preset_comboboxes();
 #else
@@ -1291,6 +1372,7 @@ void Sidebar::set_extruders_count(size_t extruders_count)
 
     // remove unused choices if any
     remove_unused_filament_combos(extruders_count);
+    refresh_filament_combo_tags();
     
     Layout();
     m_scrolled_panel->Refresh();

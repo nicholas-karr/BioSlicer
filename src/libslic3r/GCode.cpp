@@ -49,24 +49,29 @@
 #include "Time.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <chrono>
+#include <cstdint>
+#include <cmath>
 #include <math.h>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/find.hpp>
+#include <boost/beast/core/detail/base64.hpp>
 #include <boost/foreach.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/process.hpp>
 
 #include <boost/nowide/iostream.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/cstdlib.hpp>
-
-#include <openssl/evp.h>
 
 #include "SVG.hpp"
 
@@ -101,11 +106,533 @@ using namespace std::literals::string_view_literals;
 
 namespace Slic3r {
 
+namespace {
+
+namespace process = boost::process;
+
+class Sha256
+{
+public:
+    Sha256()
+    {
+        reset();
+    }
+
+    void reset()
+    {
+        m_state = {
+            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+        };
+        m_bit_len = 0;
+        m_buffer_len = 0;
+    }
+
+    void update(const unsigned char *data, size_t len)
+    {
+        if (data == nullptr || len == 0)
+            return;
+
+        size_t offset = 0;
+        while (offset < len) {
+            const size_t take = std::min(len - offset, block_size - m_buffer_len);
+            std::memcpy(m_buffer.data() + m_buffer_len, data + offset, take);
+            m_buffer_len += take;
+            offset += take;
+
+            if (m_buffer_len == block_size) {
+                transform(m_buffer.data());
+                m_bit_len += 512;
+                m_buffer_len = 0;
+            }
+        }
+    }
+
+    std::array<unsigned char, 32> finalize()
+    {
+        m_bit_len += static_cast<uint64_t>(m_buffer_len) * 8;
+
+        m_buffer[m_buffer_len++] = 0x80;
+
+        if (m_buffer_len > 56) {
+            while (m_buffer_len < block_size)
+                m_buffer[m_buffer_len++] = 0;
+            transform(m_buffer.data());
+            m_buffer_len = 0;
+        }
+
+        while (m_buffer_len < 56)
+            m_buffer[m_buffer_len++] = 0;
+
+        for (int i = 7; i >= 0; --i)
+            m_buffer[m_buffer_len++] = static_cast<unsigned char>((m_bit_len >> (i * 8)) & 0xffu);
+
+        transform(m_buffer.data());
+
+        std::array<unsigned char, 32> out{};
+        for (size_t i = 0; i < m_state.size(); ++i) {
+            out[i * 4 + 0] = static_cast<unsigned char>((m_state[i] >> 24) & 0xffu);
+            out[i * 4 + 1] = static_cast<unsigned char>((m_state[i] >> 16) & 0xffu);
+            out[i * 4 + 2] = static_cast<unsigned char>((m_state[i] >> 8) & 0xffu);
+            out[i * 4 + 3] = static_cast<unsigned char>(m_state[i] & 0xffu);
+        }
+        return out;
+    }
+
+private:
+    static constexpr size_t block_size = 64;
+    std::array<uint32_t, 8> m_state{};
+    std::array<unsigned char, block_size> m_buffer{};
+    uint64_t m_bit_len = 0;
+    size_t m_buffer_len = 0;
+
+    static uint32_t rotr(uint32_t x, uint32_t n)
+    {
+        return (x >> n) | (x << (32 - n));
+    }
+
+    static uint32_t ch(uint32_t x, uint32_t y, uint32_t z)
+    {
+        return (x & y) ^ (~x & z);
+    }
+
+    static uint32_t maj(uint32_t x, uint32_t y, uint32_t z)
+    {
+        return (x & y) ^ (x & z) ^ (y & z);
+    }
+
+    static uint32_t big_sigma0(uint32_t x)
+    {
+        return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
+    }
+
+    static uint32_t big_sigma1(uint32_t x)
+    {
+        return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
+    }
+
+    static uint32_t small_sigma0(uint32_t x)
+    {
+        return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
+    }
+
+    static uint32_t small_sigma1(uint32_t x)
+    {
+        return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
+    }
+
+    void transform(const unsigned char block[block_size])
+    {
+        static constexpr uint32_t k[64] = {
+            0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+            0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+            0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+            0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+            0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+            0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+            0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+            0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+        };
+
+        uint32_t w[64] = {};
+        for (size_t i = 0; i < 16; ++i) {
+            const size_t j = i * 4;
+            w[i] = (uint32_t(block[j + 0]) << 24) |
+                   (uint32_t(block[j + 1]) << 16) |
+                   (uint32_t(block[j + 2]) << 8) |
+                   uint32_t(block[j + 3]);
+        }
+        for (size_t i = 16; i < 64; ++i)
+            w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16];
+
+        uint32_t a = m_state[0];
+        uint32_t b = m_state[1];
+        uint32_t c = m_state[2];
+        uint32_t d = m_state[3];
+        uint32_t e = m_state[4];
+        uint32_t f = m_state[5];
+        uint32_t g = m_state[6];
+        uint32_t h = m_state[7];
+
+        for (size_t i = 0; i < 64; ++i) {
+            const uint32_t t1 = h + big_sigma1(e) + ch(e, f, g) + k[i] + w[i];
+            const uint32_t t2 = big_sigma0(a) + maj(a, b, c);
+            h = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+        }
+
+        m_state[0] += a;
+        m_state[1] += b;
+        m_state[2] += c;
+        m_state[3] += d;
+        m_state[4] += e;
+        m_state[5] += f;
+        m_state[6] += g;
+        m_state[7] += h;
+    }
+};
+
+static std::string sha256_digest_to_hex(const std::array<unsigned char, 32> &digest)
+{
+    static const char *hex_chars = "0123456789abcdef";
+    std::string out(64, '0');
+    for (size_t i = 0; i < digest.size(); ++i) {
+        out[2 * i + 0] = hex_chars[(digest[i] >> 4) & 0x0f];
+        out[2 * i + 1] = hex_chars[digest[i] & 0x0f];
+    }
+    return out;
+}
+
+static void write_sla_synth_pgm_frame_or_throw(const boost::filesystem::path &frame_path, int width, int height, size_t frame_idx, unsigned int extruder_id)
+{
+    FilePtr file(boost::nowide::fopen(frame_path.string().c_str(), "wb"));
+    if (file.f == nullptr)
+        throw Slic3r::ExportError(format("Failed to create synthesized SLA frame: %1%", frame_path.string()));
+
+    if (::fprintf(file.f, "P5\n%d %d\n255\n", width, height) < 0)
+        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame header: %1%", frame_path.string()));
+
+    std::vector<unsigned char> pixels(size_t(width) * size_t(height), 0);
+    const int stripe_period = 64;
+    const int stripe_width  = 24;
+    const int phase         = int((frame_idx * 13u + size_t(extruder_id) * 29u) % size_t(stripe_period));
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int x_mod = (x + phase) % stripe_period;
+            unsigned char value = 0;
+            if (x_mod < stripe_width)
+                value = 255;
+            pixels[size_t(y) * size_t(width) + size_t(x)] = value;
+        }
+    }
+
+    if (!pixels.empty() && ::fwrite(pixels.data(), 1, pixels.size(), file.f) != pixels.size())
+        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame pixels: %1%", frame_path.string()));
+}
+
+static double mm_to_px_x(double x_mm, double bed_min_x, double bed_max_x, int width)
+{
+    const double span = std::max(1e-9, bed_max_x - bed_min_x);
+    return (x_mm - bed_min_x) * double(width - 1) / span;
+}
+
+static double mm_to_px_y(double y_mm, double bed_min_y, double bed_max_y, int height)
+{
+    const double span = std::max(1e-9, bed_max_y - bed_min_y);
+    return (bed_max_y - y_mm) * double(height - 1) / span;
+}
+
+static void write_sla_slice_pgm_frame_or_throw(
+    const boost::filesystem::path            &frame_path,
+    int                                       width,
+    int                                       height,
+    const ExPolygons                         &expolys,
+    const BoundingBoxf                       &bed_bbox)
+{
+    FilePtr file(boost::nowide::fopen(frame_path.string().c_str(), "wb"));
+    if (file.f == nullptr)
+        throw Slic3r::ExportError(format("Failed to create synthesized SLA frame: %1%", frame_path.string()));
+
+    if (::fprintf(file.f, "P5\n%d %d\n255\n", width, height) < 0)
+        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame header: %1%", frame_path.string()));
+
+    std::vector<unsigned char> pixels(size_t(width) * size_t(height), 0);
+
+    struct RingPx { std::vector<Vec2d> points; };
+    struct ExPolygonPx { std::vector<RingPx> rings; };
+
+    std::vector<ExPolygonPx> expolys_px;
+    expolys_px.reserve(expolys.size());
+
+    const double bed_min_x = bed_bbox.min.x();
+    const double bed_max_x = bed_bbox.max.x();
+    const double bed_min_y = bed_bbox.min.y();
+    const double bed_max_y = bed_bbox.max.y();
+
+    auto make_polygon_ring = [&](const Polygon &poly) -> RingPx {
+        RingPx ring;
+        if (poly.points.size() < 3)
+            return ring;
+        ring.points.reserve(poly.points.size());
+        for (const Point &p : poly.points) {
+            const double x_mm = unscale<double>(p.x());
+            const double y_mm = unscale<double>(p.y());
+            ring.points.emplace_back(
+                mm_to_px_x(x_mm, bed_min_x, bed_max_x, width),
+                mm_to_px_y(y_mm, bed_min_y, bed_max_y, height)
+            );
+        }
+        return ring;
+    };
+
+    for (const ExPolygon &expoly : expolys) {
+        ExPolygonPx ep;
+        {
+            RingPx contour = make_polygon_ring(expoly.contour);
+            if (!contour.points.empty())
+                ep.rings.emplace_back(std::move(contour));
+        }
+        for (const Polygon &hole : expoly.holes) {
+            RingPx hole_ring = make_polygon_ring(hole);
+            if (!hole_ring.points.empty())
+                ep.rings.emplace_back(std::move(hole_ring));
+        }
+        if (!ep.rings.empty())
+            expolys_px.emplace_back(std::move(ep));
+    }
+
+    std::vector<double> intersections;
+    for (int y = 0; y < height; ++y) {
+        const double yy = double(y) + 0.5;
+
+        for (const ExPolygonPx &ep : expolys_px) {
+            intersections.clear();
+
+            for (const RingPx &ring : ep.rings) {
+                const size_t n = ring.points.size();
+                for (size_t i = 0, j = n - 1; i < n; j = i++) {
+                    const Vec2d &a = ring.points[j];
+                    const Vec2d &b = ring.points[i];
+                    const double y1 = a.y();
+                    const double y2 = b.y();
+
+                    if ((y1 <= yy && yy < y2) || (y2 <= yy && yy < y1)) {
+                        const double t = (yy - y1) / (y2 - y1);
+                        const double xx = a.x() + t * (b.x() - a.x());
+                        intersections.emplace_back(xx);
+                    }
+                }
+            }
+
+            if (intersections.empty())
+                continue;
+
+            std::sort(intersections.begin(), intersections.end());
+            for (size_t i = 0; i + 1 < intersections.size(); i += 2) {
+                int x0 = int(std::ceil(intersections[i]));
+                int x1 = int(std::floor(intersections[i + 1]));
+                if (x1 < 0 || x0 >= width)
+                    continue;
+                x0 = std::max(0, x0);
+                x1 = std::min(width - 1, x1);
+                for (int x = x0; x <= x1; ++x)
+                    pixels[size_t(y) * size_t(width) + size_t(x)] = 255;
+            }
+        }
+    }
+
+    if (!pixels.empty() && ::fwrite(pixels.data(), 1, pixels.size(), file.f) != pixels.size())
+        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame pixels: %1%", frame_path.string()));
+}
+
+static std::vector<ExPolygons> collect_sla_slice_expolys_per_layer(const Print &print, unsigned int extruder_id)
+{
+    std::map<coord_t, ExPolygons> by_layer;
+
+    for (const PrintObject *object : print.objects()) {
+        const auto object_instances = object->instances();
+        if (object_instances.empty())
+            continue;
+
+        for (const Layer *layer : object->layers()) {
+            ExPolygons layer_expolys;
+
+            for (const LayerRegion *layer_region : layer->regions()) {
+                const unsigned int region_extruder = layer_region->region().extruder(frPerimeter);
+                if (region_extruder == 0 || region_extruder - 1 != extruder_id)
+                    continue;
+
+                for (const Surface &surface : layer_region->slices())
+                    layer_expolys.push_back(surface.expolygon);
+            }
+
+            if (layer_expolys.empty())
+                continue;
+
+            const coord_t layer_key = scale_(layer->print_z);
+            ExPolygons &dst = by_layer[layer_key];
+            for (const PrintInstance &instance : object_instances) {
+                for (const ExPolygon &src : layer_expolys) {
+                    ExPolygon shifted = src;
+                    shifted.translate(instance.shift);
+                    dst.emplace_back(std::move(shifted));
+                }
+            }
+        }
+    }
+
+    std::vector<ExPolygons> out;
+    out.reserve(by_layer.size());
+    for (auto &kv : by_layer)
+        out.emplace_back(std::move(kv.second));
+    return out;
+}
+
+static void encode_sla_video_with_ffmpeg_or_throw(
+    const boost::filesystem::path &frames_dir,
+    const boost::filesystem::path &output_path,
+    int fps,
+    bool lossless)
+{
+    const boost::filesystem::path ffmpeg_path = process::search_path("ffmpeg");
+    if (ffmpeg_path.empty())
+        throw Slic3r::ExportError("Failed to locate ffmpeg in PATH for native SLA video synthesis.");
+
+    std::vector<std::string> args{
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-framerate", std::to_string(std::max(1, fps)),
+        "-f", "image2",
+        "-i", (frames_dir / "frame_%06d.pgm").string()
+    };
+
+    args.insert(args.end(), {"-c:v", "libx265"});
+    if (lossless)
+        args.insert(args.end(), {"-x265-params", "lossless=1"});
+    else
+        args.insert(args.end(), {"-crf", "18", "-preset", "medium"});
+
+    args.insert(args.end(), {
+        "-an",
+        "-pix_fmt", "yuv420p",
+        output_path.string()
+    });
+
+    process::ipstream stderr_stream;
+    process::child child(ffmpeg_path, process::args(args), process::std_out > process::null, process::std_err > stderr_stream);
+
+    std::string stderr_text;
+    std::string line;
+    while (child.running() && std::getline(stderr_stream, line)) {
+        stderr_text += line;
+        stderr_text += "\n";
+    }
+    child.wait();
+
+    if (child.exit_code() != 0)
+        throw Slic3r::ExportError(format("Native SLA synthesis failed during ffmpeg encode (libx265): %1%", stderr_text));
+
+    if (!boost::filesystem::exists(output_path))
+        throw Slic3r::ExportError(format("Native SLA synthesis finished without output file: %1%", output_path.string()));
+}
+
+static void synthesize_sla_video_or_throw(
+    const boost::filesystem::path &output_path,
+    unsigned int extruder_id,
+    size_t frame_count,
+    int width,
+    int height,
+    int fps,
+    bool lossless,
+    const std::vector<ExPolygons> *layer_expolys,
+    const BoundingBoxf &bed_bbox)
+{
+    const size_t geometry_frame_count = (layer_expolys == nullptr) ? 0u : layer_expolys->size();
+    const size_t safe_frame_count = std::max<size_t>(geometry_frame_count, 1u);
+    if (width < 16 || height < 16)
+        throw Slic3r::ExportError("Native SLA synthesis requires frame dimensions >= 16 px.");
+
+    if (!output_path.parent_path().empty())
+        boost::filesystem::create_directories(output_path.parent_path());
+
+    const boost::filesystem::path temp_root = boost::filesystem::temp_directory_path();
+    const boost::filesystem::path frames_dir = temp_root / boost::filesystem::unique_path("bioslicer_sla_frames_%%%%-%%%%-%%%%");
+    boost::filesystem::create_directories(frames_dir);
+
+    try {
+        for (size_t frame_idx = 0; frame_idx < safe_frame_count; ++frame_idx) {
+            const boost::filesystem::path frame_path = frames_dir / format("frame_%1$06d.pgm", int(frame_idx));
+            if (layer_expolys != nullptr && !layer_expolys->empty()) {
+                const size_t src_idx = std::min(
+                    (frame_idx * layer_expolys->size()) / safe_frame_count,
+                    layer_expolys->size() - 1
+                );
+                write_sla_slice_pgm_frame_or_throw(frame_path, width, height, (*layer_expolys)[src_idx], bed_bbox);
+            } else {
+                write_sla_synth_pgm_frame_or_throw(frame_path, width, height, frame_idx, extruder_id);
+            }
+        }
+
+        encode_sla_video_with_ffmpeg_or_throw(frames_dir, output_path, fps, lossless);
+    } catch (...) {
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(frames_dir, ec);
+        throw;
+    }
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(frames_dir, ec);
+}
+
+} // namespace
+
 // Only add a newline in case the current G-code does not end with a newline.
     static inline void check_add_eol(std::string& gcode)
     {
         if (!gcode.empty() && gcode.back() != '\n')
             gcode += '\n';
+    }
+
+    static std::string sanitize_sla_video_name(std::string name, unsigned int extruder_id)
+    {
+        boost::trim(name);
+        if (name.empty())
+            name = format("sla_t%1%", extruder_id);
+
+        for (char &c : name)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '.')
+                c = '_';
+
+        return name;
+    }
+
+    static std::string encode_base64(const unsigned char *data, size_t size)
+    {
+        std::string encoded;
+        encoded.resize(boost::beast::detail::base64::encoded_size(size));
+        encoded.resize(boost::beast::detail::base64::encode(encoded.data(), data, size));
+        return encoded;
+    }
+
+    static std::vector<unsigned char> read_binary_file_or_throw(const std::string &path)
+    {
+        FilePtr file(boost::nowide::fopen(path.c_str(), "rb"));
+        if (file.f == nullptr)
+            throw Slic3r::ExportError(format("Failed to open SLA video file: %1%", path));
+
+        if (::fseek(file.f, 0, SEEK_END) != 0)
+            throw Slic3r::ExportError(format("Failed to seek SLA video file: %1%", path));
+
+        const long file_size = ::ftell(file.f);
+        if (file_size < 0)
+            throw Slic3r::ExportError(format("Failed to read SLA video file size: %1%", path));
+
+        if (::fseek(file.f, 0, SEEK_SET) != 0)
+            throw Slic3r::ExportError(format("Failed to rewind SLA video file: %1%", path));
+
+        const size_t payload_size = static_cast<size_t>(file_size);
+        std::vector<unsigned char> video_buffer;
+        video_buffer.resize(payload_size);
+        if (!video_buffer.empty() && ::fread(video_buffer.data(), 1, video_buffer.size(), file.f) != video_buffer.size())
+            throw Slic3r::ExportError(format("Failed to read SLA video file: %1%", path));
+
+        return video_buffer;
+    }
+
+    static std::string sha256_hex(const std::vector<unsigned char> &data)
+    {
+        Sha256 sha;
+        if (! data.empty())
+            sha.update(data.data(), data.size());
+        return sha256_digest_to_hex(sha.finalize());
     }
 
     // Return true if tch_prefix is found in custom_gcode
@@ -719,46 +1246,19 @@ namespace DoExport {
             if (line2.rfind(checksum_prefix, 0) != 0 || line2.size() != checksum_prefix.size() + 64)
                 throw Slic3r::RuntimeError("Invalid checksum line format.");
 
-            EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-            if (! ctx)
-                throw Slic3r::RuntimeError("Failed to initialize SHA256 context.");
-
-            if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-                EVP_MD_CTX_free(ctx);
-                throw Slic3r::RuntimeError("Failed to initialize SHA256 digest.");
-            }
+            Sha256 sha;
 
             std::vector<unsigned char> buffer(64 * 1024);
             size_t n = 0;
             while ((n = ::fread(buffer.data(), 1, buffer.size(), file)) > 0) {
-                if (EVP_DigestUpdate(ctx, buffer.data(), n) != 1) {
-                    EVP_MD_CTX_free(ctx);
-                    throw Slic3r::RuntimeError("Failed to update SHA256 digest.");
-                }
+                sha.update(buffer.data(), n);
             }
 
             if (::ferror(file)) {
-                EVP_MD_CTX_free(ctx);
                 throw Slic3r::RuntimeError("Failed to read G-code payload for checksum.");
             }
 
-            unsigned char digest[EVP_MAX_MD_SIZE];
-            unsigned int digest_len = 0;
-            if (EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1) {
-                EVP_MD_CTX_free(ctx);
-                throw Slic3r::RuntimeError("Failed to finalize SHA256 digest.");
-            }
-            EVP_MD_CTX_free(ctx);
-
-            if (digest_len != 32)
-                throw Slic3r::RuntimeError("Unexpected SHA256 digest length.");
-
-            static const char *hex_chars = "0123456789abcdef";
-            std::string checksum_hex(64, '0');
-            for (unsigned int i = 0; i < digest_len; ++ i) {
-                checksum_hex[2 * i + 0] = hex_chars[(digest[i] >> 4) & 0x0f];
-                checksum_hex[2 * i + 1] = hex_chars[digest[i] & 0x0f];
-            }
+            const std::string checksum_hex = sha256_digest_to_hex(sha.finalize());
 
             const long checksum_hex_offset = line2_start + long(checksum_prefix.size());
             if (::fseek(file, checksum_hex_offset, SEEK_SET) != 0)
@@ -1126,6 +1626,31 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         this->m_avoid_crossing_curled_overhangs.init_bed_shape(get_bed_shape(print.config()));
     }
 
+    const size_t sla_video_extruder_count = std::max({
+        m_config.nozzle_diameter.values.size(),
+        m_config.sla_material_extruder.values.size(),
+        m_config.sla_material_video_names.values.size(),
+        m_config.sla_material_video_paths.values.size(),
+        m_config.sla_material_video_embed.values.size(),
+        m_config.sla_material_video_synthesize.values.size()
+    });
+
+    bool sla_video_emission_requested = false;
+    for (size_t extruder_id = 0; extruder_id < sla_video_extruder_count; ++extruder_id) {
+        if (!m_config.sla_material_extruder.get_at(extruder_id))
+            continue;
+
+        const bool synthesize_video = m_config.sla_material_video_synthesize.get_at(extruder_id);
+        const std::string video_path = boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id));
+        if (synthesize_video || !video_path.empty()) {
+            sla_video_emission_requested = true;
+            break;
+        }
+    }
+
+    if (export_to_binary_gcode && sla_video_emission_requested)
+        throw Slic3r::ExportError("Binary G-code export does not support SLA material video emission.");
+
     if (!export_to_binary_gcode) {
         // Write information on the generator.
         file.write_format("; %s\n", Slic3r::header_slic3r_generated().c_str());
@@ -1149,6 +1674,93 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             GCodeThumbnails::export_thumbnails_to_file(thumbnail_cb, thumbnails,
                 [&file](const char* sz) { file.write(sz); },
                 [&print]() { print.throw_if_canceled(); });
+
+        // Emit SLA material videos either as base64 payload comments or as external references.
+        static constexpr const size_t max_row_length = 78;
+        std::set<std::string> emitted_video_names;
+
+        for (size_t extruder_id = 0; extruder_id < sla_video_extruder_count; ++extruder_id) {
+            if (!m_config.sla_material_extruder.get_at(extruder_id))
+                continue;
+
+            const bool embed_video = m_config.sla_material_video_embed.get_at(extruder_id);
+            const bool synthesize_video = m_config.sla_material_video_synthesize.get_at(extruder_id);
+            std::string video_path = boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id));
+            bool synthesized_to_temp = false;
+
+            std::string video_name = sanitize_sla_video_name(m_config.sla_material_video_names.get_at(extruder_id), unsigned(extruder_id));
+
+            if (synthesize_video) {
+                const std::vector<ExPolygons> layer_expolys = collect_sla_slice_expolys_per_layer(print, unsigned(extruder_id));
+                BoundingBoxf bed_bbox(m_config.bed_shape.values);
+                if (!bed_bbox.defined || bed_bbox.size().x() <= 0. || bed_bbox.size().y() <= 0.) {
+                    bed_bbox.min = Vec2d(0., 0.);
+                    bed_bbox.max = Vec2d(250., 250.);
+                    bed_bbox.defined = true;
+                }
+
+                if (video_path.empty()) {
+                    if (!embed_video) {
+                        throw Slic3r::ExportError(format(
+                            "SLA native synthesis for extruder %1% requires sla_material_video_paths when embedding is disabled.",
+                            extruder_id));
+                    }
+                    const boost::filesystem::path temp_out =
+                        boost::filesystem::temp_directory_path() /
+                        format("bioslicer_%1%_t%2%_native.mkv", video_name, extruder_id);
+                    video_path = temp_out.string();
+                    synthesized_to_temp = true;
+                }
+
+                synthesize_sla_video_or_throw(
+                    boost::filesystem::path(video_path),
+                    unsigned(extruder_id),
+                    size_t(std::max(1u, m_layer_count)),
+                    m_config.sla_material_video_synth_width.value,
+                    m_config.sla_material_video_synth_height.value,
+                    m_config.sla_material_video_synth_fps.value,
+                    m_config.sla_material_video_synth_lossless.value,
+                    &layer_expolys,
+                    bed_bbox);
+            }
+
+            if (video_path.empty())
+                continue;
+
+            if (!emitted_video_names.insert(video_name).second)
+                video_name = format("%1%_t%2%", video_name, extruder_id);
+
+            file.write_format("; bioslicer_sla_material_map extruder=%u name=%s embedded=%d\n",
+                unsigned(extruder_id), video_name.c_str(), embed_video ? 1 : 0);
+
+            if (embed_video) {
+                std::vector<unsigned char> video_data = read_binary_file_or_throw(video_path);
+                std::string encoded = encode_base64(video_data.data(), video_data.size());
+                std::string digest = sha256_hex(video_data);
+
+                file.write_format("; bioslicer_sla_video begin name=%s extruder=%u bytes=%zu sha256=%s\n",
+                    video_name.c_str(), unsigned(extruder_id), video_data.size(), digest.c_str());
+
+                for (size_t offset = 0; offset < encoded.size(); offset += max_row_length) {
+                    const std::string chunk = encoded.substr(offset, max_row_length);
+                    file.write_format("; bioslicer_sla_video %s\n", chunk.c_str());
+                    print.throw_if_canceled();
+                }
+
+                file.write_format("; bioslicer_sla_video end name=%s\n", video_name.c_str());
+
+                if (synthesized_to_temp) {
+                    boost::system::error_code ec;
+                    boost::filesystem::remove(boost::filesystem::path(video_path), ec);
+                }
+            } else {
+                file.write_format("; bioslicer_sla_video ref name=%s extruder=%u path=%s\n",
+                    video_name.c_str(), unsigned(extruder_id), video_path.c_str());
+            }
+        }
+
+        if (!emitted_video_names.empty())
+            file.write("\n");
     }
 
     // Write notes (content of the Print Settings tab -> Notes)
@@ -4051,6 +4663,15 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
 
     // Process the custom toolchange_gcode. If it is empty, insert just a Tn command.
     if (!toolchange_gcode.empty()) {
+        const bool is_sla_material = m_config.sla_material_extruder.get_at(extruder_id);
+        const std::string sla_video_name = is_sla_material ?
+            sanitize_sla_video_name(m_config.sla_material_video_names.get_at(extruder_id), extruder_id) :
+            std::string();
+        const std::string sla_video_path = is_sla_material ?
+            boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id)) :
+            std::string();
+        const int sla_video_embedded = (is_sla_material && m_config.sla_material_video_embed.get_at(extruder_id)) ? 1 : 0;
+
         DynamicConfig config;
         config.set_key_value("previous_extruder", new ConfigOptionInt((int)(m_writer.extruder() != nullptr ? m_writer.extruder()->id() : -1 )));
         config.set_key_value("next_extruder",     new ConfigOptionInt((int)extruder_id));
@@ -4058,6 +4679,10 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
         config.set_key_value("layer_z",           new ConfigOptionFloat(print_z));
         config.set_key_value("toolchange_z",      new ConfigOptionFloat(print_z));
         config.set_key_value("max_layer_z",       new ConfigOptionFloat(m_max_layer_z));
+        config.set_key_value("sla_material_id",   new ConfigOptionString(sla_video_name));
+        config.set_key_value("sla_video_name",    new ConfigOptionString(sla_video_name));
+        config.set_key_value("sla_video_path",    new ConfigOptionString(sla_video_path));
+        config.set_key_value("sla_video_embedded", new ConfigOptionInt(sla_video_embedded));
         toolchange_gcode_parsed = placeholder_parser_process("toolchange_gcode", toolchange_gcode, extruder_id, &config);
         gcode += toolchange_gcode_parsed;
         check_add_eol(gcode);

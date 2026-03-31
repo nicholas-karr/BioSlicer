@@ -204,7 +204,9 @@ void PresetUpdater::priv::update_index_db()
 // Pull relevant preferences from AppConfig
 void PresetUpdater::priv::set_download_prefs(const AppConfig *app_config)
 {
-	enabled_config_update = app_config->get_bool("preset_update") && !app_config->legacy_datadir();
+	(void)app_config;
+	// BioSlicer keeps vendor bundles local so custom profile edits are not replaced by remote INI downloads.
+	enabled_config_update = false;
 }
 
 // Remove leftover paritally downloaded files, if any.

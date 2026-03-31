@@ -34,5 +34,20 @@ if (SLIC3R_GUI)
     add_subdirectory(slic3rutils)
 endif()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if (Python3_Interpreter_FOUND)
+    add_test(
+        NAME python_sla_video_runtime_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_SOURCE_DIR}/scripts/tests -p test_*.py
+    )
+    set_tests_properties(
+        python_sla_video_runtime_tests
+        PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+else()
+    message(WARNING "Python3 interpreter not found; python_sla_video_runtime_tests will be skipped.")
+endif()
+
 
 # add_subdirectory(example)

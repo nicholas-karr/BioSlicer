@@ -24,6 +24,7 @@
 
 #include <cstddef>
 #include <algorithm>
+#include <array>
 #include <nanosvgrast.h>
 #include <numeric>
 #include <vector>
@@ -68,6 +69,7 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Color.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -7064,13 +7066,32 @@ std::vector<std::string> Plater::get_extruder_color_strings_from_plater_config(c
             return extruder_colors;
 
         extruder_colors = (config->option<ConfigOptionStrings>("extruder_colour"))->values;
-        if (!wxGetApp().plater())
-            return extruder_colors;
+        const size_t extruders_cnt = size_t(std::max(0, wxGetApp().extruders_edited_cnt()));
+        extruder_colors.resize(extruders_cnt);
 
-        const std::vector<std::string>& filament_colours = (p->config->option<ConfigOptionStrings>("filament_colour"))->values;
-        for (size_t i = 0; i < extruder_colors.size(); ++i)
-            if (extruder_colors[i] == "" && i < filament_colours.size())
+        static const std::array<const char *, 8> default_tool_colors = {
+            "#FFB347", "#A0A0A0", "#5BC0EB", "#FDE74C",
+            "#9BC53D", "#E55934", "#FA7921", "#6A4C93"
+        };
+
+        auto fallback_color = [](size_t idx) {
+            return std::string(default_tool_colors[idx % default_tool_colors.size()]);
+        };
+
+        std::vector<std::string> filament_colours;
+        if (wxGetApp().plater() && p->config->has("filament_colour"))
+            filament_colours = (p->config->option<ConfigOptionStrings>("filament_colour"))->values;
+
+        for (size_t i = 0; i < extruder_colors.size(); ++i) {
+            if (!Slic3r::can_decode_color(extruder_colors[i]))
+                extruder_colors[i].clear();
+
+            if (extruder_colors[i].empty() && i < filament_colours.size() && Slic3r::can_decode_color(filament_colours[i]))
                 extruder_colors[i] = filament_colours[i];
+
+            if (extruder_colors[i].empty())
+                extruder_colors[i] = fallback_color(i);
+        }
 
         return extruder_colors;
     }

@@ -2981,6 +2981,26 @@ void TabPrinter::build_fff()
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
 
+        optgroup = page->new_optgroup(L("SLA material video streaming"));
+        optgroup->append_single_option_line("sla_material_extruder");
+
+        option = optgroup->get_option("sla_material_video_names");
+        option.opt.full_width = true;
+        option.opt.height = 3;
+        optgroup->append_single_option_line(option);
+
+        option = optgroup->get_option("sla_material_video_paths");
+        option.opt.full_width = true;
+        option.opt.height = 3;
+        optgroup->append_single_option_line(option);
+
+        optgroup->append_single_option_line("sla_material_video_embed");
+        optgroup->append_single_option_line("sla_material_video_synthesize");
+        optgroup->append_single_option_line("sla_material_video_synth_width");
+        optgroup->append_single_option_line("sla_material_video_synth_height");
+        optgroup->append_single_option_line("sla_material_video_synth_fps");
+        optgroup->append_single_option_line("sla_material_video_synth_lossless");
+
         optgroup = page->new_optgroup(L("Custom parameters"), 0);
         option = optgroup->get_option("custom_parameters_printer");
         option.opt.is_code = true;

@@ -624,9 +624,6 @@ void ObjectList::update_extruder_values_for_items(const size_t max_extruder)
 
 void ObjectList::update_objects_list_extruder_column(size_t extruders_count)
 {
-    if (printer_technology() == ptSLA)
-        extruders_count = 1;
-
     m_prevent_update_extruder_in_config = true;
 
     if (m_objects && extruders_count > 1)

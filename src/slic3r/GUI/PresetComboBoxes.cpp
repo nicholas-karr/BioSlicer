@@ -5,6 +5,7 @@
 ///|/
 #include "PresetComboBoxes.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 #include <string>
@@ -269,6 +270,19 @@ void PresetComboBox::update(std::string select_preset_name)
 
     const ExtruderFilaments* extruder_filaments = m_preset_bundle->extruders_filaments.empty() ? nullptr : &m_preset_bundle->extruders_filaments[m_extruder_idx];
 
+    bool hybrid_sla_material_mode = false;
+    if (m_type == Preset::TYPE_SLA_MATERIAL) {
+        const Preset& printer_preset = m_preset_bundle->printers.get_edited_preset();
+        if (printer_preset.printer_technology() == ptFFF) {
+            if (const auto* sla_material_extruder = dynamic_cast<const ConfigOptionBools*>(printer_preset.config.option("sla_material_extruder"))) {
+                hybrid_sla_material_mode = std::any_of(
+                    sla_material_extruder->values.begin(),
+                    sla_material_extruder->values.end(),
+                    [](bool enabled) { return enabled; });
+            }
+        }
+    }
+
     const std::deque<Preset>& presets = m_collection->get_presets();
 
     struct PresetData {
@@ -291,7 +305,10 @@ void PresetComboBox::update(std::string select_preset_name)
     for (size_t i = presets.front().is_visible ? 0 : m_collection->num_default_presets(); i < presets.size(); ++i)
     {
         const Preset& preset = presets[i];
-        const bool is_compatible = m_type == Preset::TYPE_FILAMENT && extruder_filaments ? extruder_filaments->filament(i).is_compatible : preset.is_compatible;
+        const bool is_compatible =
+            (m_type == Preset::TYPE_FILAMENT && extruder_filaments) ? extruder_filaments->filament(i).is_compatible :
+            (m_type == Preset::TYPE_SLA_MATERIAL && hybrid_sla_material_mode) ? true :
+            preset.is_compatible;
 
         if (!m_show_all && (!preset.is_visible || !is_compatible))
             continue;

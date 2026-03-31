@@ -84,6 +84,8 @@
 namespace Slic3r {
 namespace GUI {
 
+static constexpr bool skip_initial_optional_pages = true;
+
 using Config::Snapshot;
 using Config::SnapshotDB;
 
@@ -1497,7 +1499,7 @@ PageCustom::PageCustom(ConfigWizard *parent)
 PageUpdate::PageUpdate(ConfigWizard *parent)
     : ConfigWizardPage(parent, _L("Automatic updates"), _L("Updates"))
     , version_check(true)
-    , preset_update(true)
+    , preset_update(false)
 {
     const AppConfig *app_config = wxGetApp().app_config;
     auto boldfont = wxGetApp().bold_font();
@@ -2570,8 +2572,11 @@ void ConfigWizard::priv::load_pages()
 
     index->clear();
 
-    index->add_page(page_welcome);
-    index->add_page(page_login);
+    if (!skip_initial_optional_pages) {
+        index->add_page(page_welcome);
+        if (page_login)
+            index->add_page(page_login);
+    }
     index->add_page(page_update_manager);
 
     if (is_config_from_archive) {
@@ -2804,7 +2809,8 @@ void ConfigWizard::priv::set_start_page(ConfigWizard::StartPage start_page)
             btn_finish->SetFocus();
             break;
         default:
-            index->go_to(page_welcome);
+            index->go_to(skip_initial_optional_pages ? static_cast<ConfigWizardPage*>(page_update_manager)
+                                                     : static_cast<ConfigWizardPage*>(page_welcome));
             btn_next->SetFocus();
             break;
     }
@@ -3986,7 +3992,8 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
     wxGetApp().SetWindowVariantForButton(p->btn_cancel);
 
     p->add_page(p->page_welcome = new PageWelcome(this));
-    p->add_page(p->page_login = new ConfigWizardWebViewPage(this));
+    if (!skip_initial_optional_pages)
+        p->add_page(p->page_login = new ConfigWizardWebViewPage(this));
     p->add_page(p->page_update_manager = new PageUpdateManager(this));
 
     // other pages will be loaded later after confirm repositories selection

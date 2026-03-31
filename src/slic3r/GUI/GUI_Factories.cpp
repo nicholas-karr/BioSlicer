@@ -21,6 +21,7 @@
 #include "Gizmos/GLGizmoEmboss.hpp"
 #include "Gizmos/GLGizmoSVG.hpp"
 
+#include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #ifdef __APPLE__
@@ -68,6 +69,46 @@ static PrinterTechnology printer_technology()
 static int extruders_count()
 {
     return wxGetApp().extruders_edited_cnt();
+}
+
+static std::vector<int> sla_bucket_indices()
+{
+    const int extruders_cnt = extruders_count();
+    std::vector<int> bucket_indices(size_t(std::max(0, extruders_cnt)), 0);
+
+    const Preset &printer_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
+    if (printer_preset.printer_technology() != ptFFF)
+        return bucket_indices;
+
+    const auto *sla_material_extruder = dynamic_cast<const ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"));
+    if (sla_material_extruder == nullptr)
+        return bucket_indices;
+
+    int bucket_index = 0;
+    const size_t count = std::min(bucket_indices.size(), sla_material_extruder->values.size());
+    for (size_t i = 0; i < count; ++i) {
+        if (sla_material_extruder->values[i])
+            bucket_indices[i] = ++bucket_index;
+    }
+
+    return bucket_indices;
+}
+
+static std::vector<double> nozzle_diameters()
+{
+    const int extruders_cnt = extruders_count();
+    std::vector<double> values(size_t(std::max(0, extruders_cnt)), 0.0);
+
+    const Preset &printer_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
+    const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(printer_preset.config.option("nozzle_diameter"));
+    if (nozzles == nullptr)
+        return values;
+
+    const size_t count = std::min(values.size(), nozzles->values.size());
+    for (size_t i = 0; i < count; ++i)
+        values[i] = nozzles->values[i];
+
+    return values;
 }
 
 static bool is_improper_category(const std::string& category, const int extruders_cnt, const bool is_object_settings = true)
@@ -941,6 +982,8 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
     }
 
     std::vector<wxBitmapBundle*> icons = get_extruder_color_icons(true);
+    const std::vector<int> bucket_indices = sla_bucket_indices();
+    const std::vector<double> nozzles = nozzle_diameters();
     wxMenu* extruder_selection_menu = new wxMenu();
     const wxString& name = sels.Count() == 1 ? names[0] : names[1];
 
@@ -955,11 +998,24 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
         bool is_active_extruder = i == initial_extruder;
         int icon_idx = i == 0 ? 0 : i - 1;
 
-        const wxString& item_name = (i == 0 ? _L("Default") : wxString::Format(_L("Extruder %d"), i)) +
-            (is_active_extruder ? " (" + _L("active") + ")" : "");
+        wxString item_name = i == 0 ? _L("Default") : wxString::Format(_L("Extruder %d"), i);
+        if (i > 0) {
+            const size_t extruder_idx = size_t(i - 1);
+            const double nozzle = extruder_idx < nozzles.size() ? nozzles[extruder_idx] : 0.0;
+            if (nozzle > 0.0)
+                item_name += wxString::Format(" (%.1fmm)", nozzle);
+
+            if (extruder_idx < bucket_indices.size() && bucket_indices[extruder_idx] > 0)
+                item_name += wxString::Format(" [SLA %s %d]", _L("Bucket"), bucket_indices[extruder_idx]);
+            else
+                item_name += " [FFF]";
+        }
+        item_name += is_active_extruder ? " (" + _L("active") + ")" : "";
+
+        wxBitmapBundle* icon = (icon_idx >= 0 && size_t(icon_idx) < icons.size()) ? icons[size_t(icon_idx)] : nullptr;
 
         append_menu_item(extruder_selection_menu, wxID_ANY, item_name, "",
-            [i](wxCommandEvent&) { obj_list()->set_extruder_for_selected_items(i); }, icons[icon_idx], menu,
+            [i](wxCommandEvent&) { obj_list()->set_extruder_for_selected_items(i); }, icon, menu,
             [is_active_extruder]() { return !is_active_extruder; }, m_parent);
 
     }

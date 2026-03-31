@@ -1434,17 +1434,9 @@ bool GUI_App::on_init_inner()
         bool ssl_accept = app_config->get("tls_cert_store_accepted") == "yes" && ssl_cert_store == Http::tls_system_cert_store();
 
         if (!msg.empty() && !ssl_accept) {
-            RichMessageDialog
-                dlg(nullptr,
-                    wxString::Format(_L("%s\nDo you want to continue?"), msg),
-                    "PrusaSlicer", wxICON_QUESTION | wxYES_NO);
-            dlg.ShowCheckBox(_L("Remember my choice"));
-            if (dlg.ShowModal() != wxID_YES) return false;
-
-            app_config->set("tls_cert_store_accepted",
-                dlg.IsCheckBoxChecked() ? "yes" : "no");
-            app_config->set("tls_accepted_cert_store_location",
-                dlg.IsCheckBoxChecked() ? Http::tls_system_cert_store() : "");
+            // Skip the startup prompt and persist acceptance for the current detected store.
+            app_config->set("tls_cert_store_accepted", "yes");
+            app_config->set("tls_accepted_cert_store_location", Http::tls_system_cert_store());
         }
     }
 
@@ -3301,16 +3293,14 @@ Downloader* GUI_App::downloader()
 int GUI_App::extruders_cnt() const
 {
     const Preset& preset = preset_bundle->printers.get_selected_preset();
-    return preset.printer_technology() == ptSLA ? 1 :
-           preset.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+    return preset.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 }
 
 // extruders count from edited printer preset
 int GUI_App::extruders_edited_cnt() const
 {
     const Preset& preset = preset_bundle->printers.get_edited_preset();
-    return preset.printer_technology() == ptSLA ? 1 :
-           preset.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+    return preset.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 }
 
 wxString GUI_App::current_language_code_safe() const

@@ -113,6 +113,13 @@ static constexpr const char* COMPONENT_TAG = "component";
 static constexpr const char* BUILD_TAG = "build";
 static constexpr const char* ITEM_TAG = "item";
 static constexpr const char* METADATA_TAG = "metadata";
+static constexpr const char* VOLUMEDATA_TAG = "volumedata";
+static constexpr const char* COMPOSITE_TAG = "composite";
+static constexpr const char* MATERIALMAPPING_TAG = "materialmapping";
+static constexpr const char* COLOR_TAG = "color";
+static constexpr const char* PROPERTY_TAG = "property";
+static constexpr const char* FUNCTIONFROMIMAGE3D_TAG = "functionfromimage3d";
+static constexpr const char* IMAGE3D_TAG = "image3d";
 
 static constexpr const char* CONFIG_TAG = "config";
 static constexpr const char* VOLUME_TAG = "volume";
@@ -132,6 +139,13 @@ static constexpr const char* OBJECTID_ATTR = "objectid";
 static constexpr const char* TRANSFORM_ATTR = "transform";
 static constexpr const char* PRINTABLE_ATTR = "printable";
 static constexpr const char* INSTANCESCOUNT_ATTR = "instances_count";
+static constexpr const char* VOLUMEID_ATTR = "volumeid";
+static constexpr const char* FUNCTIONID_ATTR = "functionid";
+static constexpr const char* CHANNEL_ATTR = "channel";
+static constexpr const char* BASEMATERIALID_ATTR = "basematerialid";
+static constexpr const char* REQUIRED_ATTR = "required";
+static constexpr const char* DISPLAYNAME_ATTR = "displayname";
+static constexpr const char* IMAGE3DID_ATTR = "image3did";
 static constexpr const char* CUSTOM_SUPPORTS_ATTR = "slic3rpe:custom_supports";
 static constexpr const char* CUSTOM_SEAM_ATTR = "slic3rpe:custom_seam";
 static constexpr const char* MM_SEGMENTATION_ATTR = "slic3rpe:mmu_segmentation";
@@ -257,6 +271,41 @@ int get_attribute_value_int(const char** attributes, unsigned int attributes_siz
         boost::spirit::qi::parse(text, text + strlen(text), boost::spirit::qi::int_, value);
     return value;
 }
+
+const char* get_local_name(const char* name)
+{
+    if (name == nullptr)
+        return "";
+    const char* colon = ::strchr(name, ':');
+    return colon == nullptr ? name : (colon + 1);
+}
+
+    const char* get_attribute_value_charptr_local_name(const char** attributes, unsigned int attributes_size, const char* attribute_local_key)
+    {
+        if ((attributes == nullptr) || (attributes_size == 0) || (attributes_size % 2 != 0) || (attribute_local_key == nullptr))
+            return nullptr;
+
+        for (unsigned int a = 0; a < attributes_size; a += 2) {
+            if (::strcmp(get_local_name(attributes[a]), attribute_local_key) == 0)
+                return attributes[a + 1];
+        }
+
+        return nullptr;
+    }
+
+    std::string get_attribute_value_string_local_name(const char** attributes, unsigned int attributes_size, const char* attribute_local_key)
+    {
+        const char* text = get_attribute_value_charptr_local_name(attributes, attributes_size, attribute_local_key);
+        return (text != nullptr) ? text : "";
+    }
+
+    int get_attribute_value_int_local_name(const char** attributes, unsigned int attributes_size, const char* attribute_local_key)
+    {
+        int value = 0;
+        if (const char *text = get_attribute_value_charptr_local_name(attributes, attributes_size, attribute_local_key); text != nullptr)
+            boost::spirit::qi::parse(text, text + strlen(text), boost::spirit::qi::int_, value);
+        return value;
+    }
 
 bool get_attribute_value_bool(const char** attributes, unsigned int attributes_size, const char* attribute_key)
 {
@@ -400,6 +449,7 @@ namespace Slic3r {
             Geometry geometry;
             ModelObject* object;
             ComponentsList components;
+            int volume_data_id;
 
             CurrentObject() { reset(); }
 
@@ -409,6 +459,7 @@ namespace Slic3r {
                 geometry.reset();
                 object = nullptr;
                 components.clear();
+                volume_data_id = -1;
             }
         };
 
@@ -480,9 +531,57 @@ namespace Slic3r {
             std::vector<Connector>  connectors;
         };
 
+        struct VolumetricFunctionInfo
+        {
+            int id = -1;
+            std::string display_name;
+            int image3d_id = -1;
+        };
+
+        struct VolumetricImage3DInfo
+        {
+            int id = -1;
+            std::string name;
+        };
+
+        struct VolumetricVolumeDataInfo
+        {
+            struct MaterialMapping
+            {
+                int function_id = -1;
+                std::string channel;
+            };
+
+            struct Composite
+            {
+                int basematerial_id = -1;
+                std::vector<MaterialMapping> mappings;
+            };
+
+            struct Color
+            {
+                int function_id = -1;
+                std::string channel;
+            };
+
+            struct Property
+            {
+                std::string name;
+                int function_id = -1;
+                std::string channel;
+                bool required = false;
+            };
+
+            int id = -1;
+            std::optional<Composite> composite;
+            std::optional<Color> color;
+            std::vector<Property> properties;
+        };
+
         // Map from a 1 based 3MF object ID to a 0 based ModelObject index inside m_model->objects.
         typedef std::map<PathId, int> IdToModelObjectMap;
         typedef std::map<PathId, ComponentsList> IdToAliasesMap;
+        typedef std::map<PathId, int> PathIdToVolumeDataIdMap;
         typedef std::vector<Instance> InstancesList;
         typedef std::map<int, ObjectMetadata> IdToMetadataMap;
         typedef std::map<PathId, Geometry> IdToGeometryMap;
@@ -512,6 +611,7 @@ namespace Slic3r {
         CurrentObject m_curr_object;
         IdToModelObjectMap m_objects;
         IdToAliasesMap m_objects_aliases;
+        PathIdToVolumeDataIdMap m_object_to_volumetric_data_id;
         InstancesList m_instances;
         IdToGeometryMap m_geometries;
         CurrentConfig m_curr_config;
@@ -522,6 +622,11 @@ namespace Slic3r {
         IdToSlaSupportPointsMap m_sla_support_points;
         IdToSlaDrainHolesMap    m_sla_drain_holes;
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
+        std::map<int, VolumetricVolumeDataInfo> m_volumetric_data;
+        std::map<int, VolumetricFunctionInfo> m_volumetric_functions;
+        std::map<int, VolumetricImage3DInfo> m_volumetric_images;
+        int m_curr_volumetric_data_id = -1;
+        bool m_in_volumetric_composite = false;
         std::string m_curr_metadata_name;
         std::string m_curr_characters;
         std::string m_name;
@@ -619,6 +724,17 @@ namespace Slic3r {
         bool _handle_start_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_metadata();
 
+        bool _handle_start_volumetric_volume_data(const char** attributes, unsigned int num_attributes);
+        bool _handle_end_volumetric_volume_data();
+        bool _handle_start_volumetric_composite(const char** attributes, unsigned int num_attributes);
+        bool _handle_end_volumetric_composite();
+        bool _handle_start_volumetric_material_mapping(const char** attributes, unsigned int num_attributes);
+        bool _handle_start_volumetric_color(const char** attributes, unsigned int num_attributes);
+        bool _handle_start_volumetric_property(const char** attributes, unsigned int num_attributes);
+        bool _handle_start_volumetric_function_from_image3d(const char** attributes, unsigned int num_attributes);
+        bool _handle_start_volumetric_image3d(const char** attributes, unsigned int num_attributes);
+        bool _synthesize_volumetric_channels(ModelObject& object, int volume_data_id);
+
         bool _handle_start_text_configuration(const char** attributes, unsigned int num_attributes);
         bool _handle_start_shape_configuration(const char **attributes, unsigned int num_attributes);
 
@@ -684,6 +800,7 @@ namespace Slic3r {
         m_curr_object.reset();
         m_objects.clear();
         m_objects_aliases.clear();
+        m_object_to_volumetric_data_id.clear();
         m_instances.clear();
         m_geometries.clear();
         m_curr_config.object_id = -1;
@@ -692,6 +809,11 @@ namespace Slic3r {
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
         m_sla_support_points.clear();
+        m_volumetric_data.clear();
+        m_volumetric_functions.clear();
+        m_volumetric_images.clear();
+        m_curr_volumetric_data_id = -1;
+        m_in_volumetric_composite = false;
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
         m_start_part_path = MODEL_FILE; // set default value for invalid .rel file
@@ -984,6 +1106,26 @@ namespace Slic3r {
 
             if (!_generate_volumes(*model_object, obj_geometry->second, *volumes_ptr, config_substitutions))
                 return false;
+
+            auto obj_volume_data_it = m_object_to_volumetric_data_id.find(object.first);
+            if (obj_volume_data_it != m_object_to_volumetric_data_id.end()) {
+                const int volume_data_id = obj_volume_data_it->second;
+                auto volumetric_it = m_volumetric_data.find(volume_data_id);
+                if (volumetric_it != m_volumetric_data.end()) {
+                    size_t mapping_count = 0;
+                    if (volumetric_it->second.composite.has_value())
+                        mapping_count = volumetric_it->second.composite->mappings.size();
+
+                    BOOST_LOG_TRIVIAL(info)
+                        << "Detected volumetric data for object id " << object.first.second
+                        << ": volumeid=" << volume_data_id
+                        << ", material mappings=" << mapping_count
+                        << ", custom properties=" << volumetric_it->second.properties.size();
+                }
+
+                if (!_synthesize_volumetric_channels(*model_object, volume_data_id))
+                    return false;
+            }
 
             // Apply cut information for object if any was loaded
             // m_cut_object_ids are indexed by a 1 based model object index.
@@ -1801,6 +1943,7 @@ namespace Slic3r {
 
         bool res = true;
         unsigned int num_attributes = (unsigned int)XML_GetSpecifiedAttributeCount(m_xml_parser);
+        const char* local_name = get_local_name(name);
 
         if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_start_model(attributes, num_attributes);
@@ -1828,6 +1971,20 @@ namespace Slic3r {
             res = _handle_start_item(attributes, num_attributes);
         else if (::strcmp(METADATA_TAG, name) == 0)
             res = _handle_start_metadata(attributes, num_attributes);
+        else if (::strcmp(VOLUMEDATA_TAG, local_name) == 0)
+            res = _handle_start_volumetric_volume_data(attributes, num_attributes);
+        else if (::strcmp(COMPOSITE_TAG, local_name) == 0)
+            res = _handle_start_volumetric_composite(attributes, num_attributes);
+        else if (::strcmp(MATERIALMAPPING_TAG, local_name) == 0)
+            res = _handle_start_volumetric_material_mapping(attributes, num_attributes);
+        else if (::strcmp(COLOR_TAG, local_name) == 0)
+            res = _handle_start_volumetric_color(attributes, num_attributes);
+        else if (::strcmp(PROPERTY_TAG, local_name) == 0)
+            res = _handle_start_volumetric_property(attributes, num_attributes);
+        else if (::strcmp(FUNCTIONFROMIMAGE3D_TAG, local_name) == 0)
+            res = _handle_start_volumetric_function_from_image3d(attributes, num_attributes);
+        else if (::strcmp(IMAGE3D_TAG, local_name) == 0)
+            res = _handle_start_volumetric_image3d(attributes, num_attributes);
 
         if (!res)
             _stop_xml_parser();
@@ -1839,6 +1996,7 @@ namespace Slic3r {
             return;
 
         bool res = true;
+        const char* local_name = get_local_name(name);
 
         if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_end_model();
@@ -1866,6 +2024,10 @@ namespace Slic3r {
             res = _handle_end_item();
         else if (::strcmp(METADATA_TAG, name) == 0)
             res = _handle_end_metadata();
+        else if (::strcmp(VOLUMEDATA_TAG, local_name) == 0)
+            res = _handle_end_volumetric_volume_data();
+        else if (::strcmp(COMPOSITE_TAG, local_name) == 0)
+            res = _handle_end_volumetric_composite();
 
         if (!res)
             _stop_xml_parser();
@@ -2032,6 +2194,8 @@ namespace Slic3r {
                 if (m_objects.find(object_id) == m_objects.end()) {
                     m_objects.insert({ object_id, m_curr_object.model_object_idx });
                     m_objects_aliases.insert({object_id, {1, Component(object_id)}}); // aliases itself
+                    if (m_curr_object.volume_data_id >= 0)
+                        m_object_to_volumetric_data_id[object_id] = m_curr_object.volume_data_id;
                 }
                 else {
                     add_error("Found object with duplicate id");
@@ -2047,6 +2211,7 @@ namespace Slic3r {
     {
         // reset current geometry
         m_curr_object.geometry.reset();
+        m_curr_object.volume_data_id = get_attribute_value_int_local_name(attributes, num_attributes, VOLUMEID_ATTR);
         return true;
     }
 
@@ -2259,6 +2424,191 @@ namespace Slic3r {
             check_painting_version(m_mm_painting_version, MM_PAINTING_VERSION,
                 _u8L("The selected 3MF contains multi-material painted object using a newer version of PrusaSlicer and is not compatible."));
         }
+
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_volume_data(const char** attributes, unsigned int num_attributes)
+    {
+        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (id < 0)
+            return true;
+
+        VolumetricVolumeDataInfo data;
+        data.id = id;
+        m_volumetric_data[id] = std::move(data);
+        m_curr_volumetric_data_id = id;
+        m_in_volumetric_composite = false;
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_end_volumetric_volume_data()
+    {
+        m_curr_volumetric_data_id = -1;
+        m_in_volumetric_composite = false;
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_composite(const char** attributes, unsigned int num_attributes)
+    {
+        if (m_curr_volumetric_data_id < 0)
+            return true;
+
+        auto it = m_volumetric_data.find(m_curr_volumetric_data_id);
+        if (it == m_volumetric_data.end())
+            return true;
+
+        VolumetricVolumeDataInfo::Composite composite;
+        composite.basematerial_id = get_attribute_value_int_local_name(attributes, num_attributes, BASEMATERIALID_ATTR);
+        it->second.composite = std::move(composite);
+        m_in_volumetric_composite = true;
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_end_volumetric_composite()
+    {
+        m_in_volumetric_composite = false;
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_material_mapping(const char** attributes, unsigned int num_attributes)
+    {
+        if (m_curr_volumetric_data_id < 0 || !m_in_volumetric_composite)
+            return true;
+
+        auto it = m_volumetric_data.find(m_curr_volumetric_data_id);
+        if (it == m_volumetric_data.end() || !it->second.composite.has_value())
+            return true;
+
+        VolumetricVolumeDataInfo::MaterialMapping mapping;
+        mapping.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        mapping.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
+        it->second.composite->mappings.emplace_back(std::move(mapping));
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_color(const char** attributes, unsigned int num_attributes)
+    {
+        if (m_curr_volumetric_data_id < 0)
+            return true;
+
+        auto it = m_volumetric_data.find(m_curr_volumetric_data_id);
+        if (it == m_volumetric_data.end())
+            return true;
+
+        VolumetricVolumeDataInfo::Color color;
+        color.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        color.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
+        it->second.color = std::move(color);
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_property(const char** attributes, unsigned int num_attributes)
+    {
+        if (m_curr_volumetric_data_id < 0)
+            return true;
+
+        auto it = m_volumetric_data.find(m_curr_volumetric_data_id);
+        if (it == m_volumetric_data.end())
+            return true;
+
+        VolumetricVolumeDataInfo::Property property;
+        property.name = get_attribute_value_string_local_name(attributes, num_attributes, NAME_ATTR);
+        property.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        property.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
+        const std::string required = get_attribute_value_string_local_name(attributes, num_attributes, REQUIRED_ATTR);
+        property.required = required == "true" || required == "1";
+        it->second.properties.emplace_back(std::move(property));
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_function_from_image3d(const char** attributes, unsigned int num_attributes)
+    {
+        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (id < 0)
+            return true;
+
+        VolumetricFunctionInfo function;
+        function.id = id;
+        function.display_name = get_attribute_value_string_local_name(attributes, num_attributes, DISPLAYNAME_ATTR);
+        function.image3d_id = get_attribute_value_int_local_name(attributes, num_attributes, IMAGE3DID_ATTR);
+        m_volumetric_functions[id] = std::move(function);
+        return true;
+    }
+
+    bool _3MF_Importer::_handle_start_volumetric_image3d(const char** attributes, unsigned int num_attributes)
+    {
+        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (id < 0)
+            return true;
+
+        VolumetricImage3DInfo image;
+        image.id = id;
+        image.name = get_attribute_value_string_local_name(attributes, num_attributes, NAME_ATTR);
+        m_volumetric_images[id] = std::move(image);
+        return true;
+    }
+
+    bool _3MF_Importer::_synthesize_volumetric_channels(ModelObject& object, int volume_data_id)
+    {
+        auto volumetric_it = m_volumetric_data.find(volume_data_id);
+        if (volumetric_it == m_volumetric_data.end())
+            return true;
+
+        const VolumetricVolumeDataInfo& volume_data = volumetric_it->second;
+        int synthesized_channel_count = 0;
+        if (volume_data.composite.has_value()) {
+            std::unordered_set<std::string> unique_channel_labels;
+            int fallback_count = 0;
+
+            for (const VolumetricVolumeDataInfo::MaterialMapping& mapping : volume_data.composite->mappings) {
+                if (!mapping.channel.empty())
+                    unique_channel_labels.insert(mapping.channel);
+                else
+                    ++fallback_count;
+            }
+
+            if (!unique_channel_labels.empty())
+                synthesized_channel_count = int(unique_channel_labels.size());
+            else
+                synthesized_channel_count = fallback_count;
+        }
+
+        // No composite mappings means there is nothing to synthesize into channels.
+        if (synthesized_channel_count == 0)
+            return true;
+
+        synthesized_channel_count = std::max(1, synthesized_channel_count);
+
+        // Keep existing explicit object extruder assignment if already valid.
+        int object_extruder = 0;
+        if (const ConfigOption* opt = object.config.option("extruder"); opt != nullptr)
+            object_extruder = opt->getInt();
+        if (object_extruder <= 0) {
+            object_extruder = 1;
+            object.config.set_key_value("extruder", new ConfigOptionInt(object_extruder));
+        }
+
+        // Assign channels across volumes deterministically when no explicit volume extruder exists.
+        // If there is just one volume, it receives channel 1 as the base channel.
+        for (size_t i = 0; i < object.volumes.size(); ++i) {
+            ModelVolume* vol = object.volumes[i];
+            if (vol == nullptr)
+                continue;
+
+            int volume_extruder = 0;
+            if (const ConfigOption* vol_opt = vol->config.option("extruder"); vol_opt != nullptr)
+                volume_extruder = vol_opt->getInt();
+
+            if (volume_extruder <= 0) {
+                const int channel_idx = int(i % size_t(synthesized_channel_count));
+                vol->config.set_key_value("extruder", new ConfigOptionInt(channel_idx + 1));
+            }
+        }
+
+        BOOST_LOG_TRIVIAL(info)
+            << "Synthesized " << synthesized_channel_count
+            << " logical channels from volumetric composite for object '" << object.name << "'";
 
         return true;
     }

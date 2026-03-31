@@ -11,6 +11,8 @@
 #include <cereal/types/vector.hpp> 
 #include <cereal/archives/binary.hpp>
 
+#include <algorithm>
+
 using namespace Slic3r;
 
 TEST_CASE("Dynamic config serialization - tests ConfigBase", "[Config]"){
@@ -96,6 +98,51 @@ TEST_CASE("Dynamic config serialization - tests ConfigBase", "[Config]"){
 TEST_CASE("Get keys", "[Config]"){
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     CHECK(!config.keys().empty());
+}
+
+TEST_CASE("SLA video config defaults are available", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    REQUIRE(config.option<ConfigOptionBools>("sla_material_extruder") != nullptr);
+    REQUIRE(config.option<ConfigOptionBools>("sla_material_video_synthesize") != nullptr);
+    REQUIRE(config.option<ConfigOptionStrings>("sla_material_video_names") != nullptr);
+    REQUIRE(config.option<ConfigOptionStrings>("sla_material_video_paths") != nullptr);
+    REQUIRE(config.option<ConfigOptionBools>("sla_material_video_embed") != nullptr);
+    REQUIRE(config.option<ConfigOptionInt>("sla_material_video_synth_width") != nullptr);
+    REQUIRE(config.option<ConfigOptionInt>("sla_material_video_synth_height") != nullptr);
+    REQUIRE(config.option<ConfigOptionInt>("sla_material_video_synth_fps") != nullptr);
+    REQUIRE(config.option<ConfigOptionBool>("sla_material_video_synth_lossless") != nullptr);
+
+    CHECK(config.option<ConfigOptionBools>("sla_material_extruder")->values == std::vector<unsigned char>{ false });
+    CHECK(config.option<ConfigOptionBools>("sla_material_video_synthesize")->values == std::vector<unsigned char>{ false });
+    CHECK(config.option<ConfigOptionStrings>("sla_material_video_names")->values == std::vector<std::string>{ "" });
+    CHECK(config.option<ConfigOptionStrings>("sla_material_video_paths")->values == std::vector<std::string>{ "" });
+    CHECK(config.option<ConfigOptionBools>("sla_material_video_embed")->values == std::vector<unsigned char>{ true });
+    CHECK(config.option<ConfigOptionInt>("sla_material_video_synth_width")->value == 1024);
+    CHECK(config.option<ConfigOptionInt>("sla_material_video_synth_height")->value == 1024);
+    CHECK(config.option<ConfigOptionInt>("sla_material_video_synth_fps")->value == 5);
+    CHECK(config.option<ConfigOptionBool>("sla_material_video_synth_lossless")->value == true);
+}
+
+TEST_CASE("SLA toolchange placeholders are registered", "[Config]") {
+    const auto &placeholders = custom_gcode_specific_placeholders();
+    const auto  it = placeholders.find("toolchange_gcode");
+    REQUIRE(it != placeholders.end());
+
+    const auto &toolchange_placeholders = it->second;
+    CHECK(std::find(toolchange_placeholders.begin(), toolchange_placeholders.end(), "sla_material_id") != toolchange_placeholders.end());
+    CHECK(std::find(toolchange_placeholders.begin(), toolchange_placeholders.end(), "sla_video_name") != toolchange_placeholders.end());
+    CHECK(std::find(toolchange_placeholders.begin(), toolchange_placeholders.end(), "sla_video_path") != toolchange_placeholders.end());
+    CHECK(std::find(toolchange_placeholders.begin(), toolchange_placeholders.end(), "sla_video_embedded") != toolchange_placeholders.end());
+
+    REQUIRE(custom_gcode_specific_config_def.has("sla_material_id"));
+    REQUIRE(custom_gcode_specific_config_def.has("sla_video_name"));
+    REQUIRE(custom_gcode_specific_config_def.has("sla_video_path"));
+    REQUIRE(custom_gcode_specific_config_def.has("sla_video_embedded"));
+
+    const ConfigOptionDef *embedded_def = custom_gcode_specific_config_def.get("sla_video_embedded");
+    REQUIRE(embedded_def != nullptr);
+    CHECK(embedded_def->type == coInt);
 }
 
 TEST_CASE("Set not already set option", "[Config]") {

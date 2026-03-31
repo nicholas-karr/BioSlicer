@@ -3192,6 +3192,75 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionString(""));
 
+    def = this->add("sla_material_extruder", coBools);
+    def->label = L("SLA material extruder");
+    def->tooltip = L("Marks which extruders represent SLA materials. When enabled for an extruder, BioSlicer can emit SLA video metadata and expose SLA placeholders in toolchange G-code.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBools{ false });
+
+    def = this->add("sla_material_video_synthesize", coBools);
+    def->label = L("Synthesize SLA videos natively");
+    def->tooltip = L("When enabled for an SLA extruder, BioSlicer generates the SLA MKV natively during G-code export instead of requiring a pre-existing file.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBools{ false });
+
+    def = this->add("sla_material_video_names", coStrings);
+    def->label = L("SLA material video names");
+    def->tooltip = L("Short aliases used by macros to reference SLA videos, one per extruder. Leave empty to auto-generate names.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 3;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("sla_material_video_paths", coStrings);
+    def->label = L("SLA material video paths");
+    def->tooltip = L("Paths to H.265 MKV files, one per extruder. Files may be embedded into G-code comments or referenced externally.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 3;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("sla_material_video_embed", coBools);
+    def->label = L("Embed SLA videos into G-code");
+    def->tooltip = L("For each extruder marked as SLA material, enable to embed the MKV into base64 G-code comments. Disable to emit only an external file reference.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBools{ true });
+
+    def = this->add("sla_material_video_synth_width", coInt);
+    def->label = L("SLA synthesized frame width");
+    def->tooltip = L("Width in pixels for synthesized SLA video frames.");
+    def->sidetext = L("px");
+    def->min = 16;
+    def->max = 16384;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionInt(1024));
+
+    def = this->add("sla_material_video_synth_height", coInt);
+    def->label = L("SLA synthesized frame height");
+    def->tooltip = L("Height in pixels for synthesized SLA video frames.");
+    def->sidetext = L("px");
+    def->min = 16;
+    def->max = 16384;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionInt(1024));
+
+    def = this->add("sla_material_video_synth_fps", coInt);
+    def->label = L("SLA synthesized video FPS");
+    def->tooltip = L("Frame rate used when encoding synthesized SLA MKV videos.");
+    def->sidetext = L("fps");
+    def->min = 1;
+    def->max = 240;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionInt(5));
+
+    def = this->add("sla_material_video_synth_lossless", coBool);
+    def->label = L("Lossless synthesized SLA videos");
+    def->tooltip = L("Encode synthesized SLA videos in lossless mode using software libx265.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("single_extruder_multi_material", coBool);
     def->label = L("Single Extruder Multi Material");
     def->tooltip = L("The printer multiplexes filaments into a single hot end.");
@@ -6315,7 +6384,7 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"end_gcode",               {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
     {"before_layer_gcode",      {"layer_num", "layer_z", "max_layer_z"}},
     {"layer_gcode",             {"layer_num", "layer_z", "max_layer_z"}},
-    {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z"}},
+    {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z", "sla_material_id", "sla_video_name", "sla_video_path", "sla_video_embedded"}},
     {"color_change_gcode",      {"color_change_extruder"}},
     {"pause_print_gcode",       {"color_change_extruder"}},
 };
@@ -6356,6 +6425,22 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     def = this->add("toolchange_z", coFloat);
     def->label = L("Toolchange Z");
     def->tooltip = L("Height above the print bed when the toolchange takes place. Usually the same as layer_z, but can be different.");
+
+    def = this->add("sla_material_id", coString);
+    def->label = L("SLA material ID");
+    def->tooltip = L("Short SLA material identifier for the next tool. Empty when switching to a non-SLA tool.");
+
+    def = this->add("sla_video_name", coString);
+    def->label = L("SLA video name");
+    def->tooltip = L("Short alias of the SLA video associated with the next tool. Empty when switching to a non-SLA tool.");
+
+    def = this->add("sla_video_path", coString);
+    def->label = L("SLA video path");
+    def->tooltip = L("Configured path for the SLA MKV associated with the next tool. Empty when switching to a non-SLA tool.");
+
+    def = this->add("sla_video_embedded", coInt);
+    def->label = L("SLA video embedded");
+    def->tooltip = L("1 if the SLA video is embedded into G-code comments, 0 if it is externally referenced.");
 
     def = this->add("color_change_extruder", coInt);
     // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.

@@ -3,10 +3,14 @@
 #include <numeric>
 #include <sstream>
 
+#include <boost/filesystem.hpp>
+#include <boost/process.hpp>
+
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include "test_data.hpp"
@@ -141,6 +145,160 @@ SCENARIO("Ooze prevention", "[Multi]")
         Polygon outer_convex_hull = expand(convex_hull, delta).front();
         size_t inside = std::count_if(toolchange_points.begin(), toolchange_points.end(), [&outer_convex_hull](const Point &p){ return outer_convex_hull.contains(p); });
         REQUIRE(inside == toolchange_points.size());
+    }
+}
+
+SCENARIO("SLA material metadata and placeholders are emitted", "[Multi]")
+{
+    auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
+        { "nozzle_diameter",         "0.6,0.6" },
+        { "perimeter_extruder",      1 },
+        { "infill_extruder",         2 },
+        { "solid_infill_extruder",   2 },
+        { "skirts",                  0 },
+        { "fill_density",            15 },
+        { "toolchange_gcode",        "M118 SLA name=[sla_video_name] path=[sla_video_path] embedded=[sla_video_embedded]" },
+        { "sla_material_extruder",   "0,1" },
+        { "sla_material_video_names", "fdm;resin A" },
+        { "sla_material_video_paths", "/tmp/fdm.mkv;/tmp/resin_a.mkv" },
+        { "sla_material_video_embed", "0,0" }
+    });
+
+    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
+
+    THEN("SLA metadata map and ref comments are emitted for SLA extruders") {
+        REQUIRE(gcode.find("; bioslicer_sla_material_map extruder=1 name=resin_A embedded=0") != std::string::npos);
+        REQUIRE(gcode.find("; bioslicer_sla_video ref name=resin_A extruder=1 path=/tmp/resin_a.mkv") != std::string::npos);
+        REQUIRE(gcode.find("; bioslicer_sla_video begin name=resin_A") == std::string::npos);
+    }
+
+    THEN("Toolchange placeholders resolve SLA values") {
+        REQUIRE(gcode.find("M118 SLA name=resin_A path=/tmp/resin_a.mkv embedded=0") != std::string::npos);
+    }
+}
+
+SCENARIO("SLA native synthesis validates required path in ref mode", "[Multi]")
+{
+    auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
+        { "nozzle_diameter",                "0.6,0.6" },
+        { "perimeter_extruder",             1 },
+        { "infill_extruder",                2 },
+        { "solid_infill_extruder",          2 },
+        { "skirts",                         0 },
+        { "fill_density",                   15 },
+        { "sla_material_extruder",          "0,1" },
+        { "sla_material_video_synthesize",  "0,1" },
+        { "sla_material_video_names",       "fdm;resin synth" },
+        { "sla_material_video_paths",       ";" },
+        { "sla_material_video_embed",       "0,0" }
+    });
+
+    THEN("slicing fails with ExportError because ref mode needs a concrete output path") {
+        REQUIRE_THROWS_AS(
+            Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config),
+            Slic3r::ExportError);
+    }
+}
+
+SCENARIO("SLA metadata export rejects binary G-code", "[Multi]")
+{
+    auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
+        { "nozzle_diameter",         "0.6,0.6" },
+        { "perimeter_extruder",      1 },
+        { "infill_extruder",         2 },
+        { "solid_infill_extruder",   2 },
+        { "skirts",                  0 },
+        { "fill_density",            15 },
+        { "binary_gcode",            1 },
+        { "sla_material_extruder",   "0,1" },
+        { "sla_material_video_names", "fdm;resin A" },
+        { "sla_material_video_paths", ";/tmp/resin_a.mkv" },
+        { "sla_material_video_embed", "0,0" }
+    });
+
+    THEN("slicing fails with ExportError because SLA metadata is ASCII-only") {
+        REQUIRE_THROWS_AS(
+            Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config),
+            Slic3r::ExportError);
+    }
+}
+
+SCENARIO("SLA native synthesis creates MKV and emits reference metadata", "[Multi]")
+{
+    REQUIRE(!boost::process::search_path("ffmpeg").empty());
+
+    const boost::filesystem::path output_path =
+        boost::filesystem::temp_directory_path() /
+        boost::filesystem::unique_path("bioslicer_sla_synth_test_%%%%-%%%%-%%%%.mkv");
+
+    auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
+        { "nozzle_diameter",                 "0.6,0.6" },
+        { "perimeter_extruder",              1 },
+        { "infill_extruder",                 2 },
+        { "solid_infill_extruder",           2 },
+        { "skirts",                          0 },
+        { "fill_density",                    15 },
+        { "sla_material_extruder",           "0,1" },
+        { "sla_material_video_synthesize",   "0,1" },
+        { "sla_material_video_names",        "fdm;resin synth" },
+        { "sla_material_video_paths",        ";" + output_path.string() },
+        { "sla_material_video_embed",        "0,0" },
+        { "sla_material_video_synth_width",  64 },
+        { "sla_material_video_synth_height", 64 },
+        { "sla_material_video_synth_fps",    5 },
+        { "sla_material_video_synth_lossless", 0 }
+    });
+
+    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
+
+    THEN("synthesis writes MKV and G-code references it") {
+        REQUIRE(boost::filesystem::exists(output_path));
+        REQUIRE(boost::filesystem::file_size(output_path) > 0);
+        REQUIRE(gcode.find("; bioslicer_sla_video ref name=resin_synth extruder=1 path=" + output_path.string()) != std::string::npos);
+    }
+
+    boost::system::error_code ec;
+    boost::filesystem::remove(output_path, ec);
+}
+
+SCENARIO("SLA native synthesis with embed mode emits payload and cleans temp output", "[Multi]")
+{
+    REQUIRE(!boost::process::search_path("ffmpeg").empty());
+
+    const std::string video_name = "resin_embed_temp_cleanup";
+    const boost::filesystem::path temp_embedded_output =
+        boost::filesystem::temp_directory_path() /
+        ("bioslicer_" + video_name + "_t1_native.mkv");
+
+    boost::system::error_code ec;
+    boost::filesystem::remove(temp_embedded_output, ec);
+
+    auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
+        { "nozzle_diameter",                 "0.6,0.6" },
+        { "perimeter_extruder",              1 },
+        { "infill_extruder",                 2 },
+        { "solid_infill_extruder",           2 },
+        { "skirts",                          0 },
+        { "fill_density",                    15 },
+        { "sla_material_extruder",           "0,1" },
+        { "sla_material_video_synthesize",   "0,1" },
+        { "sla_material_video_names",        "fdm;" + video_name },
+        { "sla_material_video_paths",        ";" },
+        { "sla_material_video_embed",        "0,1" },
+        { "sla_material_video_synth_width",  64 },
+        { "sla_material_video_synth_height", 64 },
+        { "sla_material_video_synth_fps",    5 },
+        { "sla_material_video_synth_lossless", 0 }
+    });
+
+    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
+
+    THEN("embedded payload markers are emitted and temp file is removed") {
+        REQUIRE(gcode.find("; bioslicer_sla_material_map extruder=1 name=" + video_name + " embedded=1") != std::string::npos);
+        REQUIRE(gcode.find("; bioslicer_sla_video begin name=" + video_name + " extruder=1") != std::string::npos);
+        REQUIRE(gcode.find("; bioslicer_sla_video end name=" + video_name) != std::string::npos);
+        REQUIRE(gcode.find("; bioslicer_sla_video ref name=" + video_name) == std::string::npos);
+        REQUIRE(!boost::filesystem::exists(temp_embedded_output));
     }
 }
 

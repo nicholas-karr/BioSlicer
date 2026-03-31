@@ -71,6 +71,7 @@ class Sidebar : public wxPanel
     PlaterPresetComboBox*               m_combo_sla_material{ nullptr };
     PlaterPresetComboBox*               m_combo_printer     { nullptr };
     std::vector<PlaterPresetComboBox*>  m_combos_filament;
+    std::vector<wxStaticText*>          m_filament_combo_tags;
 
     ObjectList*     m_object_list               { nullptr };
     ObjectInfo*     m_object_info               { nullptr };
@@ -100,6 +101,7 @@ class Sidebar : public wxPanel
 #endif
 
     void init_filament_combo(PlaterPresetComboBox **combo, int extr_idx);
+    void refresh_filament_combo_tags();
     void remove_unused_filament_combos(const size_t current_extruder_count);
     void update_all_preset_comboboxes();
     void update_reslice_btn_tooltip();

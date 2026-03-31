@@ -7,6 +7,8 @@
 
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
+#include <array>
 
 #include <wx/sizer.h>
 #include <wx/accel.h>
@@ -24,6 +26,7 @@
 #include "../Utils/MacDarkMode.hpp"
 #include "BitmapComboBox.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "OG_CustomCtrl.hpp"
 #include "format.hpp"
 
@@ -334,15 +337,88 @@ std::vector<wxBitmapBundle*> get_extruder_color_icons(bool thin_icon/* = false*/
 {
     // Create the bitmap with color bars.
     std::vector<wxBitmapBundle*> bmps;
-    std::vector<std::string> colors = Slic3r::GUI::wxGetApp().plater()->get_extruder_color_strings_from_plater_config();
-
-    if (colors.empty())
+    const int extruders_count = std::max(0, Slic3r::GUI::wxGetApp().extruders_edited_cnt());
+    if (extruders_count == 0)
         return bmps;
 
-    for (const std::string& color : colors)
-        bmps.emplace_back(get_solid_bmp_bundle(thin_icon ? 16 : 32, 16, color));
+    std::vector<std::string> colors = Slic3r::GUI::wxGetApp().plater()->get_extruder_color_strings_from_plater_config();
+    colors.resize(size_t(extruders_count));
+
+    static const std::array<const char *, 8> default_tool_colors = {
+        "#FFB347", "#A0A0A0", "#5BC0EB", "#FDE74C",
+        "#9BC53D", "#E55934", "#FA7921", "#6A4C93"
+    };
+
+    for (size_t i = 0; i < colors.size(); ++i) {
+        if (!Slic3r::can_decode_color(colors[i]))
+            colors[i] = default_tool_colors[i % default_tool_colors.size()];
+        bmps.emplace_back(get_solid_bmp_bundle(thin_icon ? 16 : 32, 16, colors[i]));
+    }
 
     return bmps;
+}
+
+static std::vector<int> get_sla_bucket_indices_for_extruders(size_t extruders_count)
+{
+    std::vector<int> bucket_indices(extruders_count, 0);
+
+    const Slic3r::Preset &printer_preset = Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
+    if (printer_preset.printer_technology() != Slic3r::ptFFF)
+        return bucket_indices;
+
+    const auto *sla_material_extruder = dynamic_cast<const Slic3r::ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"));
+    if (sla_material_extruder == nullptr)
+        return bucket_indices;
+
+    int bucket_index = 0;
+    const size_t count = std::min(extruders_count, sla_material_extruder->values.size());
+    for (size_t i = 0; i < count; ++i) {
+        if (sla_material_extruder->values[i])
+            bucket_indices[i] = ++bucket_index;
+    }
+
+    return bucket_indices;
+}
+
+static std::vector<double> get_nozzle_diameters_for_extruders(size_t extruders_count)
+{
+    std::vector<double> nozzle_diameters(extruders_count, 0.0);
+
+    const Slic3r::Preset &printer_preset = Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
+    const auto *nozzles = dynamic_cast<const Slic3r::ConfigOptionFloats *>(printer_preset.config.option("nozzle_diameter"));
+    if (nozzles == nullptr)
+        return nozzle_diameters;
+
+    const size_t count = std::min(extruders_count, nozzles->values.size());
+    for (size_t i = 0; i < count; ++i)
+        nozzle_diameters[i] = nozzles->values[i];
+
+    return nozzle_diameters;
+}
+
+static wxString make_extruder_selector_label(size_t extruder_idx,
+                                             bool use_full_item_name,
+                                             const std::vector<int> &sla_bucket_indices,
+                                             const std::vector<double> &nozzle_diameters)
+{
+    const int display_index = int(extruder_idx) + 1;
+    const int bucket_index = extruder_idx < sla_bucket_indices.size() ? sla_bucket_indices[extruder_idx] : 0;
+    const bool is_sla_tool = bucket_index > 0;
+    const double nozzle_diameter = extruder_idx < nozzle_diameters.size() ? nozzle_diameters[extruder_idx] : 0.0;
+
+    if (!use_full_item_name)
+        return is_sla_tool ? wxString::Format("%d [S%d]", display_index, bucket_index) : wxString::Format("%d [F]", display_index);
+
+    wxString label = wxString::Format("%s %d", _(L("Extruder")), display_index);
+    if (nozzle_diameter > 0.0)
+        label += wxString::Format(" (%.1fmm)", nozzle_diameter);
+
+    if (is_sla_tool)
+        label += wxString::Format(" [SLA %s %d]", _(L("Bucket")), bucket_index);
+    else
+        label += " [FFF]";
+
+    return label;
 }
 
 
@@ -376,20 +452,16 @@ void apply_extruder_selector(Slic3r::GUI::BitmapComboBox** ctrl,
 
     // For ObjectList we use short extruder name (just a number)
     const bool use_full_item_name = dynamic_cast<Slic3r::GUI::ObjectList*>(parent) == nullptr;
+    const std::vector<int> sla_bucket_indices = get_sla_bucket_indices_for_extruders(icons.size());
+    const std::vector<double> nozzle_diameters = get_nozzle_diameters_for_extruders(icons.size());
 
-    int i = 0;
-    wxString str = _(L("Extruder"));
-    for (wxBitmapBundle* bmp : icons) {
-        if (i == 0) {
-            if (!first_item.empty())
-                (*ctrl)->Append(_(first_item), *bmp);
-            ++i;
-        }
+    if (!first_item.empty())
+        (*ctrl)->Append(_(first_item), icons.front() ? *icons.front() : wxNullBitmap);
 
-        (*ctrl)->Append(use_full_item_name
-                        ? Slic3r::GUI::from_u8((boost::format("%1% %2%") % str % i).str())
-                        : wxString::Format("%d", i), *bmp);
-        ++i;
+    for (size_t extruder_idx = 0; extruder_idx < icons.size(); ++extruder_idx) {
+        wxBitmapBundle* bmp = icons[extruder_idx];
+        const wxString label = make_extruder_selector_label(extruder_idx, use_full_item_name, sla_bucket_indices, nozzle_diameters);
+        (*ctrl)->Append(label, bmp ? *bmp : wxNullBitmap);
     }
     (*ctrl)->SetSelection(0);
 }
