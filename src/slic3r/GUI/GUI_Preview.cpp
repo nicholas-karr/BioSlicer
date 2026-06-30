@@ -849,6 +849,8 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
     if (active_gcode_result()->moves.empty())
         return;
 
+    m_sla_steps_by_pos.clear();
+
     const libvgcode::Interval& range = m_canvas->get_gcode_view_enabled_range();
     uint32_t last_gcode_id = m_canvas->get_gcode_vertex_at(range[0]).gcode_id;
     std::optional<uint32_t> gcode_id_min = visible_range_min.has_value() ?
@@ -861,13 +863,16 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
     values.reserve(range_size);
     std::vector<unsigned int> alternate_values;
     alternate_values.reserve(range_size);
+    std::vector<float> vertex_zs; // parallel to values: Z coordinate (mm) per FFF position
+    vertex_zs.reserve(range_size);
 
     std::optional<uint32_t> visible_range_min_id;
     std::optional<uint32_t> visible_range_max_id;
     uint32_t counter = 0;
 
     for (size_t i = range[0]; i <= range[1]; ++i) {
-        const uint32_t gcode_id = m_canvas->get_gcode_vertex_at(i).gcode_id;
+        const auto& vtx = m_canvas->get_gcode_vertex_at(i);
+        const uint32_t gcode_id = vtx.gcode_id;
         bool skip = false;
         if (i > range[0]) {
             // skip consecutive moves with same gcode id (resulting from processing G2 and G3 lines)
@@ -882,6 +887,7 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
         if (!skip) {
             values.emplace_back(i + 1);
             alternate_values.emplace_back(gcode_id);
+            vertex_zs.emplace_back(vtx.position[2]);
             if (gcode_id_min.has_value() && alternate_values.back() == *gcode_id_min)
                 visible_range_min_id = counter;
             else if (gcode_id_max.has_value() && alternate_values.back() == *gcode_id_max)
@@ -890,8 +896,88 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
         }
     }
 
-    const int span_min_id = visible_range_min_id.has_value() ? *visible_range_min_id : 0;
-    const int span_max_id = visible_range_max_id.has_value() ? *visible_range_max_id : static_cast<int>(values.size()) - 1;
+    // Interleave SLA exposure steps for hybrid FFF+SLA prints.
+    // After the last FFF move of each layer that has SLA material slices, insert one
+    // virtual sentinel position per SLA extruder channel (value 0, not a real vertex index).
+    // m_sla_steps_by_pos maps those new slider positions to the info needed to drive
+    // the canvas renderer and the gcode sequential view.
+    const Print* fff_print = m_process->fff_print();
+    if (fff_print != nullptr && !fff_print->config().sla_material_extruder.values.empty()) {
+        const auto& sla_flags = fff_print->config().sla_material_extruder.values;
+        if (std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b){ return b; })) {
+            // Build sorted, deduped SLA extruder list per layer Z from the print objects.
+            std::map<double, std::vector<unsigned int>> sla_exts_by_z;
+            for (const PrintObject* obj : fff_print->objects()) {
+                for (const Layer* layer : obj->layers()) {
+                    auto& exts = sla_exts_by_z[layer->print_z];
+                    for (const LayerRegion* lr : layer->regions()) {
+                        const unsigned int ext = lr->region().extruder(frPerimeter);
+                        if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1])
+                            continue;
+                        if (!lr->slices().empty())
+                            exts.push_back(ext);
+                    }
+                    std::sort(exts.begin(), exts.end());
+                    exts.erase(std::unique(exts.begin(), exts.end()), exts.end());
+                }
+            }
+
+            // Two-pass rebuild: copy FFF positions in order; after each layer's last FFF
+            // position, append SLA sentinel entries and record their info.
+            // Track the remapped positions for span_min_id / span_max_id.
+            std::vector<unsigned int> new_values;
+            std::vector<unsigned int> new_alt;
+            new_values.reserve(values.size() + sla_exts_by_z.size() * 2);
+            new_alt.reserve(new_values.capacity());
+
+            const unsigned int fff_range_start = static_cast<unsigned int>(range[0]);
+            int new_span_min = 0, new_span_max = -1;
+            const int orig_min = visible_range_min_id.has_value() ? (int)*visible_range_min_id : -1;
+            const int orig_max = visible_range_max_id.has_value() ? (int)*visible_range_max_id : -1;
+
+            for (size_t idx = 0; idx < values.size(); ++idx) {
+                const int new_idx = (int)new_values.size();
+                if ((int)idx == orig_min) new_span_min = new_idx;
+                if ((int)idx == orig_max) new_span_max = new_idx;
+
+                new_values.push_back(values[idx]);
+                new_alt.push_back(alternate_values[idx]);
+
+                const float cur_z = vertex_zs[idx];
+                const bool last_of_layer = (idx + 1 >= values.size()) ||
+                                           (std::abs(vertex_zs[idx + 1] - cur_z) > 1e-4f);
+                if (last_of_layer) {
+                    const double layer_z = static_cast<double>(cur_z);
+                    const std::vector<unsigned int>* exts_ptr = nullptr;
+                    auto it = sla_exts_by_z.find(layer_z);
+                    if (it != sla_exts_by_z.end()) {
+                        exts_ptr = &it->second;
+                    } else {
+                        for (const auto& [z, v] : sla_exts_by_z) {
+                            if (std::abs(z - layer_z) < 1e-4) { exts_ptr = &v; break; }
+                        }
+                    }
+                    if (exts_ptr) {
+                        const unsigned int last_fff_vtx = values[idx] - 1; // 0-based
+                        for (const unsigned int ext_id : *exts_ptr) {
+                            const int sla_pos = (int)new_values.size();
+                            new_values.push_back(0u);
+                            new_alt.push_back(0u);
+                            m_sla_steps_by_pos[sla_pos] = { layer_z, ext_id, fff_range_start, last_fff_vtx };
+                        }
+                    }
+                }
+            }
+
+            values          = std::move(new_values);
+            alternate_values = std::move(new_alt);
+            if (visible_range_min_id.has_value()) visible_range_min_id = new_span_min;
+            if (visible_range_max_id.has_value()) visible_range_max_id = new_span_max;
+        }
+    }
+
+    const int span_min_id = visible_range_min_id.has_value() ? (int)*visible_range_min_id : 0;
+    const int span_max_id = visible_range_max_id.has_value() ? (int)*visible_range_max_id : static_cast<int>(values.size()) - 1;
 
     m_moves_slider->SetSliderValues(values);
     m_moves_slider->SetSliderAlternateValues(alternate_values);
@@ -920,6 +1006,8 @@ void Preview::load_print_as_fff(bool keep_z_range)
 
     if (m_loaded || m_process->current_printer_technology() != ptFFF)
         return;
+
+    m_canvas->reset_clipping_planes_cache();
 
     // we require that there's at least one object and the posSlice step
     // is performed on all of them(this ensures that _shifted_copies was
@@ -984,9 +1072,71 @@ void Preview::load_print_as_fff(bool keep_z_range)
             // the view type has been changed by the call m_canvas->load_gcode_preview()
             if (gcode_view_type == libvgcode::EViewType::ColorPrint && !color_print_values.empty())
                 m_canvas->set_gcode_view_type(gcode_view_type);
-            zs = m_canvas->get_gcode_layers_zs();
+            // Build Z list from the current slice instead of the stale gcode viewer
+            // cache.  get_gcode_layers_zs() retains data from the previous gcode run
+            // so after switching a material to SLA and re-slicing (without regenerating
+            // gcode) the old FFF layer count would persist, making the slider appear
+            // non-functional.
+            if (print->is_step_done(posSlice)) {
+                for (const PrintObject* obj : print->objects()) {
+                    for (const Layer* layer : obj->layers())
+                        zs.push_back(layer->print_z);
+                    for (const SupportLayer* layer : obj->support_layers())
+                        zs.push_back(layer->print_z);
+                }
+                sort_remove_duplicates(zs);
+            } else {
+                zs = m_canvas->get_gcode_layers_zs();
+            }
         }
-        m_moves_slider->Show(gcode_preview_data_valid && !zs.empty());
+        if (gcode_preview_data_valid) {
+            m_moves_slider->Show(!zs.empty());
+        } else if (print->is_step_done(posSlice)) {
+            // Pregcode preview: if any SLA channels are configured, set up the moves
+            // slider with one sentinel step per (layer_z, SLA extruder) pair so the
+            // user can scrub through SLA exposure geometry before G-code is generated.
+            const auto& sla_flags = print->config().sla_material_extruder.values;
+            const bool has_sla = std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b){ return b; });
+            if (has_sla && !zs.empty()) {
+                m_sla_steps_by_pos.clear();
+                std::map<double, std::vector<unsigned int>> sla_exts_by_z;
+                for (const PrintObject* obj : print->objects()) {
+                    for (const Layer* layer : obj->layers()) {
+                        auto& exts = sla_exts_by_z[layer->print_z];
+                        for (const LayerRegion* lr : layer->regions()) {
+                            const unsigned int ext = lr->region().extruder(frPerimeter);
+                            if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1] || lr->slices().empty())
+                                continue;
+                            exts.push_back(ext);
+                        }
+                        std::sort(exts.begin(), exts.end());
+                        exts.erase(std::unique(exts.begin(), exts.end()), exts.end());
+                    }
+                }
+                std::vector<unsigned int> sla_vals;
+                for (const auto& [layer_z, exts] : sla_exts_by_z)
+                    for (const unsigned int ext_id : exts) {
+                        m_sla_steps_by_pos[static_cast<int>(sla_vals.size())] = { layer_z, ext_id, 0u, UINT_MAX };
+                        sla_vals.push_back(static_cast<unsigned int>(sla_vals.size()) + 1u); // 1-based step number
+                    }
+                if (!sla_vals.empty()) {
+                    m_moves_slider->SetSliderValues(sla_vals);
+                    m_moves_slider->SetSliderAlternateValues({}); // clear stale gcode ids
+                    m_moves_slider->Freeze();
+                    m_moves_slider->SetMaxPos(static_cast<int>(sla_vals.size()) - 1);
+                    m_moves_slider->SetSelectionSpan(0, static_cast<int>(sla_vals.size()) - 1);
+                    m_moves_slider->Thaw();
+                    m_moves_slider->ShowLowerThumb(false);
+                    m_moves_slider->Show(true);
+                } else {
+                    m_moves_slider->Hide();
+                }
+            } else {
+                m_moves_slider->Hide();
+            }
+        } else {
+            m_moves_slider->Hide();
+        }
 
         if (!zs.empty() && !m_keep_current_preview_type) {
             const unsigned int number_extruders = wxGetApp().is_editor() ?
@@ -1008,13 +1158,46 @@ void Preview::load_print_as_fff(bool keep_z_range)
             }
         }
 
+        // Augment slider Z list with any SLA-only layers not captured by the gcode
+        // viewer (layers where only SLA extruders are active have no FFF toolpaths).
+        // Without this the slider's max Z stops at the last FFF layer, hiding the
+        // top SLA band from the user entirely.
+        //
+        // Only add a layer->print_z when no gcode Z is already within 1e-4 mm.
+        // The gcode viewer stores Z as float; the cast back to double gives values
+        // that differ from layer->print_z by ~3e-8. Without the tolerance guard,
+        // sort_remove_duplicates (exact equality) would keep both representations
+        // and create duplicate near-identical slider positions — every layer would
+        // appear twice, causing the gcode viewer to receive doubled position indices
+        // and show one extra FFF layer relative to the SLA cap.
+        if (print->is_step_done(posSlice)) {
+            const auto& sla_flags = print->config().sla_material_extruder.values;
+            if (std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b) { return b; })) {
+                // zs is sorted at this point.
+                for (const PrintObject* obj : print->objects()) {
+                    for (const Layer* layer : obj->layers()) {
+                        const double pz = layer->print_z;
+                        auto it = std::lower_bound(zs.begin(), zs.end(), pz - 1e-4);
+                        if (it == zs.end() || *it > pz + 1e-4)
+                            zs.push_back(pz);
+                    }
+                }
+                sort_remove_duplicates(zs);
+            }
+        }
+
         if (zs.empty()) {
             // all layers filtered out
             hide_layers_slider();
             m_canvas_widget->Refresh();
         }
-        else
+        else {
             update_layers_slider(zs, keep_z_range);
+            // SetSelectionSpan never fires the thumb-move callback (Freeze suppresses
+            // it), so m_fff_preview_high_z would stay at -DBL_MAX until the user drags
+            // the slider. Push the current range into the canvas now.
+            on_layers_slider_scroll_changed();
+        }
     }
 }
 
@@ -1047,10 +1230,25 @@ void Preview::load_print_as_sla()
 
     if (IsShown()) {
         m_canvas->load_sla_preview();
-        m_moves_slider->Hide();
 
-        if (n_layers > 0)
+        if (n_layers > 0) {
+            std::vector<unsigned int> layer_steps;
+            layer_steps.reserve(n_layers);
+            for (unsigned int i = 0; i < n_layers; ++i)
+                layer_steps.push_back(i + 1);
+            m_moves_slider->SetSliderValues(layer_steps);
+            m_moves_slider->SetSliderAlternateValues({}); // clear stale gcode ids
+            m_moves_slider->Freeze();
+            m_moves_slider->SetMaxPos(static_cast<int>(n_layers) - 1);
+            m_moves_slider->SetSelectionSpan(0, static_cast<int>(n_layers) - 1);
+            m_moves_slider->Thaw();
+            m_moves_slider->ShowLowerThumb(false);
+            m_moves_slider->Show(true);
+
             update_layers_slider(zs);
+        } else {
+            m_moves_slider->Hide();
+        }
 
         m_loaded = true;
     }
@@ -1061,8 +1259,22 @@ void Preview::on_layers_slider_scroll_changed()
     if (IsShown()) {
         PrinterTechnology tech = m_process->current_printer_technology();
         if (tech == ptFFF) {
-            m_canvas->set_volumes_z_range({ m_layers_slider->GetLowerValue(), m_layers_slider->GetHigherValue() });
-            m_canvas->set_toolpaths_z_range({ static_cast<unsigned int>(m_layers_slider->GetLowerPos()), static_cast<unsigned int>(m_layers_slider->GetHigherPos()) });
+            const double lo_z = m_layers_slider->GetLowerValue();
+            const double hi_z = m_layers_slider->GetHigherValue();
+            m_canvas->set_volumes_z_range({ lo_z, hi_z });
+            // Map slider Z values to gcode-viewer layer positions by Z lookup rather
+            // than using the raw augmented slider position index. The augmented slider
+            // may contain SLA-only layer positions that have no corresponding entry in
+            // the gcode layer list, so a direct index would point to the wrong layer.
+            const std::vector<double> gcode_zs = m_canvas->get_gcode_layers_zs();
+            auto z_to_gcode_pos = [&gcode_zs](double z) -> unsigned int {
+                if (gcode_zs.empty()) return 0;
+                // Last gcode layer whose Z is within 1e-4 of z (covers float→double gap).
+                auto it = std::upper_bound(gcode_zs.begin(), gcode_zs.end(), z + 1e-4);
+                if (it == gcode_zs.begin()) return 0;
+                return static_cast<unsigned int>((--it) - gcode_zs.begin());
+            };
+            m_canvas->set_toolpaths_z_range({ z_to_gcode_pos(lo_z), z_to_gcode_pos(hi_z) });
             m_canvas->set_as_dirty();
         }
         else if (tech == ptSLA) {
@@ -1070,13 +1282,61 @@ void Preview::on_layers_slider_scroll_changed()
             m_canvas->set_clipping_plane(1, ClippingPlane(-Vec3d::UnitZ(), m_layers_slider->GetHigherValue()));
             m_canvas->set_layer_slider_index(m_layers_slider->GetHigherPos());
             m_canvas->render();
+            // Keep horizontal slider in sync with the vertical layer slider's upper thumb.
+            if (m_moves_slider->IsShown()) {
+                const int layers_pos = m_layers_slider->GetHigherPos();
+                if (m_moves_slider->GetHigherPos() != layers_pos) {
+                    m_moves_slider->Freeze();
+                    m_moves_slider->SetHigherPos(layers_pos);
+                    m_moves_slider->Thaw();
+                }
+            }
         }
     }
 }
 
 void Preview::on_moves_slider_scroll_changed()
 {
-    m_canvas->update_gcode_sequential_view_current(static_cast<unsigned int>(m_moves_slider->GetLowerValue() - 1), static_cast<unsigned int>(m_moves_slider->GetHigherValue() - 1));
+    if (m_process->current_printer_technology() == ptSLA) {
+        // Pure SLA: the horizontal slider mirrors the vertical layer slider's upper thumb.
+        // Updating the layers slider fires on_layers_slider_scroll_changed() via its Thaw
+        // callback, which updates the clipping planes and renders. The equality guard
+        // prevents re-entrant loops when the vertical slider is the driver.
+        const int pos = m_moves_slider->GetHigherPos();
+        if (m_layers_slider->GetHigherPos() != pos) {
+            m_layers_slider->Freeze();
+            m_layers_slider->SetHigherPos(pos);
+            m_layers_slider->Thaw();
+        }
+        return;
+    }
+
+    // FFF (possibly with SLA material channels).
+    // Check whether the current slider position is a virtual SLA exposure step
+    // (sentinel value 0) or a real FFF G-code move.
+    const int higher_pos = m_moves_slider->GetHigherPos();
+    const auto sla_it = m_sla_steps_by_pos.find(higher_pos);
+    if (sla_it != m_sla_steps_by_pos.end()) {
+        // SLA step: freeze FFF moves at the last move of this layer, and tell the
+        // renderer to show SLA exposures up to (layer_z, ext_id).
+        const SlaStepInfo& info = sla_it->second;
+        if (!active_gcode_result()->moves.empty()) {
+            // Lower bound: use the slider's current lower value if it's a real FFF move;
+            // otherwise fall back to the stored enabled-range start.
+            const unsigned int lower_vtx = (m_moves_slider->GetLowerValue() > 0)
+                ? static_cast<unsigned int>(m_moves_slider->GetLowerValue() - 1)
+                : info.fff_range_start;
+            m_canvas->update_gcode_sequential_view_current(lower_vtx, info.fff_upper_vtx);
+        }
+        m_canvas->set_fff_sla_step(info.layer_z, info.ext_id);
+    } else {
+        // FFF move: clear any SLA step filter and advance the gcode view normally.
+        m_canvas->clear_fff_sla_step();
+        const int lower_val = m_moves_slider->GetLowerValue();
+        m_canvas->update_gcode_sequential_view_current(
+            lower_val > 0 ? static_cast<unsigned int>(lower_val - 1) : 0u,
+            static_cast<unsigned int>(m_moves_slider->GetHigherValue() - 1));
+    }
     m_canvas->set_as_dirty();
     m_canvas->request_extra_frame();
 }

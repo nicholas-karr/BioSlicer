@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.bioslicer.BioSlicer</id>
+  <name>BioSlicer</name>
+  <summary>3D Printing Slicer</summary>
+  <description>
+    <p>BioSlicer is a 3D printing slicer based on PrusaSlicer, with additional features for bioprinting and multi-material workflows.</p>
+  </description>
+  <launchable type="desktop-id">com.bioslicer.BioSlicer.desktop</launchable>
+  <url type="homepage">https://github.com/prusa3d/PrusaSlicer</url>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0+</project_license>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.9.4" date="2024-01-01"/>
+  </releases>
+</component>

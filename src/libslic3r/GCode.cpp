@@ -34,6 +34,7 @@
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTowerIntegration.hpp"
+#include "libslic3r/GCode/SLAVideoSynth.hpp"
 #include "libslic3r/GCode/Travels.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
@@ -50,10 +51,10 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <chrono>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
 #include <math.h>
 #include <map>
 #include <optional>
@@ -67,7 +68,6 @@
 #include <boost/foreach.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/process.hpp>
 
 #include <boost/nowide/iostream.hpp>
 #include <boost/nowide/cstdio.hpp>
@@ -107,8 +107,6 @@ using namespace std::literals::string_view_literals;
 namespace Slic3r {
 
 namespace {
-
-namespace process = boost::process;
 
 class Sha256
 {
@@ -289,149 +287,6 @@ static std::string sha256_digest_to_hex(const std::array<unsigned char, 32> &dig
     return out;
 }
 
-static void write_sla_synth_pgm_frame_or_throw(const boost::filesystem::path &frame_path, int width, int height, size_t frame_idx, unsigned int extruder_id)
-{
-    FilePtr file(boost::nowide::fopen(frame_path.string().c_str(), "wb"));
-    if (file.f == nullptr)
-        throw Slic3r::ExportError(format("Failed to create synthesized SLA frame: %1%", frame_path.string()));
-
-    if (::fprintf(file.f, "P5\n%d %d\n255\n", width, height) < 0)
-        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame header: %1%", frame_path.string()));
-
-    std::vector<unsigned char> pixels(size_t(width) * size_t(height), 0);
-    const int stripe_period = 64;
-    const int stripe_width  = 24;
-    const int phase         = int((frame_idx * 13u + size_t(extruder_id) * 29u) % size_t(stripe_period));
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int x_mod = (x + phase) % stripe_period;
-            unsigned char value = 0;
-            if (x_mod < stripe_width)
-                value = 255;
-            pixels[size_t(y) * size_t(width) + size_t(x)] = value;
-        }
-    }
-
-    if (!pixels.empty() && ::fwrite(pixels.data(), 1, pixels.size(), file.f) != pixels.size())
-        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame pixels: %1%", frame_path.string()));
-}
-
-static double mm_to_px_x(double x_mm, double bed_min_x, double bed_max_x, int width)
-{
-    const double span = std::max(1e-9, bed_max_x - bed_min_x);
-    return (x_mm - bed_min_x) * double(width - 1) / span;
-}
-
-static double mm_to_px_y(double y_mm, double bed_min_y, double bed_max_y, int height)
-{
-    const double span = std::max(1e-9, bed_max_y - bed_min_y);
-    return (bed_max_y - y_mm) * double(height - 1) / span;
-}
-
-static void write_sla_slice_pgm_frame_or_throw(
-    const boost::filesystem::path            &frame_path,
-    int                                       width,
-    int                                       height,
-    const ExPolygons                         &expolys,
-    const BoundingBoxf                       &bed_bbox)
-{
-    FilePtr file(boost::nowide::fopen(frame_path.string().c_str(), "wb"));
-    if (file.f == nullptr)
-        throw Slic3r::ExportError(format("Failed to create synthesized SLA frame: %1%", frame_path.string()));
-
-    if (::fprintf(file.f, "P5\n%d %d\n255\n", width, height) < 0)
-        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame header: %1%", frame_path.string()));
-
-    std::vector<unsigned char> pixels(size_t(width) * size_t(height), 0);
-
-    struct RingPx { std::vector<Vec2d> points; };
-    struct ExPolygonPx { std::vector<RingPx> rings; };
-
-    std::vector<ExPolygonPx> expolys_px;
-    expolys_px.reserve(expolys.size());
-
-    const double bed_min_x = bed_bbox.min.x();
-    const double bed_max_x = bed_bbox.max.x();
-    const double bed_min_y = bed_bbox.min.y();
-    const double bed_max_y = bed_bbox.max.y();
-
-    auto make_polygon_ring = [&](const Polygon &poly) -> RingPx {
-        RingPx ring;
-        if (poly.points.size() < 3)
-            return ring;
-        ring.points.reserve(poly.points.size());
-        for (const Point &p : poly.points) {
-            const double x_mm = unscale<double>(p.x());
-            const double y_mm = unscale<double>(p.y());
-            ring.points.emplace_back(
-                mm_to_px_x(x_mm, bed_min_x, bed_max_x, width),
-                mm_to_px_y(y_mm, bed_min_y, bed_max_y, height)
-            );
-        }
-        return ring;
-    };
-
-    for (const ExPolygon &expoly : expolys) {
-        ExPolygonPx ep;
-        {
-            RingPx contour = make_polygon_ring(expoly.contour);
-            if (!contour.points.empty())
-                ep.rings.emplace_back(std::move(contour));
-        }
-        for (const Polygon &hole : expoly.holes) {
-            RingPx hole_ring = make_polygon_ring(hole);
-            if (!hole_ring.points.empty())
-                ep.rings.emplace_back(std::move(hole_ring));
-        }
-        if (!ep.rings.empty())
-            expolys_px.emplace_back(std::move(ep));
-    }
-
-    std::vector<double> intersections;
-    for (int y = 0; y < height; ++y) {
-        const double yy = double(y) + 0.5;
-
-        for (const ExPolygonPx &ep : expolys_px) {
-            intersections.clear();
-
-            for (const RingPx &ring : ep.rings) {
-                const size_t n = ring.points.size();
-                for (size_t i = 0, j = n - 1; i < n; j = i++) {
-                    const Vec2d &a = ring.points[j];
-                    const Vec2d &b = ring.points[i];
-                    const double y1 = a.y();
-                    const double y2 = b.y();
-
-                    if ((y1 <= yy && yy < y2) || (y2 <= yy && yy < y1)) {
-                        const double t = (yy - y1) / (y2 - y1);
-                        const double xx = a.x() + t * (b.x() - a.x());
-                        intersections.emplace_back(xx);
-                    }
-                }
-            }
-
-            if (intersections.empty())
-                continue;
-
-            std::sort(intersections.begin(), intersections.end());
-            for (size_t i = 0; i + 1 < intersections.size(); i += 2) {
-                int x0 = int(std::ceil(intersections[i]));
-                int x1 = int(std::floor(intersections[i + 1]));
-                if (x1 < 0 || x0 >= width)
-                    continue;
-                x0 = std::max(0, x0);
-                x1 = std::min(width - 1, x1);
-                for (int x = x0; x <= x1; ++x)
-                    pixels[size_t(y) * size_t(width) + size_t(x)] = 255;
-            }
-        }
-    }
-
-    if (!pixels.empty() && ::fwrite(pixels.data(), 1, pixels.size(), file.f) != pixels.size())
-        throw Slic3r::ExportError(format("Failed writing synthesized SLA frame pixels: %1%", frame_path.string()));
-}
-
 static std::vector<ExPolygons> collect_sla_slice_expolys_per_layer(const Print &print, unsigned int extruder_id)
 {
     std::map<coord_t, ExPolygons> by_layer;
@@ -445,8 +300,12 @@ static std::vector<ExPolygons> collect_sla_slice_expolys_per_layer(const Print &
             ExPolygons layer_expolys;
 
             for (const LayerRegion *layer_region : layer->regions()) {
-                const unsigned int region_extruder = layer_region->region().extruder(frPerimeter);
-                if (region_extruder == 0 || region_extruder - 1 != extruder_id)
+                const PrintRegion &rgn = layer_region->region();
+                const bool matches =
+                    (rgn.extruder(frPerimeter)   != 0 && rgn.extruder(frPerimeter)   - 1 == extruder_id) ||
+                    (rgn.extruder(frInfill)      != 0 && rgn.extruder(frInfill)      - 1 == extruder_id) ||
+                    (rgn.extruder(frSolidInfill) != 0 && rgn.extruder(frSolidInfill) - 1 == extruder_id);
+                if (!matches)
                     continue;
 
                 for (const Surface &surface : layer_region->slices())
@@ -475,55 +334,6 @@ static std::vector<ExPolygons> collect_sla_slice_expolys_per_layer(const Print &
     return out;
 }
 
-static void encode_sla_video_with_ffmpeg_or_throw(
-    const boost::filesystem::path &frames_dir,
-    const boost::filesystem::path &output_path,
-    int fps,
-    bool lossless)
-{
-    const boost::filesystem::path ffmpeg_path = process::search_path("ffmpeg");
-    if (ffmpeg_path.empty())
-        throw Slic3r::ExportError("Failed to locate ffmpeg in PATH for native SLA video synthesis.");
-
-    std::vector<std::string> args{
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-framerate", std::to_string(std::max(1, fps)),
-        "-f", "image2",
-        "-i", (frames_dir / "frame_%06d.pgm").string()
-    };
-
-    args.insert(args.end(), {"-c:v", "libx265"});
-    if (lossless)
-        args.insert(args.end(), {"-x265-params", "lossless=1"});
-    else
-        args.insert(args.end(), {"-crf", "18", "-preset", "medium"});
-
-    args.insert(args.end(), {
-        "-an",
-        "-pix_fmt", "yuv420p",
-        output_path.string()
-    });
-
-    process::ipstream stderr_stream;
-    process::child child(ffmpeg_path, process::args(args), process::std_out > process::null, process::std_err > stderr_stream);
-
-    std::string stderr_text;
-    std::string line;
-    while (child.running() && std::getline(stderr_stream, line)) {
-        stderr_text += line;
-        stderr_text += "\n";
-    }
-    child.wait();
-
-    if (child.exit_code() != 0)
-        throw Slic3r::ExportError(format("Native SLA synthesis failed during ffmpeg encode (libx265): %1%", stderr_text));
-
-    if (!boost::filesystem::exists(output_path))
-        throw Slic3r::ExportError(format("Native SLA synthesis finished without output file: %1%", output_path.string()));
-}
-
 static void synthesize_sla_video_or_throw(
     const boost::filesystem::path &output_path,
     unsigned int extruder_id,
@@ -533,43 +343,33 @@ static void synthesize_sla_video_or_throw(
     int fps,
     bool lossless,
     const std::vector<ExPolygons> *layer_expolys,
-    const BoundingBoxf &bed_bbox)
+    const BoundingBoxf &bed_bbox,
+    double display_width_mm,
+    double display_height_mm)
 {
     const size_t geometry_frame_count = (layer_expolys == nullptr) ? 0u : layer_expolys->size();
     const size_t safe_frame_count = std::max<size_t>(geometry_frame_count, 1u);
     if (width < 16 || height < 16)
         throw Slic3r::ExportError("Native SLA synthesis requires frame dimensions >= 16 px.");
 
+    const BoundingBoxf proj_bbox = sla_proj_bbox(bed_bbox, display_width_mm, display_height_mm);
+
     if (!output_path.parent_path().empty())
         boost::filesystem::create_directories(output_path.parent_path());
 
-    const boost::filesystem::path temp_root = boost::filesystem::temp_directory_path();
-    const boost::filesystem::path frames_dir = temp_root / boost::filesystem::unique_path("bioslicer_sla_frames_%%%%-%%%%-%%%%");
-    boost::filesystem::create_directories(frames_dir);
-
-    try {
-        for (size_t frame_idx = 0; frame_idx < safe_frame_count; ++frame_idx) {
-            const boost::filesystem::path frame_path = frames_dir / format("frame_%1$06d.pgm", int(frame_idx));
+    encode_sla_video_with_ffmpeg_or_throw(
+        output_path, fps, lossless, safe_frame_count,
+        [&](std::ostream &os, size_t frame_idx) {
             if (layer_expolys != nullptr && !layer_expolys->empty()) {
                 const size_t src_idx = std::min(
                     (frame_idx * layer_expolys->size()) / safe_frame_count,
                     layer_expolys->size() - 1
                 );
-                write_sla_slice_pgm_frame_or_throw(frame_path, width, height, (*layer_expolys)[src_idx], bed_bbox);
+                render_sla_slice_pgm_frame(os, width, height, (*layer_expolys)[src_idx], proj_bbox);
             } else {
-                write_sla_synth_pgm_frame_or_throw(frame_path, width, height, frame_idx, extruder_id);
+                render_sla_synth_pgm_frame(os, width, height);
             }
-        }
-
-        encode_sla_video_with_ffmpeg_or_throw(frames_dir, output_path, fps, lossless);
-    } catch (...) {
-        boost::system::error_code ec;
-        boost::filesystem::remove_all(frames_dir, ec);
-        throw;
-    }
-
-    boost::system::error_code ec;
-    boost::filesystem::remove_all(frames_dir, ec);
+        });
 }
 
 } // namespace
@@ -625,14 +425,6 @@ static void synthesize_sla_video_or_throw(
             throw Slic3r::ExportError(format("Failed to read SLA video file: %1%", path));
 
         return video_buffer;
-    }
-
-    static std::string sha256_hex(const std::vector<unsigned char> &data)
-    {
-        Sha256 sha;
-        if (! data.empty())
-            sha.update(data.data(), data.size());
-        return sha256_digest_to_hex(sha.finalize());
     }
 
     // Return true if tch_prefix is found in custom_gcode
@@ -879,6 +671,25 @@ GCodeGenerator::ObjectsLayerToPrint GCodeGenerator::collect_layers_to_print(cons
         bool has_extrusions = (layer_to_print.object_layer && layer_to_print.object_layer->has_extrusions())
             || (layer_to_print.support_layer && layer_to_print.support_layer->has_extrusions());
 
+        // SLA-channel regions generate no FFF toolpaths, but the layer is not empty —
+        // the exposure is handled by the SLA video pipeline. Treat such layers as
+        // having extrusions so the continuity warning is not falsely triggered.
+        if (!has_extrusions && layer_to_print.object_layer) {
+            const auto& sla_flags = object.print()->config().sla_material_extruder.values;
+            if (!sla_flags.empty()) {
+                for (const LayerRegion* lr : layer_to_print.object_layer->regions()) {
+                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
+                        const unsigned int ext = lr->region().extruder(role);
+                        if (ext > 0 && ext <= (unsigned int)sla_flags.size() && sla_flags[ext - 1]) {
+                            has_extrusions = true;
+                            break;
+                        }
+                    }
+                    if (has_extrusions) break;
+                }
+            }
+        }
+
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
         if (layers_to_print.size() == 1u) {
@@ -1111,6 +922,7 @@ GCodeGenerator::GCodeGenerator(const Print* print) :
 
 void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    BOOST_LOG_TRIVIAL(debug) << "GCodeGenerator::do_export() entered";
     CNumericLocalesSetter locales_setter;
     const bool export_to_binary_gcode = print->full_print_config().option<ConfigOptionBool>("binary_gcode")->value;
 
@@ -1675,9 +1487,69 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
                 [&file](const char* sz) { file.write(sz); },
                 [&print]() { print.throw_if_canceled(); });
 
+        // Emit Klipper process-parameter variables before the video blob so they appear
+        // at the top of the file and can be overridden in the Mainsail Variables panel.
+        // Each group is a single compact Python dict (no spaces — Klipper's GCode parser
+        // is space-delimited, so the VALUE token must be space-free).
+        // Keys are extruder indices (ints).  Override dicts default to {} (no overrides).
+        if (m_config.gcode_flavor.value == gcfKlipper) {
+            const int bte = m_config.bed_temperature_extruder.value;
+            const int bed_ext = (bte > 0 && bte <= (int)sla_video_extruder_count) ? bte - 1 : 0;
+
+            // Build compact dict strings grouped by channel type.
+            std::string sla_exp, sla_dbf, sla_daf, fff_flt, fff_t;
+            for (size_t i = 0; i < sla_video_extruder_count; ++i) {
+                if (m_config.sla_material_extruder.get_at(i)) {
+                    if (!sla_exp.empty()) { sla_exp += ','; sla_dbf += ','; sla_daf += ','; }
+                    sla_exp += format("%zu:%.6g", i, m_config.sla_material_exposure_time.get_at(i));
+                    sla_dbf += format("%zu:%.6g", i, m_config.sla_material_delay_before_exposure.get_at(i));
+                    sla_daf += format("%zu:%.6g", i, m_config.sla_material_delay_after_exposure.get_at(i));
+                } else {
+                    if (!fff_flt.empty()) { fff_flt += ','; fff_t += ','; }
+                    fff_flt += format("%zu:%d", i, m_config.first_layer_temperature.get_at(i));
+                    fff_t   += format("%zu:%d", i, m_config.temperature.get_at(i));
+                }
+            }
+
+            // Human-readable comment summary.
+            file.write("; === BioSlicer process parameters ===\n");
+            for (size_t i = 0; i < sla_video_extruder_count; ++i) {
+                if (m_config.sla_material_extruder.get_at(i))
+                    file.write_format(
+                        "; extruder %zu (SLA): exposure=%.4gs delay_before=%.4gs delay_after=%.4gs\n",
+                        i,
+                        m_config.sla_material_exposure_time.get_at(i),
+                        m_config.sla_material_delay_before_exposure.get_at(i),
+                        m_config.sla_material_delay_after_exposure.get_at(i));
+                else
+                    file.write_format(
+                        "; extruder %zu (FFF): first_layer_temp=%dC temp=%dC\n",
+                        i,
+                        m_config.first_layer_temperature.get_at(i),
+                        m_config.temperature.get_at(i));
+            }
+            file.write_format("; bed: first_layer_temp=%dC temp=%dC\n",
+                m_config.first_layer_bed_temperature.get_at(bed_ext),
+                m_config.bed_temperature.get_at(bed_ext));
+            file.write("; Override: BIOSLICER_OVERRIDE PARAM=sla_exposure EXTRUDER=4 VALUE=7.0  (see bioslicer_klipper.cfg)\n\n");
+
+            // Executable variable block — one SET_GCODE_VARIABLE per parameter group.
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_exposure VALUE={%s}\n",       sla_exp.c_str());
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_delay_before VALUE={%s}\n",   sla_dbf.c_str());
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_delay_after VALUE={%s}\n",    sla_daf.c_str());
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=fff_first_layer_temp VALUE={%s}\n", fff_flt.c_str());
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=fff_temp VALUE={%s}\n",           fff_t.c_str());
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=bed_first_layer_temp VALUE=%d\n",
+                m_config.first_layer_bed_temperature.get_at(bed_ext));
+            file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=bed_temp VALUE=%d\n",
+                m_config.bed_temperature.get_at(bed_ext));
+            file.write("BIOSLICER_CHECK_PROCESS_OVERRIDES\n\n");
+        }
+
         // Emit SLA material videos either as base64 payload comments or as external references.
         static constexpr const size_t max_row_length = 78;
         std::set<std::string> emitted_video_names;
+        unsigned int sla_video_position = 0;
 
         for (size_t extruder_id = 0; extruder_id < sla_video_extruder_count; ++extruder_id) {
             if (!m_config.sla_material_extruder.get_at(extruder_id))
@@ -1692,6 +1564,8 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
 
             if (synthesize_video) {
                 const std::vector<ExPolygons> layer_expolys = collect_sla_slice_expolys_per_layer(print, unsigned(extruder_id));
+                if (layer_expolys.empty())
+                    continue;
                 BoundingBoxf bed_bbox(m_config.bed_shape.values);
                 if (!bed_bbox.defined || bed_bbox.size().x() <= 0. || bed_bbox.size().y() <= 0.) {
                     bed_bbox.min = Vec2d(0., 0.);
@@ -1721,14 +1595,22 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
                     m_config.sla_material_video_synth_fps.value,
                     m_config.sla_material_video_synth_lossless.value,
                     &layer_expolys,
-                    bed_bbox);
+                    bed_bbox,
+                    m_config.sla_material_video_synth_proj_width.value,
+                    m_config.sla_material_video_synth_proj_height.value);
             }
 
             if (video_path.empty())
                 continue;
 
+            // Don't embed a video for an extruder that has no geometry at any layer.
+            if (!synthesize_video && collect_sla_slice_expolys_per_layer(print, unsigned(extruder_id)).empty())
+                continue;
+
             if (!emitted_video_names.insert(video_name).second)
                 video_name = format("%1%_t%2%", video_name, extruder_id);
+
+            m_sla_video_index[unsigned(extruder_id)] = ++sla_video_position;
 
             file.write_format("; bioslicer_sla_material_map extruder=%u name=%s embedded=%d\n",
                 unsigned(extruder_id), video_name.c_str(), embed_video ? 1 : 0);
@@ -1736,10 +1618,13 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             if (embed_video) {
                 std::vector<unsigned char> video_data = read_binary_file_or_throw(video_path);
                 std::string encoded = encode_base64(video_data.data(), video_data.size());
-                std::string digest = sha256_hex(video_data);
+
+                Sha256 sha;
+                sha.update(video_data.data(), video_data.size());
+                const std::string video_sha256 = sha256_digest_to_hex(sha.finalize());
 
                 file.write_format("; bioslicer_sla_video begin name=%s extruder=%u bytes=%zu sha256=%s\n",
-                    video_name.c_str(), unsigned(extruder_id), video_data.size(), digest.c_str());
+                    video_name.c_str(), unsigned(extruder_id), video_data.size(), video_sha256.c_str());
 
                 for (size_t offset = 0; offset < encoded.size(); offset += max_row_length) {
                     const std::string chunk = encoded.substr(offset, max_row_length);
@@ -1820,6 +1705,24 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     ToolOrdering tool_ordering;
     unsigned int initial_extruder_id = (unsigned int)-1;
     unsigned int final_extruder_id   = (unsigned int)-1;
+    // For SLA-only prints the tool ordering is empty (no FFF paths) but the print is still valid.
+    const auto print_has_sla_regions = [&print]() -> bool {
+        const auto &sla_flags = print.config().sla_material_extruder.values;
+        if (sla_flags.empty()) return false;
+        for (const PrintObject *pobj : print.objects()) {
+            for (const Layer *layer : pobj->layers()) {
+                for (const LayerRegion *lr : layer->regions()) {
+                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
+                        const unsigned int ext1 = lr->region().extruder(role);
+                        if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1])
+                            return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
     bool         has_wipe_tower      = false;
     std::vector<const PrintInstance*> 					print_object_instances_ordering;
     std::vector<const PrintInstance*>::const_iterator 	print_object_instance_sequential_active;
@@ -1834,8 +1737,7 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1))
                 break;
         }
-        if (initial_extruder_id == static_cast<unsigned int>(-1))
-            // No object to print was found, cancel the G-code export.
+        if (initial_extruder_id == static_cast<unsigned int>(-1) && !print_has_sla_regions())
             throw Slic3r::SlicingError(_u8L("No extrusions were generated for objects."));
         // We don't allow switching of extruders per layer by Model::custom_gcode_per_print_z in sequential mode.
         // Use the extruder IDs collected from Regions.
@@ -1845,21 +1747,29 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         // If the tool ordering has been pre-calculated by Print class for wipe tower already, reuse it.
         tool_ordering = print.tool_ordering();
         tool_ordering.assign_custom_gcodes(print);
-        if (tool_ordering.all_extruders().empty())
-            // No object to print was found, cancel the G-code export.
+        if (tool_ordering.all_extruders().empty() && !print_has_sla_regions())
             throw Slic3r::SlicingError(_u8L("No extrusions were generated for objects."));
         has_wipe_tower = print.has_wipe_tower() && tool_ordering.has_wipe_tower();
-        initial_extruder_id = (has_wipe_tower && ! print.config().single_extruder_multi_material_priming) ?
-            // The priming towers will be skipped.
-            tool_ordering.all_extruders().back() :
-            // Don't skip the priming towers.
-            tool_ordering.first_extruder();
-        // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in Model::custom_gcode_per_print_z.
-        // Therefore initialize the printing extruders from there.
-        this->set_extruders(tool_ordering.all_extruders());
+        if (tool_ordering.all_extruders().empty()) {
+            // SLA-only print: no FFF extruder used. Use extruder 0 as a placeholder.
+            initial_extruder_id = 0;
+            this->set_extruders({0});
+            // Count layers from objects (tool ordering is empty for SLA-only).
+            for (const PrintObject *pobj : print.objects())
+                m_layer_count += (unsigned int)(pobj->instances().size() * pobj->layers().size());
+        } else {
+            initial_extruder_id = (has_wipe_tower && ! print.config().single_extruder_multi_material_priming) ?
+                // The priming towers will be skipped.
+                tool_ordering.all_extruders().back() :
+                // Don't skip the priming towers.
+                tool_ordering.first_extruder();
+            // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in Model::custom_gcode_per_print_z.
+            // Therefore initialize the printing extruders from there.
+            this->set_extruders(tool_ordering.all_extruders());
+            m_layer_count = tool_ordering.layer_tools().size();
+        }
         // Order object instances using a nearest neighbor search.
         print_object_instances_ordering = chain_print_object_instances(print);
-        m_layer_count = tool_ordering.layer_tools().size();
     }
     if (initial_extruder_id == (unsigned int)-1) {
         // Nothing to print!
@@ -1928,7 +1838,57 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         std::vector<unsigned char> is_extruder_used(std::max(size_t(255), print.config().nozzle_diameter.size()), 0);
         for (unsigned int extruder_id : tool_ordering.all_extruders())
             is_extruder_used[extruder_id] = true;
+        // Also mark SLA-channel extruders that have geometry — they never appear in tool_ordering.
+        {
+            const auto &sla_flags = print.config().sla_material_extruder.values;
+            if (!sla_flags.empty()) {
+                for (const PrintObject *pobj : print.objects()) {
+                    for (const Layer *layer : pobj->layers()) {
+                        for (const LayerRegion *lr : layer->regions()) {
+                            for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
+                                const unsigned int ext1 = lr->region().extruder(role);
+                                if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1])
+                                    is_extruder_used[ext1 - 1] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         this->placeholder_parser().set("is_extruder_used", new ConfigOptionBools(is_extruder_used));
+
+        // Build a "materials" placeholder: comma-separated <TYPE>_<NAME> per used extruder.
+        // TYPE comes from channel_type (uppercased), NAME from filament_settings_id with
+        // non-alphanumeric chars collapsed to '_'.
+        {
+            auto normalize = [](const std::string &in) {
+                std::string out;
+                out.reserve(in.size());
+                for (unsigned char c : in) {
+                    if (std::isalnum(c)) out.push_back(char(std::toupper(c)));
+                    else if (!out.empty() && out.back() != '_') out.push_back('_');
+                }
+                while (!out.empty() && out.back() == '_') out.pop_back();
+                return out;
+            };
+            const auto *channel_types = dynamic_cast<const ConfigOptionStrings *>(print.config().option("channel_type"));
+            // filament_settings_id lives in full_print_config — print.config() doesn't expose it.
+            const auto *filament_ids  = dynamic_cast<const ConfigOptionStrings *>(print.full_print_config().option("filament_settings_id"));
+            std::string materials;
+            const size_t n_ext = print.config().nozzle_diameter.size();
+            for (size_t i = 0; i < n_ext; ++i) {
+                if (!is_extruder_used[i]) continue;
+                std::string type = (channel_types && i < channel_types->values.size()) ? channel_types->values[i] : std::string();
+                std::string name = (filament_ids  && i < filament_ids->values.size())  ? filament_ids->values[i]  : std::string();
+                type = normalize(type);
+                name = normalize(name);
+                if (type.empty() && name.empty()) continue;
+                if (!materials.empty()) materials.push_back(',');
+                if (!type.empty()) { materials += type; materials.push_back('_'); }
+                materials += name;
+            }
+            this->placeholder_parser().set("materials", new ConfigOptionString(materials));
+        }
     }
 
     // Enable ooze prevention if configured so.
@@ -1945,6 +1905,16 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
 
     // Write the custom start G-code
     file.writeln(start_gcode);
+
+    // If any SLA videos are embedded, instruct the printer to load them.
+    if (!export_to_binary_gcode && sla_video_emission_requested) {
+        for (size_t i = 0; i < m_config.sla_material_extruder.values.size(); ++i) {
+            if (m_config.sla_material_extruder.get_at(i) && m_config.sla_material_video_embed.get_at(i)) {
+                file.writeln("SLA_LOAD_GCODE_VIDEOS");
+                break;
+            }
+        }
+    }
 
     this->_print_first_layer_extruder_temperatures(file, print, start_gcode, initial_extruder_id, true);
     this->_print_first_layer_chamber_temperature(file, print, start_gcode, config().chamber_minimal_temperature.get_at(initial_extruder_id), true, false);
@@ -2102,7 +2072,9 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     }
 
     // Write end commands to file.
-    file.write(this->retract_and_wipe());
+    // Skip the retraction for SLA-only prints — there is no filament loaded.
+    if (!tool_ordering.all_extruders().empty())
+        file.write(this->retract_and_wipe());
     file.write(m_writer.set_fan(0));
 
     // adds tag for processor
@@ -2261,12 +2233,16 @@ void GCodeGenerator::process_layers(
                 return LayerResult::make_nop_layer_result();
             } else {
                 const std::pair<coordf_t, ObjectsLayerToPrint> &layer = layers_to_print[layer_to_print_idx];
-                const LayerTools& layer_tools = tool_ordering.tools_for_layer(layer.first);
+                // SLA-only prints have an empty tool ordering; use a default LayerTools in that case.
+                static const LayerTools empty_layer_tools{};
+                const LayerTools& layer_tools = tool_ordering.empty()
+                    ? empty_layer_tools
+                    : tool_ordering.tools_for_layer(layer.first);
                 if (m_wipe_tower && layer_tools.has_wipe_tower)
                     m_wipe_tower->next_layer();
                 print.throw_if_canceled();
-                return this->process_layer(print, layer.second, layer_tools, 
-                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second }, 
+                return this->process_layer(print, layer.second, layer_tools,
+                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second },
                     &layer == &layers_to_print.back(), &print_object_instances_ordering, size_t(-1));
             }
         });
@@ -2359,8 +2335,12 @@ void GCodeGenerator::process_layers(
             } else {
                 ObjectLayerToPrint &layer = layers_to_print[layer_to_print_idx];
                 print.throw_if_canceled();
-                return this->process_layer(print, { std::move(layer) }, tool_ordering.tools_for_layer(layer.print_z()), 
-                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second }, 
+                static const LayerTools empty_layer_tools{};
+                const LayerTools& layer_tools = tool_ordering.empty()
+                    ? empty_layer_tools
+                    : tool_ordering.tools_for_layer(layer.print_z());
+                return this->process_layer(print, { std::move(layer) }, layer_tools,
+                    GCode::SmoothPathCaches{ smooth_path_cache_global, in.second },
                     &layer == &layers_to_print.back(), nullptr, single_object_idx);
             }
         });
@@ -3262,9 +3242,93 @@ LayerResult GCodeGenerator::process_layer(
     }
     const Layer  &layer = (object_layer != nullptr) ? *object_layer : *support_layer;
     LayerResult   result { {}, layer.id(), false, last_layer, false};
-    if (layer_tools.extruders.empty())
-        // Nothing to extrude.
+
+    // Collect SLA frame commands for this layer before any early return.
+    // SLA regions have no FFF extrusions and would otherwise be skipped.
+    std::string sla_gcode;
+    {
+        const auto &sla_flags = m_config.sla_material_extruder.values;
+        if (!sla_flags.empty()) {
+            std::set<unsigned int> sla_extruders_emitted;
+            for (const ObjectLayerToPrint &ltp : layers) {
+                if (!ltp.object_layer)
+                    continue;
+                for (const LayerRegion *lr : ltp.object_layer->regions()) {
+                    unsigned int ext1 = 0;
+                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
+                        const unsigned int e = lr->region().extruder(role);
+                        if (e > 0 && e <= (unsigned int)sla_flags.size() && sla_flags[e - 1]) {
+                            ext1 = e;
+                            break;
+                        }
+                    }
+                    if (ext1 == 0)
+                        continue;
+                    if (!sla_extruders_emitted.insert(ext1).second)
+                        continue;
+                    const unsigned int ext0 = ext1 - 1;
+                    const std::string sla_name = sanitize_sla_video_name(
+                        m_config.sla_material_video_names.get_at(ext0), ext0);
+                    const auto idx_it = m_sla_video_index.find(ext0);
+                    const std::string sla_video_num = std::to_string(
+                        idx_it != m_sla_video_index.end() ? idx_it->second : ext0 + 1);
+                    if (m_last_sla_extruder != int(ext1)) {
+                        sla_gcode += "SLA_CLEAR\n";
+                        sla_gcode += "BIOSLICER_MATERIAL_SWAP MATERIAL=" + sla_name + "\n";
+                        m_last_sla_extruder = int(ext1);
+                    }
+                    size_t &frame = m_sla_layer_counters[ext0];
+                    const int delay_before_ms = int(1000.0 * m_config.sla_material_delay_before_exposure.get_at(ext0));
+                    const int exposure_ms     = int(1000.0 * m_config.sla_material_exposure_time.get_at(ext0));
+                    const int delay_after_ms  = int(1000.0 * m_config.sla_material_delay_after_exposure.get_at(ext0));
+                    if (m_config.gcode_flavor.value == gcfKlipper) {
+                        // Emit sliced timing as metadata for GCodeProcessor time estimation.
+                        // Actual timing at print time comes from BIOSLICER_PROCESS_PARAMS variables,
+                        // which the user can override in Mainsail before printing.
+                        sla_gcode += format(";bioslicer_sla_params extruder=%u delay_before_ms=%d exposure_ms=%d delay_after_ms=%d\n",
+                            ext0, delay_before_ms, exposure_ms, delay_after_ms);
+                        // Tag read by GCodeProcessor to create a moves-slider step for this frame.
+                        sla_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
+                        sla_gcode += format("BIOSLICER_SLA_EXPOSE EXTRUDER=%u NAME=%s FRAME=%zu\n",
+                            ext0, sla_video_num.c_str(), frame++);
+                    } else {
+                        if (delay_before_ms > 0)
+                            sla_gcode += "G4 P" + std::to_string(delay_before_ms) + "\n";
+                        // Tag read by GCodeProcessor to create a moves-slider step for this frame.
+                        sla_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
+                        sla_gcode += "SLA_SHOW_FRAME NAME=" + sla_video_num + " FRAME=" + std::to_string(frame++) + "\n";
+                        if (exposure_ms > 0)
+                            sla_gcode += "G4 P" + std::to_string(exposure_ms) + "\n";
+                        if (delay_after_ms > 0)
+                            sla_gcode += "G4 P" + std::to_string(delay_after_ms) + "\n";
+                    }
+                }
+            }
+        }
+    }
+
+    if (layer_tools.extruders.empty()) {
+        // SLA-only layer: emit a layer-change marker, Z move, and SLA frame commands.
+        if (!sla_gcode.empty()) {
+            const coordf_t print_z = layer.print_z + m_config.z_offset.value;
+            std::string gcode;
+            gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + "\n";
+            gcode += std::string(";Z:") + float_to_string_decimal_point(print_z) + "\n";
+            m_last_layer_z = static_cast<float>(print_z);
+            m_max_layer_z  = std::max(m_max_layer_z, m_last_layer_z);
+            // Move the build plate to the correct height for this layer.
+            gcode += m_writer.travel_to_z(print_z);
+            if (m_layer_count > 0) {
+                gcode += m_writer.update_progress(++ m_layer_index, m_layer_count);
+                if (m_config.gcode_flavor.value == gcfKlipper)
+                    gcode += format("SET_PRINT_STATS_INFO CURRENT_LAYER=%d\n", m_layer_index + 1);
+            }
+            m_layer = &layer;
+            gcode += sla_gcode;
+            result.gcode = std::move(gcode);
+        }
         return result;
+    }
 
     // Extract 1st object_layer and support_layer of this set of layers with an equal print_z.
     coordf_t             print_z       = layer.print_z + m_config.z_offset.value;
@@ -3562,6 +3626,8 @@ LayerResult GCodeGenerator::process_layer(
         this->set_origin(0.0, 0.0);
     }
 
+    // Append SLA frame commands collected before the FFF extrusion loop.
+    gcode += std::move(sla_gcode);
 
     BOOST_LOG_TRIVIAL(trace) << "Exported layer " << layer.id() << " print_z " << print_z <<
     log_memory_info();

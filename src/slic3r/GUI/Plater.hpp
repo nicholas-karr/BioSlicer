@@ -204,6 +204,7 @@ public:
     void reset();
     void reset_with_confirm();
     bool delete_object_from_model(size_t obj_idx);
+    std::vector<size_t> add_model_objects(const ModelObjectPtrs& model_objects);
     void remove_selected();
     void increase_instances(size_t num = 1, int obj_idx = -1, int inst_idx = -1);
     void decrease_instances(size_t num = 1, int obj_idx = -1);

@@ -32,8 +32,10 @@
 #include <regex>
 #include <string_view>
 #include <boost/nowide/fstream.hpp>
+#include <boost/algorithm/hex.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/uuid/detail/md5.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
@@ -97,7 +99,6 @@
 #include "SavePresetDialog.hpp"
 #include "PrintHostDialogs.hpp" // IWYU pragma: keep
 #include "DesktopIntegrationDialog.hpp"
-#include "SendSystemInfoDialog.hpp"
 #include "Downloader.hpp"
 #include "PhysicalPrinterDialog.hpp"
 #include "WifiConfigDialog.hpp"
@@ -837,9 +838,6 @@ void GUI_App::post_init()
         }
     }
 
-    // show "Did you know" notification
-    if (app_config->get_bool("show_hints") && ! is_gcode_viewer())
-        plater_->get_notification_manager()->push_hint_notification(true);
 
     // The extra CallAfter() is needed because of Mac, where this is the only way
     // to popup a modal dialog on start without screwing combo boxes.
@@ -852,11 +850,8 @@ void GUI_App::post_init()
             this->get_preset_updater_wrapper()->sync_preset_updater(this, preset_bundle);
             bool cw_showed = this->config_wizard_startup();
             if (! cw_showed) {
-                // The CallAfter is needed as well, without it, GL extensions did not show.
-                // Also, we only want to show this when the wizard does not, so the new user
-                // sees something else than "we want something" on the first start.
-                show_send_system_info_dialog_if_needed();   
-            }  
+                // Keep startup behavior unchanged, but suppress upstream telemetry prompt in this fork.
+            }
             // app version check is asynchronous and triggers blocking dialog window, better call it last
             this->app_version_check(false);
         });
@@ -963,21 +958,42 @@ void GUI_App::init_app_config()
 }
 
 namespace {
-// Copy ini file from resources to vendors if such file does not exists yet.
+
+static std::string md5_of_file(const boost::filesystem::path& path)
+{
+    boost::nowide::ifstream f(path.string(), std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    using boost::uuids::detail::md5;
+    md5 hasher;
+    md5::digest_type digest{};
+    hasher.process_bytes(content.data(), content.size());
+    hasher.get_digest(digest);
+    std::string hex;
+    boost::algorithm::hex(digest, digest + std::size(digest), std::back_inserter(hex));
+    return hex;
+}
+
+// Copy ini file from resources to the user vendor directory.
+// If the file already exists, overwrite it when the hashes differ (bundled file changed).
 void copy_vendor_ini(const std::vector<std::string>& vendors)
 {
     for (const std::string &vendor : vendors) {
         boost::system::error_code ec;
-        const boost::filesystem::path ini_in_resources = boost::filesystem::path(  Slic3r::resources_dir() ) /  "profiles" / (vendor + ".ini");
+        const boost::filesystem::path ini_in_resources = boost::filesystem::path(Slic3r::resources_dir()) / "profiles" / (vendor + ".ini");
         assert(boost::filesystem::exists(ini_in_resources));
-        const boost::filesystem::path ini_in_vendors = boost::filesystem::path(Slic3r::data_dir()) /  "vendor" / (vendor + ".ini");
+        const boost::filesystem::path ini_in_vendors = boost::filesystem::path(Slic3r::data_dir()) / "vendor" / (vendor + ".ini");
         if (boost::filesystem::exists(ini_in_vendors, ec)) {
-            continue;
+            const std::string hash_bundled  = md5_of_file(ini_in_resources);
+            const std::string hash_installed = md5_of_file(ini_in_vendors);
+            if (hash_bundled == hash_installed)
+                continue;
+            BOOST_LOG_TRIVIAL(info) << "Vendor bundle mismatch for " << vendor
+                << " (installed " << hash_installed << " != bundled " << hash_bundled << ") — updating";
         }
         std::string message;
         CopyFileResult cfr = copy_file(ini_in_resources.string(), ini_in_vendors.string(), message, false);
         if (cfr != SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << "Failed to copy file " << ini_in_resources << " to "  << ini_in_vendors << ": " << message;
+            BOOST_LOG_TRIVIAL(error) << "Failed to copy file " << ini_in_resources << " to " << ini_in_vendors << ": " << message;
         }
     }
 }
@@ -1350,11 +1366,11 @@ bool GUI_App::on_init_inner()
     // Win32 32bit build.
     if (wxPlatformInfo::Get().GetArchName().substr(0, 2) == "64") {
         RichMessageDialog dlg(nullptr,
-            _L("You are running a 32 bit build of PrusaSlicer on 64-bit Windows."
-                "\n32 bit build of PrusaSlicer will likely not be able to utilize all the RAM available in the system."
-                "\nPlease download and install a 64 bit build of PrusaSlicer from https://www.prusa3d.cz/prusaslicer/."
+            _L("You are running a 32 bit build of BioSlicer on 64-bit Windows."
+                "\n32 bit build of BioSlicer will likely not be able to utilize all the RAM available in the system."
+                "\nPlease download and install a 64 bit build of BioSlicer."
                 "\nDo you wish to continue?"),
-            "PrusaSlicer", wxICON_QUESTION | wxYES_NO);
+            "BioSlicer", wxICON_QUESTION | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return false;
     }
@@ -1556,6 +1572,41 @@ bool GUI_App::on_init_inner()
 #endif // __WXMSW__
     }
     
+    // Always ensure bundled printer profiles are installed so users skip the config wizard
+    // on first run. copy_vendor_ini skips if the file already exists; set_variant is a
+    // no-op if the variant is already enabled — both are safe on every startup.
+    copy_vendor_ini({"UTDHBL"});
+    app_config->set_variant("UTDHBL", "BioTrident_250", "8ch", true);
+    app_config->set_variant("UTDHBL", "Printess_Standard", "2syr", true);
+    // Mark all UTDHBL filament presets as installed so they appear in dropdowns.
+    // set() is a no-op when the value is already "1", so this is safe every run.
+    for (const std::string &f : {
+        "Basic PLA @BIOSLICERTRIDENT",
+        "PCL BioInk @BIOSLICERTRIDENT",
+        "Standard Photopolymer Resin @BIOSLICERTRIDENT",
+        "GelMA 10% @BIOSLICERTRIDENT",
+        "PEGDA 20% @BIOSLICERTRIDENT",
+        "Alginate-GelMA Bioink @BIOSLICERTRIDENT",
+        "1mL BD Syringe @PRINTESS",
+        "3mL BD Syringe @PRINTESS",
+        "5mL BD Syringe @PRINTESS",
+        "10mL BD Syringe @PRINTESS",
+        "Alginate Hydrogel @PRINTESS",
+        "Pluronic F-127 @PRINTESS",
+    })
+        app_config->set(AppConfig::SECTION_FILAMENTS, f, "1");
+
+    // Reset the SLA bucket (extruders 4–7) filament selections so that
+    // default_filament_profile from the bundle is applied on every startup.
+    // The load_presets loop stops at the first missing filament_N key, so
+    // clearing these causes update_multi_material_filament_presets to fill
+    // them from the per-extruder defaults in the printer preset.
+    for (unsigned int i = 4; i < 8; ++i) {
+        char name[32];
+        sprintf(name, "filament_%u", i);
+        app_config->erase("presets", name);
+    }
+
     std::string delayed_error_load_presets;
     // Suppress the '- default -' presets.
     preset_bundle->set_default_suppressed(app_config->get_bool("no_defaults"));
@@ -2651,11 +2702,11 @@ Tab* GUI_App::get_tab(Preset::Type type)
 ConfigOptionMode GUI_App::get_mode()
 {
     if (!app_config->has("view_mode"))
-        return comSimple;
+        return comExpert;
 
     const auto mode = app_config->get("view_mode");
-    return mode == "expert" ? comExpert : 
-           mode == "simple" ? comSimple : comAdvanced;
+    return mode == "simple" ? comSimple :
+           mode == "advanced" ? comAdvanced : comExpert;
 }
 
 bool GUI_App::save_mode(const /*ConfigOptionMode*/int mode) 
@@ -3555,7 +3606,7 @@ void GUI_App::window_pos_sanitize(wxTopLevelWindow* window)
 
 bool GUI_App::config_wizard_startup()
 {
-    if (!m_app_conf_exists || preset_bundle->printers.only_default_printers()) {
+    if (preset_bundle->printers.only_default_printers()) {
         run_wizard(ConfigWizard::RR_DATA_EMPTY);
         return true;
     } else if (get_app_config()->legacy_datadir()) {

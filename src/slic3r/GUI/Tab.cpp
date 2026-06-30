@@ -2994,6 +2994,16 @@ void TabPrinter::build_fff()
         option.opt.height = 3;
         optgroup->append_single_option_line(option);
 
+        option = optgroup->get_option("channel_type");
+        option.opt.full_width = true;
+        option.opt.height = 3;
+        optgroup->append_single_option_line(option);
+
+        option = optgroup->get_option("channel_label");
+        option.opt.full_width = true;
+        option.opt.height = 3;
+        optgroup->append_single_option_line(option);
+
         optgroup->append_single_option_line("sla_material_video_embed");
         optgroup->append_single_option_line("sla_material_video_synthesize");
         optgroup->append_single_option_line("sla_material_video_synth_width");

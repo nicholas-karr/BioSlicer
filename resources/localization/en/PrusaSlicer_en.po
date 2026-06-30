@@ -15445,10 +15445,10 @@ msgstr ""
 #: src/slic3r/GUI/Plater.cpp:1244
 msgid ""
 "The preset below was temporarily installed on the active instance of "
-"PrusaSlicer"
+"BioSlicer"
 msgid_plural ""
 "The presets below were temporarily installed on the active instance of "
-"PrusaSlicer"
+"BioSlicer"
 msgstr[0] ""
 msgstr[1] ""
 

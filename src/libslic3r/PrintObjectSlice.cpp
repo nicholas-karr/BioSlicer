@@ -190,7 +190,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
             if (! model_volume->is_negative_volume())
                 params.extra_offset = extra_offset;
             if (layer_ranges.size() == 1) {
-                if (const PrintObjectRegions::LayerRangeRegions &layer_range = layer_ranges.front(); layer_range.has_volume(model_volume->id())) {
+                const bool has_vol = layer_ranges.front().has_volume(model_volume->id());
+                if (const PrintObjectRegions::LayerRangeRegions &layer_range = layer_ranges.front(); has_vol) {
                     if (model_volume->is_model_part() && print_config.spiral_vase) {
                         auto it = std::find_if(layer_range.volume_regions.begin(), layer_range.volume_regions.end(), 
                             [model_volume](const auto &slice){ return model_volume == slice.model_volume; });
@@ -229,7 +230,17 @@ static std::vector<VolumeSlices> slice_volumes_inner(
 static inline VolumeSlices& volume_slices_find_by_id(std::vector<VolumeSlices> &volume_slices, const ObjectID id)
 {
     auto it = lower_bound_by_predicate(volume_slices.begin(), volume_slices.end(), [id](const VolumeSlices &vs) { return vs.volume_id < id; });
-    assert(it != volume_slices.end() && it->volume_id == id);
+    if (it == volume_slices.end() || it->volume_id != id) {
+        BOOST_LOG_TRIVIAL(error) << "volume_slices_find_by_id: volume id=" << id.id
+            << " not found in volume_slices (size=" << volume_slices.size() << "). "
+            << "Available ids:";
+        for (const auto &vs : volume_slices)
+            BOOST_LOG_TRIVIAL(error) << "  volume_id=" << vs.volume_id.id
+                << " slices=" << vs.slices.size();
+        throw Slic3r::SlicingError(
+            "Internal slicing error: a model volume was missing from the slice table.\n"
+            "This is a bug — please report it. Volume id=" + std::to_string(id.id));
+    }
     return *it;
 }
 
@@ -315,8 +326,23 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                     if (complex)
                         zs_complex.push_back({ z_idx, z });
                     else if (idx_first_printable_region >= 0) {
-                        const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[idx_first_printable_region];
-                        slices_by_region[region.region->print_object_region_id()][z_idx] = std::move(volume_slices_find_by_id(volume_slices, region.model_volume->id()).slices[z_idx]);
+                        // Assign each non-overlapping model part to its own region independently.
+                        // The original code only assigned the first region; that drops slices for
+                        // volumes with a different extruder (e.g. SLA stripes next to FFF stripes).
+                        BOOST_LOG_TRIVIAL(trace) << "slices_to_regions: non-complex z=" << z
+                            << " volume_regions=" << layer_range.volume_regions.size()
+                            << " first_printable=" << idx_first_printable_region;
+                        for (int idx_region = idx_first_printable_region; idx_region < int(layer_range.volume_regions.size()); ++ idx_region) {
+                            const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[idx_region];
+                            if (region.model_volume->is_model_part() &&
+                                    region.bbox->min().z() <= z && region.bbox->max().z() >= z) {
+                                BOOST_LOG_TRIVIAL(trace) << "  looking up volume id=" << region.model_volume->id().id
+                                    << " name=" << region.model_volume->name
+                                    << " region_id=" << region.region->print_object_region_id();
+                                auto &src = volume_slices_find_by_id(volume_slices, region.model_volume->id()).slices[z_idx];
+                                append(slices_by_region[region.region->print_object_region_id()][z_idx], std::move(src));
+                            }
+                        }
                     }
                 }
             }
@@ -330,8 +356,12 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
         for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges) {
             std::vector<VolumeSlices*> &layer_range_regions_to_slices = layer_ranges_regions_to_slices[&layer_range - print_object_regions.layer_ranges.data()];
             layer_range_regions_to_slices.reserve(layer_range.volume_regions.size());
-            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions) {
+                BOOST_LOG_TRIVIAL(trace) << "slices_to_regions complex pre-build: looking up volume id="
+                    << region.model_volume->id().id << " name=" << region.model_volume->name
+                    << " type=" << int(region.model_volume->type());
                 layer_range_regions_to_slices.push_back(&volume_slices_find_by_id(volume_slices, region.model_volume->id()));
+            }
         }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, zs_complex.size()),
@@ -526,6 +556,7 @@ std::string fix_slicing_errors(LayerPtrs &layers, const std::function<void()> &t
 // Resulting expolygons of layer regions are marked as Internal.
 void PrintObject::slice()
 {
+    BOOST_LOG_TRIVIAL(debug) << "PrintObject::slice() entered";
     if (! this->set_started(posSlice))
         return;
     m_print->set_status(10, _u8L("Processing triangulated mesh"));
@@ -573,7 +604,8 @@ void PrintObject::slice()
             }
         });
     if (m_layers.empty())
-        throw Slic3r::SlicingError("No layers were detected. You might want to repair your STL file(s) or check their size or thickness and retry.\n");    
+        throw Slic3r::SlicingError("No layers were detected. You might want to repair your STL file(s) or check their size or thickness and retry.\n");
+    BOOST_LOG_TRIVIAL(debug) << "PrintObject::slice() done, layers=" << m_layers.size();
     this->set_done(posSlice);
 }
 

@@ -37,9 +37,11 @@ def extract_videos_from_gcode(gcode_path: str, output_dir: str) -> Dict[str, str
     - ; bioslicer_sla_video ref name=<name> path=<utf8 path>
     """
     begin_re = re.compile(
-        r"^;\s*bioslicer_sla_video\s+begin\s+name=(\S+)\s+extruder=(\d+)\s+bytes=(\d+)\s+sha256=([0-9a-fA-F]{64})\s*$"
+        r"^;\s*bioslicer_sla_video[_ ]begin\s+name=(\S+)\s+extruder=(\d+)\s+bytes=(\d+)(?:\s+sha256=([0-9a-fA-F]{64}))?\s*$"
     )
     data_re = re.compile(r"^;\s*bioslicer_sla_video\s+(?:data\s+)?([A-Za-z0-9+/=]+)\s*$")
+    # Old binary format: bare "; <base64>" data lines with no keyword prefix
+    bare_data_re = re.compile(r"^;\s*([A-Za-z0-9+/=]{4,})\s*$")
     end_re = re.compile(r"^;\s*bioslicer_sla_video\s+end\s+name=(\S+)\s*$")
     ref_path_re = re.compile(r"^;\s*bioslicer_sla_video\s+ref\s+name=(\S+)\s+extruder=(\d+)\s+path=(.+)$")
     ref_path_b64_re = re.compile(
@@ -80,14 +82,14 @@ def extract_videos_from_gcode(gcode_path: str, output_dir: str) -> Dict[str, str
                     )
                 active_name = begin_match.group(1)
                 active_expected_bytes = int(begin_match.group(3))
-                active_expected_sha256 = begin_match.group(4).lower()
+                active_expected_sha256 = (begin_match.group(4) or "").lower()
                 active_chunks = []
                 continue
 
             if active_name is None:
                 continue
 
-            data_match = data_re.match(line)
+            data_match = data_re.match(line) or bare_data_re.match(line)
             if data_match:
                 active_chunks.append(data_match.group(1))
                 continue
@@ -107,12 +109,13 @@ def extract_videos_from_gcode(gcode_path: str, output_dir: str) -> Dict[str, str
                         f"expected {active_expected_bytes}, got {len(payload)}."
                     )
 
-                digest = hashlib.sha256(payload).hexdigest()
-                if digest != active_expected_sha256:
-                    raise RuntimeError(
-                        f"Embedded payload digest mismatch for {active_name}: "
-                        f"expected {active_expected_sha256}, got {digest}."
-                    )
+                if active_expected_sha256:
+                    digest = hashlib.sha256(payload).hexdigest()
+                    if digest != active_expected_sha256:
+                        raise RuntimeError(
+                            f"Embedded payload digest mismatch for {active_name}: "
+                            f"expected {active_expected_sha256}, got {digest}."
+                        )
 
                 output_path = output_base / f"{_safe_name_for_file(active_name)}.mkv"
                 with open(output_path, "wb") as video_handle:

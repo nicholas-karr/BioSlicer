@@ -26,6 +26,7 @@
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MultipleBeds.hpp"
 #include "libslic3r/Utils.hpp"
@@ -1369,6 +1370,14 @@ wxWindow* GLCanvas3D::get_wxglcanvas_parent()
     return m_canvas->GetParent();
 }
 
+void GLCanvas3D::force_repaint()
+{
+    if (m_canvas) {
+        m_canvas->Refresh();
+        m_canvas->Update();
+    }
+}
+
 bool GLCanvas3D::init()
 {
     if (m_initialized)
@@ -2162,11 +2171,12 @@ void GLCanvas3D::render()
         _render_objects(GLVolumeCollection::ERenderType::Opaque);
         _render_sla_slices();
         _render_selection();
-        _render_bed_axes();
+        //_render_bed_axes();
         if (is_looking_downward)
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), false);
         if (!m_main_toolbar.is_enabled() && current_printer_technology() != ptSLA)
             _render_gcode();
+        _render_fff_sla_slices();
         _render_objects(GLVolumeCollection::ERenderType::Transparent);
 
     #if ENABLE_RENDER_SELECTION_CENTER
@@ -5311,6 +5321,15 @@ bool GLCanvas3D::_init_main_toolbar()
     if (!m_main_toolbar.add_item(item))
         return false;
 
+    item.name = "bioslicer_shape";
+    item.icon_filename = "shape_gallery.svg";
+    item.tooltip = _u8L("Generate Objects...");
+    item.sprite_id = sprite_id++;
+    item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_BIOSLICER_SHAPE)); };
+    item.enabling_callback = GLToolbarItem::Default_Enabling_Callback;
+    if (!m_main_toolbar.add_item(item))
+        return false;
+
     item.name = "delete";
     item.icon_filename = "remove.svg";
     item.tooltip = _u8L("Delete") + " [Del]";
@@ -7045,6 +7064,8 @@ void GLCanvas3D::_render_sla_slices()
                 m_sla_caps[0].z = clip_min_z;
                 it_caps_bottom->second.object.reset();
                 it_caps_bottom->second.supports.reset();
+                it_caps_bottom->second.object_edges.reset();
+                it_caps_bottom->second.supports_edges.reset();
             }
             if (it_caps_top == m_sla_caps[1].triangles.end())
                 it_caps_top = m_sla_caps[1].triangles.emplace(i, SlaCap::Triangles()).first;
@@ -7052,12 +7073,29 @@ void GLCanvas3D::_render_sla_slices()
                 m_sla_caps[1].z = clip_max_z;
                 it_caps_top->second.object.reset();
                 it_caps_top->second.supports.reset();
+                it_caps_top->second.object_edges.reset();
+                it_caps_top->second.supports_edges.reset();
             }
         }
         GLModel& bottom_obj_triangles = it_caps_bottom->second.object;
         GLModel& bottom_sup_triangles = it_caps_bottom->second.supports;
         GLModel& top_obj_triangles = it_caps_top->second.object;
         GLModel& top_sup_triangles = it_caps_top->second.supports;
+        GLModel& bottom_obj_edges = it_caps_bottom->second.object_edges;
+        GLModel& bottom_sup_edges = it_caps_bottom->second.supports_edges;
+        GLModel& top_obj_edges = it_caps_top->second.object_edges;
+        GLModel& top_sup_edges = it_caps_top->second.supports_edges;
+
+        auto init_edges = [](GLModel& model, const ExPolygons& expolys, float z, const ColorRGBA& color) {
+            Polygons polys;
+            for (const ExPolygon& ep : expolys) {
+                polys.push_back(ep.contour);
+                for (const Polygon& h : ep.holes)
+                    polys.push_back(h);
+            }
+            model.init_from(polys, z);
+            model.set_color(color);
+        };
 
         auto init_model = [](GLModel& model, const Pointf3s& triangles, const ColorRGBA& color) {
             GLModel::Geometry init_data;
@@ -7100,22 +7138,34 @@ void GLCanvas3D::_render_sla_slices()
                 const ExPolygons& obj_bottom = slice_low.get_slice(soModel);
                 const ExPolygons& sup_bottom = slice_low.get_slice(soSupport);
                 // calculate model bottom cap
-                if (!bottom_obj_triangles.is_initialized() && !obj_bottom.empty())
+                if (!bottom_obj_triangles.is_initialized() && !obj_bottom.empty()) {
                     init_model(bottom_obj_triangles, triangulate_expolygons_3d(obj_bottom, clip_min_z - plane_shift_z, !left_handed), { 1.0f, 0.37f, 0.0f, 1.0f });
+                    if (!bottom_obj_edges.is_initialized())
+                        init_edges(bottom_obj_edges, obj_bottom, (float)(clip_min_z - plane_shift_z), { 0.6f, 0.22f, 0.0f, 1.0f });
+                }
                 // calculate support bottom cap
-                if (!bottom_sup_triangles.is_initialized() && !sup_bottom.empty())
+                if (!bottom_sup_triangles.is_initialized() && !sup_bottom.empty()) {
                     init_model(bottom_sup_triangles, triangulate_expolygons_3d(sup_bottom, clip_min_z - plane_shift_z, !left_handed), { 1.0f, 0.0f, 0.37f, 1.0f });
+                    if (!bottom_sup_edges.is_initialized())
+                        init_edges(bottom_sup_edges, sup_bottom, (float)(clip_min_z - plane_shift_z), { 0.6f, 0.0f, 0.22f, 1.0f });
+                }
             }
 
             if (slice_high.is_valid()) {
                 const ExPolygons& obj_top = slice_high.get_slice(soModel);
                 const ExPolygons& sup_top = slice_high.get_slice(soSupport);
                 // calculate model top cap
-                if (!top_obj_triangles.is_initialized() && !obj_top.empty())
+                if (!top_obj_triangles.is_initialized() && !obj_top.empty()) {
                     init_model(top_obj_triangles, triangulate_expolygons_3d(obj_top, clip_max_z + plane_shift_z, left_handed), { 1.0f, 0.37f, 0.0f, 1.0f });
+                    if (!top_obj_edges.is_initialized())
+                        init_edges(top_obj_edges, obj_top, (float)(clip_max_z + plane_shift_z), { 0.6f, 0.22f, 0.0f, 1.0f });
+                }
                 // calculate support top cap
-                if (!top_sup_triangles.is_initialized() && !sup_top.empty())
+                if (!top_sup_triangles.is_initialized() && !sup_top.empty()) {
                     init_model(top_sup_triangles, triangulate_expolygons_3d(sup_top, clip_max_z + plane_shift_z, left_handed), { 1.0f, 0.0f, 0.37f, 1.0f });
+                    if (!top_sup_edges.is_initialized())
+                        init_edges(top_sup_edges, sup_top, (float)(clip_max_z + plane_shift_z), { 0.6f, 0.0f, 0.22f, 1.0f });
+                }
             }
         }
 
@@ -7139,11 +7189,188 @@ void GLCanvas3D::_render_sla_slices()
                 top_obj_triangles.render();
                 bottom_sup_triangles.render();
                 top_sup_triangles.render();
+
+                glsafe(::glLineWidth(2.0f));
+                bottom_obj_edges.render();
+                top_obj_edges.render();
+                bottom_sup_edges.render();
+                top_sup_edges.render();
+                glsafe(::glLineWidth(1.0f));
             }
 
             shader->stop_using();
         }
     }
+}
+
+void GLCanvas3D::_render_fff_sla_slices()
+{
+    const Print* print = fff_print();
+    if (print == nullptr || print->objects().empty())
+        return;
+
+    const auto& sla_flags = print->config().sla_material_extruder.values;
+    if (std::none_of(sla_flags.begin(), sla_flags.end(), [](bool b) { return b; }))
+        return;
+
+    double clip_max_z;
+    if (m_fff_preview_high_z > -DBL_MAX / 2.0)
+        clip_max_z = m_fff_preview_high_z;
+    else if (m_use_clipping_planes)
+        clip_max_z = m_clipping_planes[1].get_data()[3];
+    else
+        return;
+
+    if (!m_fff_sla_cap.matches(clip_max_z)) {
+        m_fff_sla_cap.reset();
+        m_fff_sla_cap.z = clip_max_z;
+
+        auto build_outline = [](GLModel& model, const ExPolygons& expolys,
+                                double top_z, const ColorRGBA& color) {
+            Polygons polys;
+            for (const ExPolygon& ep : expolys) {
+                polys.push_back(ep.contour);
+                for (const Polygon& h : ep.holes)
+                    polys.push_back(h);
+            }
+            model.init_from(polys, (float)top_z);
+            model.set_color(color);
+        };
+
+        auto build_model = [](GLModel& model, const ExPolygons& expolys,
+                               double bot_z, double top_z, const ColorRGBA& color) {
+            const auto top_tris = triangulate_expolygons_3d(expolys, top_z, false);
+            const auto bot_tris = triangulate_expolygons_3d(expolys, bot_z, true);
+
+            GLModel::Geometry geom;
+            geom.format = { GLModel::Geometry::EPrimitiveType::Triangles,
+                            GLModel::Geometry::EVertexLayout::P3 };
+            geom.color = color;
+
+            unsigned int n = 0;
+
+            auto add_tri_list = [&](const std::vector<Vec3d>& tris) {
+                for (const Vec3d& v : tris) {
+                    geom.add_vertex((Vec3f)v.cast<float>());
+                    if (++n % 3 == 0)
+                        geom.add_triangle(n - 3, n - 2, n - 1);
+                }
+            };
+            add_tri_list(top_tris);
+            add_tri_list(bot_tris);
+
+            auto add_ring_walls = [&](const Polygon& ring) {
+                const size_t sz = ring.points.size();
+                for (size_t i = 0; i < sz; ++i) {
+                    const Point& pa = ring.points[i];
+                    const Point& pb = ring.points[(i + 1) % sz];
+                    const float ax = unscale<float>(pa.x()), ay = unscale<float>(pa.y());
+                    const float bx = unscale<float>(pb.x()), by = unscale<float>(pb.y());
+                    const unsigned int i0 = n;
+                    geom.add_vertex(Vec3f(ax, ay, (float)bot_z)); ++n;
+                    geom.add_vertex(Vec3f(bx, by, (float)bot_z)); ++n;
+                    geom.add_vertex(Vec3f(bx, by, (float)top_z)); ++n;
+                    geom.add_vertex(Vec3f(ax, ay, (float)top_z)); ++n;
+                    geom.add_triangle(i0, i0 + 1, i0 + 2);
+                    geom.add_triangle(i0, i0 + 2, i0 + 3);
+                }
+            };
+            for (const ExPolygon& ep : expolys) {
+                add_ring_walls(ep.contour);
+                for (const Polygon& h : ep.holes)
+                    add_ring_walls(h);
+            }
+
+            if (!geom.is_empty())
+                model.init_from(std::move(geom));
+        };
+
+        static const std::array<ColorRGBA, 4> sla_colors = {{
+            { 0.0f, 0.80f, 0.80f, 1.0f },
+            { 0.0f, 0.60f, 1.00f, 1.0f },
+            { 0.4f, 0.90f, 0.70f, 1.0f },
+            { 0.2f, 0.70f, 1.00f, 1.0f },
+        }};
+
+        for (const PrintObject* obj : print->objects()) {
+            for (const Layer* layer : obj->layers()) {
+                if (layer->print_z > clip_max_z + 1e-6)
+                    break;
+
+                std::map<unsigned int, ExPolygons> by_ext;
+                for (const LayerRegion* lr : layer->regions()) {
+                    const unsigned int ext = lr->region().extruder(frPerimeter);
+                    if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1])
+                        continue;
+                    for (const Surface& s : lr->slices())
+                        by_ext[ext].push_back(s.expolygon);
+                }
+
+                for (auto& [ext_id, expolys] : by_ext) {
+                    ExPolygons world_expolys;
+                    for (const PrintInstance& inst : obj->instances()) {
+                        for (const ExPolygon& ep : expolys) {
+                            ExPolygon e = ep;
+                            e.translate(inst.shift);
+                            world_expolys.emplace_back(std::move(e));
+                        }
+                    }
+                    if (world_expolys.empty())
+                        continue;
+                    const ColorRGBA color = sla_colors[(ext_id - 1) % sla_colors.size()];
+                    const double bot_z = std::max(0.0, layer->print_z - layer->height);
+                    m_fff_sla_cap.step_keys.emplace_back(layer->print_z, ext_id);
+                    m_fff_sla_cap.models.emplace_back();
+                    build_model(m_fff_sla_cap.models.back(), world_expolys, bot_z, layer->print_z, color);
+                    m_fff_sla_cap.outlines.emplace_back();
+                    build_outline(m_fff_sla_cap.outlines.back(), world_expolys, layer->print_z,
+                        { color.r() * 0.5f, color.g() * 0.5f, color.b() * 0.5f, 1.0f });
+                }
+            }
+        }
+    }
+
+    if (m_fff_sla_cap.models.empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    shader->start_using();
+    const Camera& cam = wxGetApp().plater()->get_camera();
+    const Transform3d vm = cam.get_view_matrix() *
+        Geometry::translation_transform(s_multiple_beds.get_bed_translation(s_multiple_beds.get_active_bed()));
+    shader->set_uniform("view_model_matrix", vm);
+    shader->set_uniform("projection_matrix", cam.get_projection_matrix());
+
+    // Determine which entries are visible given the current slider step.
+    // When m_fff_sla_step_z == DBL_MAX all entries are shown (default / FFF move positions).
+    // At an SLA step position, only entries whose layer_z < step_z, or whose layer_z ≈ step_z
+    // and ext_id ≤ step_ext, are shown.
+    auto step_visible = [&](size_t i) -> bool {
+        if (m_fff_sla_step_z == DBL_MAX)
+            return true;
+        const auto& [key_z, key_ext] = m_fff_sla_cap.step_keys[i];
+        if (key_z < m_fff_sla_step_z - 1e-4)
+            return true;
+        if (key_z < m_fff_sla_step_z + 1e-4 && key_ext <= m_fff_sla_step_ext)
+            return true;
+        return false;
+    };
+
+    glsafe(::glDepthFunc(GL_LEQUAL));
+    for (size_t i = 0; i < m_fff_sla_cap.models.size(); ++i)
+        if (step_visible(i))
+            m_fff_sla_cap.models[i].render();
+    glsafe(::glLineWidth(2.0f));
+    for (size_t i = 0; i < m_fff_sla_cap.outlines.size(); ++i)
+        if (step_visible(i))
+            m_fff_sla_cap.outlines[i].render();
+    glsafe(::glLineWidth(1.0f));
+    glsafe(::glDepthFunc(GL_LESS));
+
+    shader->stop_using();
 }
 
 void GLCanvas3D::_update_volumes_hover_state()

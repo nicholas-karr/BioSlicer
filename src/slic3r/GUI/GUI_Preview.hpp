@@ -10,6 +10,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/CustomGCode.hpp"
 
+#include <map>
 #include <string>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 
@@ -100,6 +101,17 @@ class Preview : public wxPanel
 
     std::unique_ptr<DoubleSlider::DSForLayers>  m_layers_slider{ nullptr };
     std::unique_ptr<DoubleSlider::DSForGcode>   m_moves_slider { nullptr };
+
+    // Populated by update_moves_slider() for hybrid FFF+SLA prints.
+    // Maps horizontal slider position → SLA step info for positions that are SLA
+    // exposure steps (as opposed to FFF G-code move positions).
+    struct SlaStepInfo {
+        double       layer_z;        // print_z of this SLA layer
+        unsigned int ext_id;         // 1-based SLA extruder channel
+        unsigned int fff_range_start; // enabled-range lower vertex (0-based)
+        unsigned int fff_upper_vtx;  // last FFF vertex of this layer (0-based)
+    };
+    std::map<int, SlaStepInfo> m_sla_steps_by_pos;
 
 public:
     enum class OptionType : unsigned int

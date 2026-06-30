@@ -187,7 +187,8 @@ namespace Slic3r {
             Custom_Code,
             First_Line_M73_Placeholder,
             Last_Line_M73_Placeholder,
-            Estimated_Printing_Time_Placeholder
+            Estimated_Printing_Time_Placeholder,
+            SLA_Frame
         };
 
         static const std::string& reserved_tag(ETags tag) { return Reserved_Tags[static_cast<unsigned char>(tag)]; }
@@ -635,6 +636,7 @@ namespace Slic3r {
         // Move
         void process_G0(const GCodeReader::GCodeLine& line);
         void process_G1(const GCodeReader::GCodeLine& line);
+        void process_G4(const GCodeReader::GCodeLine& line);  // Dwell
         enum class G1DiscretizationOrigin {
             G1,
             G2G3,

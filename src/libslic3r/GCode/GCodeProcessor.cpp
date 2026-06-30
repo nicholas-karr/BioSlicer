@@ -62,7 +62,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     "CUSTOM_GCODE",
     "_GP_FIRST_LINE_M73_PLACEHOLDER",
     "_GP_LAST_LINE_M73_PLACEHOLDER",
-    "_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER"
+    "_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER",
+    "SLA_SHOW_FRAME"
 };
 
 const float GCodeProcessor::Wipe_Width = 0.05f;
@@ -1669,6 +1670,7 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 case '1': { process_G1(line); break; }  // Move
                 case '2': { process_G2_G3(line, true); break; }   // CW Arc Move
                 case '3': { process_G2_G3(line, false); break; }  // CCW Arc Move
+                case '4': { process_G4(line); break; }  // Dwell
                 default: break;
                 }
                 break;
@@ -2016,6 +2018,44 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         CustomGCode::Item item = { static_cast<double>(m_end_position[2]), CustomGCode::Custom, m_extruder_id + 1, "", "" };
         m_result.custom_gcode_per_print_z.emplace_back(item);
         m_options_z_corrector.set();
+        return;
+    }
+
+    // SLA frame tag — records an SLA exposure as a moves-slider step so the user
+    // can scrub through individual frame exposures in the preview.
+    if (comment == reserved_tag(ETags::SLA_Frame)) {
+        store_move_vertex(EMoveType::Custom_GCode);
+        return;
+    }
+
+    // bioslicer_sla_params — sliced exposure timing emitted as comment metadata when
+    // BIOSLICER_SLA_EXPOSE replaces hardcoded G4 dwells in Klipper mode.
+    // Format: "bioslicer_sla_params extruder=N delay_before_ms=X exposure_ms=Y delay_after_ms=Z"
+    if (boost::starts_with(comment, "bioslicer_sla_params ")) {
+        auto parse_param_ms = [](std::string_view text, std::string_view key) -> int {
+            const auto p = text.find(key);
+            if (p == std::string_view::npos)
+                return 0;
+            const auto val_start = p + key.size();
+            const auto space_pos = text.find(' ', val_start);
+            const auto val_sv = text.substr(val_start,
+                space_pos == std::string_view::npos ? std::string_view::npos : space_pos - val_start);
+            int out = 0;
+            if (!parse_number(val_sv, out))
+                out = 0;
+            return out;
+        };
+        const float total_s = (parse_param_ms(comment, "delay_before_ms=")
+                              + parse_param_ms(comment, "exposure_ms=")
+                              + parse_param_ms(comment, "delay_after_ms=")) * 0.001f;
+        if (total_s > 0.f) {
+            simulate_st_synchronize();
+            for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
+                TimeMachine& machine = m_time_processor.machines[i];
+                if (machine.enabled)
+                    machine.time += total_s;
+            }
+        }
         return;
     }
 
@@ -2556,6 +2596,34 @@ bool GCodeProcessor::detect_producer(const std::string_view comment)
 void GCodeProcessor::process_G0(const GCodeReader::GCodeLine& line)
 {
     process_G1(line);
+}
+
+void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
+{
+    // G4 P<ms> or G4 S<seconds> — dwell (no motion).
+    // Flush pending motion blocks first, then add the dwell time directly to
+    // every enabled time machine.  simulate_st_synchronize() is called without
+    // additional_time because it returns early when only one block is pending
+    // (common for SLA-only layers that have just a Z travel).  Adding directly
+    // to machine.time ensures the dwell is always counted regardless of how
+    // many motion blocks are queued.
+    float dwell_s = 0.0f;
+    float val = 0.0f;
+    if (line.has_value('P', val))
+        dwell_s = val * 0.001f;   // P is in milliseconds
+    else if (line.has_value('S', val))
+        dwell_s = val;            // S is in seconds
+
+    if (dwell_s <= 0.0f)
+        return;
+
+    simulate_st_synchronize();
+
+    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
+        TimeMachine& machine = m_time_processor.machines[i];
+        if (machine.enabled)
+            machine.time += dwell_s;
+    }
 }
 
 void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)

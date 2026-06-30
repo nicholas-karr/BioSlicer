@@ -170,11 +170,13 @@ std::vector<std::reference_wrapper<const PrintRegion>> PrintObject::all_regions(
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
 void PrintObject::make_perimeters()
 {
+    BOOST_LOG_TRIVIAL(debug) << "PrintObject::make_perimeters() entered";
     // prerequisites
     this->slice();
 
     if (! this->set_started(posPerimeters))
         return;
+    BOOST_LOG_TRIVIAL(debug) << "make_perimeters() posPerimeters started";
 
     m_print->set_status(20, _u8L("Generating perimeters"));
     BOOST_LOG_TRIVIAL(info) << "Generating perimeters..." << log_memory_info();
@@ -280,6 +282,7 @@ void PrintObject::make_perimeters()
 
 void PrintObject::prepare_infill()
 {
+    BOOST_LOG_TRIVIAL(debug) << "PrintObject::prepare_infill() entered";
     if (! this->set_started(posPrepareInfill))
         return;
 
@@ -441,8 +444,9 @@ void PrintObject::infill()
     // prerequisites
     this->prepare_infill();
 
+    BOOST_LOG_TRIVIAL(debug) << "PrintObject::infill() entered";
     if (this->set_started(posInfill)) {
-        // TRN Status for the Print calculation 
+        // TRN Status for the Print calculation
         m_print->set_status(45, _u8L("Making infill"));
         const auto& adaptive_fill_octree = this->m_adaptive_fill_octrees.first;
         const auto& support_fill_octree = this->m_adaptive_fill_octrees.second;

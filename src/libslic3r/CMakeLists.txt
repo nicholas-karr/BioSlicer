@@ -209,6 +209,8 @@ set(SLIC3R_SOURCES
     GCode/SeamScarf.hpp
     GCode/ModelVisibility.cpp
     GCode/ModelVisibility.hpp
+    GCode/SLAVideoSynth.cpp
+    GCode/SLAVideoSynth.hpp
     GCode/SmoothPath.cpp
     GCode/SmoothPath.hpp
     GCode/ToolOrdering.cpp

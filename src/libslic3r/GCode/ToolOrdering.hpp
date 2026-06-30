@@ -89,6 +89,7 @@ class LayerTools
 public:
     // Changing these operators to epsilon version can make a problem in cases where support and object layers get close to each other.
     // In case someone tries to do it, make sure you know what you're doing and test it properly (slice multiple objects at once with supports).
+    LayerTools() = default;
     bool operator< (const LayerTools &rhs) const { return print_z < rhs.print_z; }
     bool operator==(const LayerTools &rhs) const { return print_z == rhs.print_z; }
 

@@ -56,14 +56,14 @@ class DummyStream:
 class ExtractVideosFromGcodeTests(unittest.TestCase):
     def test_extracts_embedded_and_reference_payloads(self):
         payload = b"fake_mkv_payload"
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
         payload_b64 = base64.b64encode(payload).decode("ascii")
-        payload_sha = hashlib.sha256(payload).hexdigest()
         ref_path = "/mnt/videos/external.mkv"
 
         gcode = "\n".join(
             [
                 "; header",
-                f"; bioslicer_sla_video begin name=resin_emb extruder=1 bytes={len(payload)} sha256={payload_sha}",
+                f"; bioslicer_sla_video begin name=resin_emb extruder=1 bytes={len(payload)} sha256={payload_sha256}",
                 f"; bioslicer_sla_video {payload_b64}",
                 "; bioslicer_sla_video end name=resin_emb",
                 f"; bioslicer_sla_video ref name=resin_ref extruder=2 path={ref_path}",
@@ -82,14 +82,15 @@ class ExtractVideosFromGcodeTests(unittest.TestCase):
             self.assertTrue(emb_path.exists())
             self.assertEqual(emb_path.read_bytes(), payload)
 
-    def test_raises_on_digest_mismatch(self):
+    def test_raises_on_length_mismatch(self):
         payload = b"fake_mkv_payload"
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
         payload_b64 = base64.b64encode(payload).decode("ascii")
-        bad_sha = "0" * 64
+        wrong_bytes = len(payload) + 99  # intentionally wrong
 
         gcode = "\n".join(
             [
-                f"; bioslicer_sla_video begin name=resin_bad extruder=1 bytes={len(payload)} sha256={bad_sha}",
+                f"; bioslicer_sla_video begin name=resin_bad extruder=1 bytes={wrong_bytes} sha256={payload_sha256}",
                 f"; bioslicer_sla_video {payload_b64}",
                 "; bioslicer_sla_video end name=resin_bad",
             ]

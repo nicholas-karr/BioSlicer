@@ -1781,10 +1781,24 @@ void PresetBundle::update_multi_material_filament_presets()
 
     if (this->extruders_filaments.size() > num_extruders)
         this->extruders_filaments.resize(num_extruders);
-    else 
+    else {
         // Append the rest of filament presets.
-        for (size_t id = extruders_filaments.size(); id < num_extruders; id++)
-            extruders_filaments.emplace_back(ExtruderFilaments(&filaments, id, id == 0 ? filaments.first_visible().name : extruders_filaments[id - 1].get_selected_preset_name()));
+        // Use per-extruder default_filament_profile entries when initializing new channels.
+        const std::vector<std::string>& default_profiles =
+            printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile")->values;
+        for (size_t id = extruders_filaments.size(); id < num_extruders; id++) {
+            std::string init_name;
+            if (id == 0) {
+                init_name = filaments.first_visible().name;
+            } else if (id < default_profiles.size() && !default_profiles[id].empty()) {
+                const Preset* p = filaments.find_preset(default_profiles[id], false);
+                init_name = (p != nullptr) ? p->name : extruders_filaments[id - 1].get_selected_preset_name();
+            } else {
+                init_name = extruders_filaments[id - 1].get_selected_preset_name();
+            }
+            extruders_filaments.emplace_back(ExtruderFilaments(&filaments, id, init_name));
+        }
+    }
 
     // Now verify if wiping_volumes_matrix has proper size (it is used to deduce number of extruders in wipe tower generator):
     std::vector<double> old_matrix = this->project_config.option<ConfigOptionFloats>("wiping_volumes_matrix")->values;
@@ -1833,6 +1847,11 @@ void PresetBundle::update_filaments_compatible(PresetSelectCompatibleType select
             if (!m_prefered_alias.empty() && m_prefered_alias == preset.alias)
                 // Matching an alias, always take this preset with priority.
                 return std::numeric_limits<int>::max();
+            // The per-extruder entry in default_filament_profile has the second-highest priority.
+            if ((size_t)m_extruder_id < m_prefered_names.size() &&
+                !m_prefered_names[m_extruder_id].empty() &&
+                m_prefered_names[m_extruder_id] == preset.name)
+                return std::numeric_limits<int>::max() - 1;
             int match_quality = (std::find(m_prefered_names.begin(), m_prefered_names.end(), preset.name) != m_prefered_names.end()) + 1;
             if (!m_prefered_filament_type.empty() && m_prefered_filament_type == preset.config.opt_string("filament_type", m_extruder_id))
                 match_quality *= 10;

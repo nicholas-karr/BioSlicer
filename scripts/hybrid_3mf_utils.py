@@ -146,6 +146,10 @@ def make_model_config_xml(objects: Sequence[MeshObject], model_name: str) -> byt
     config = ET.Element("config")
     obj_el = ET.SubElement(config, "object", {"id": "1", "instances_count": "1"})
     ET.SubElement(obj_el, "metadata", {"type": "object", "key": "name", "value": model_name})
+    # Store extruder at the object level so the UI's object-list extruder selector
+    # can override it without being shadowed by a volume-level override.
+    if objects:
+        ET.SubElement(obj_el, "metadata", {"type": "object", "key": "extruder", "value": str(objects[0].extruder)})
 
     tri_cursor = 0
     for obj in objects:
@@ -244,29 +248,77 @@ def ini_bool(values: Dict[str, str], key: str, fallback: bool) -> bool:
 
 def write_sla_override_ini(
     path_ini: Path,
-    sla_extruder: int,
+    sla_flags: list,
+    video_names: list,
+    synth_flags: list,
+    embed_flags: list,
+    video_paths: list,
     synth_width: int,
     synth_height: int,
     synth_fps: int,
     synth_lossless: bool,
-    video_name: str,
 ) -> None:
+    def csv(vals) -> str:
+        return ",".join(str(v) for v in vals)
+
+    def semicsv(vals) -> str:
+        return ";".join(str(v) for v in vals)
+
     path_ini.parent.mkdir(parents=True, exist_ok=True)
-    content = "\n".join(
-        [
-            f"sla_material_extruder = 0,{sla_extruder}",
-            "sla_material_video_synthesize = 0,1",
-            f"sla_material_video_names = ;{video_name}",
-            "sla_material_video_paths = ;",
-            "sla_material_video_embed = 0,1",
-            f"sla_material_video_synth_width = {synth_width}",
-            f"sla_material_video_synth_height = {synth_height}",
-            f"sla_material_video_synth_fps = {synth_fps}",
-            f"sla_material_video_synth_lossless = {1 if synth_lossless else 0}",
-            "toolchange_gcode = ; TOOLCHANGE next=[next_extruder]\\n; SLA name=[sla_video_name] path=[sla_video_path] embedded=[sla_video_embedded]\\n",
-            "",
-        ]
-    )
+    content = "\n".join([
+        f"sla_material_extruder = {csv(sla_flags)}",
+        f"sla_material_video_synthesize = {csv(synth_flags)}",
+        f"sla_material_video_names = {semicsv(video_names)}",
+        f"sla_material_video_paths = {semicsv(video_paths)}",
+        f"sla_material_video_embed = {csv(embed_flags)}",
+        f"sla_material_video_synth_width = {synth_width}",
+        f"sla_material_video_synth_height = {synth_height}",
+        f"sla_material_video_synth_fps = {synth_fps}",
+        f"sla_material_video_synth_lossless = {1 if synth_lossless else 0}",
+        "toolchange_gcode = ; TOOLCHANGE next=[next_extruder]\\n; SLA name=[sla_video_name] path=[sla_video_path] embedded=[sla_video_embedded]\\n",
+        "",
+    ])
+    path_ini.write_text(content, encoding="utf-8")
+
+
+def write_slice_settings_ini(
+    path_ini: Path,
+    extruder_count: int,
+    layer_height: float,
+    start_note: str,
+    bed_shape: str = "0x0,250x0,250x250,0x250",
+    max_print_height: int = 250,
+) -> None:
+    csv = ",".join
+
+    path_ini.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join([
+        "printer_technology = FFF",
+        f"bed_shape = {bed_shape}",
+        f"max_print_height = {max_print_height}",
+        "gcode_flavor = klipper",
+        f"nozzle_diameter = {csv(['1.2'] * extruder_count)}",
+        f"filament_diameter = {csv(['1.75'] * extruder_count)}",
+        f"layer_height = {layer_height}",
+        f"first_layer_height = {layer_height}",
+        "perimeters = 1",
+        "top_solid_layers = 0",
+        "bottom_solid_layers = 0",
+        "fill_density = 0%",
+        "skirts = 0",
+        "brim_width = 0",
+        "travel_speed = 200",
+        "perimeter_speed = 30",
+        "infill_speed = 30",
+        "solid_infill_speed = 30",
+        f"temperature = {csv(['205'] * extruder_count)}",
+        f"first_layer_temperature = {csv(['210'] * extruder_count)}",
+        "bed_temperature = 55",
+        "first_layer_bed_temperature = 55",
+        f"start_gcode = ; {start_note}\\n",
+        "end_gcode = M400\\n",
+        "",
+    ])
     path_ini.write_text(content, encoding="utf-8")
 
 
@@ -278,70 +330,20 @@ def run_slice(
     extruder_count: int,
     layer_height: float,
     start_note: str,
+    bed_shape: str = "0x0,250x0,250x250,0x250",
 ) -> None:
     output_gcode.parent.mkdir(parents=True, exist_ok=True)
 
-    nozzle = ",".join("1.2" for _ in range(extruder_count))
-    filament = ",".join("1.75" for _ in range(extruder_count))
-    temperature = ",".join("205" for _ in range(extruder_count))
-    first_temperature = ",".join("210" for _ in range(extruder_count))
+    slice_ini = output_gcode.with_suffix(".slice.ini")
+    write_slice_settings_ini(slice_ini, extruder_count, layer_height, start_note, bed_shape)
 
     cmd = [
         str(prusa_slicer_bin),
-        "--load",
-        str(override_ini),
+        "--load", str(slice_ini),
+        "--load", str(override_ini),
         str(input_3mf),
         "--export-gcode",
-        "--output",
-        str(output_gcode),
-        "--printer-technology",
-        "FFF",
-        "--bed-shape",
-        "0x0,250x0,250x250,0x250",
-        "--max-print-height",
-        "250",
-        "--gcode-flavor",
-        "klipper",
-        "--nozzle-diameter",
-        nozzle,
-        "--filament-diameter",
-        filament,
-        "--layer-height",
-        f"{layer_height}",
-        "--first-layer-height",
-        f"{layer_height}",
-        "--perimeters",
-        "1",
-        "--top-solid-layers",
-        "0",
-        "--bottom-solid-layers",
-        "0",
-        "--fill-density",
-        "0%",
-        "--skirts",
-        "0",
-        "--brim-width",
-        "0",
-        "--travel-speed",
-        "200",
-        "--perimeter-speed",
-        "30",
-        "--infill-speed",
-        "30",
-        "--solid-infill-speed",
-        "30",
-        "--temperature",
-        temperature,
-        "--first-layer-temperature",
-        first_temperature,
-        "--bed-temperature",
-        "55",
-        "--first-layer-bed-temperature",
-        "55",
-        "--start-gcode",
-        f"; {start_note}\\n",
-        "--end-gcode",
-        "M400\\n",
+        "--output", str(output_gcode),
     ]
 
     print("Running:")
@@ -349,3 +351,42 @@ def run_slice(
     subprocess.run(cmd, check=True)
     if not output_gcode.exists():
         raise RuntimeError(f"Slicing finished but output was not created: {output_gcode}")
+
+
+# ---------------------------------------------------------------------------
+# Vendor ini helpers
+# ---------------------------------------------------------------------------
+
+def parse_vendor_ini_section(ini_path: Path, section_substring: str) -> dict[str, str]:
+    """Return key/value pairs from the first section whose header contains section_substring.
+
+    Handles PrusaSlicer vendor bundle format where section names can contain
+    colons and wildcards, e.g. ``[printer:*common_bioslicer_trident*]``.
+    """
+    result: dict[str, str] = {}
+    in_section = False
+    with ini_path.open(encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("["):
+                in_section = section_substring in line
+                continue
+            if not in_section:
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            result[key.strip()] = val.strip()
+    return result
+
+
+def bed_shape_bbox(bed_shape_str: str) -> tuple[float, float, float, float]:
+    """Parse ``77x79,177x79,177x134,77x134`` and return (min_x, min_y, max_x, max_y)."""
+    xs, ys = [], []
+    for point in bed_shape_str.split(","):
+        x_str, _, y_str = point.strip().partition("x")
+        xs.append(float(x_str))
+        ys.append(float(y_str))
+    return min(xs), min(ys), max(xs), max(ys)

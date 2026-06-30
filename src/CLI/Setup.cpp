@@ -242,7 +242,7 @@ static bool setup_common()
     }
 
     {
-        Slic3r::set_logging_level(1);
+        Slic3r::set_logging_level(4);
         const char* loglevel = boost::nowide::getenv("SLIC3R_LOGLEVEL");
         if (loglevel != nullptr) {
             if (loglevel[0] >= '0' && loglevel[0] <= '9' && loglevel[1] == 0)

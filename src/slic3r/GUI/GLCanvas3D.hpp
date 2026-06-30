@@ -357,6 +357,8 @@ class GLCanvas3D
         {
             GLModel object;
             GLModel supports;
+            GLModel object_edges;
+            GLModel supports_edges;
         };
         typedef std::map<unsigned int, Triangles> ObjectIdToModelsMap;
         double z;
@@ -365,6 +367,17 @@ class GLCanvas3D
         SlaCap() { reset(); }
         void reset() { z = DBL_MAX; triangles.clear(); }
         bool matches(double z) const { return this->z == z; }
+    };
+
+    struct FffSlaCap
+    {
+        double z { DBL_MAX };
+        std::vector<GLModel> models;
+        std::vector<GLModel> outlines;
+        // (layer_z, ext_id) key for each model/outline entry, enabling per-step filtering.
+        std::vector<std::pair<double, unsigned int>> step_keys;
+        bool matches(double z) const { return this->z == z; }
+        void reset() { z = DBL_MAX; models.clear(); outlines.clear(); step_keys.clear(); }
     };
 
     enum class EWarning {
@@ -507,6 +520,13 @@ private:
     ClippingPlane m_camera_clipping_plane;
     bool m_use_clipping_planes;
     std::array<SlaCap, 2> m_sla_caps;
+    FffSlaCap             m_fff_sla_cap;
+    double                m_fff_preview_high_z { -DBL_MAX };
+    // When set, only SLA entries at layer_z < m_fff_sla_step_z, or at
+    // layer_z == m_fff_sla_step_z with ext_id <= m_fff_sla_step_ext, are rendered.
+    // DBL_MAX / UINT_MAX mean "show all" (default).
+    double                m_fff_sla_step_z   { DBL_MAX };
+    unsigned int          m_fff_sla_step_ext { UINT_MAX };
     int m_layer_slider_index = -1;
     std::string m_sidebar_field;
     // when true renders an extra frame by not resetting m_dirty to false
@@ -681,6 +701,9 @@ public:
 	const wxGLCanvas* get_wxglcanvas() const { return m_canvas; }
 
     wxWindow* get_wxglcanvas_parent();
+    // Force an immediate repaint bypassing the idle-event pipeline.
+    // Safe to call from modal dialog contexts where idle events are suppressed.
+    void force_repaint();
 
     bool init();
     void post_event(wxEvent &&event);
@@ -754,13 +777,24 @@ public:
 
     void set_layer_slider_index(int i) { m_layer_slider_index = i; }
 
+    // Control which SLA material steps are visible in the hybrid FFF+SLA preview.
+    void set_fff_sla_step(double layer_z, unsigned int ext_id) {
+        m_fff_sla_step_z   = layer_z;
+        m_fff_sla_step_ext = ext_id;
+    }
+    void clear_fff_sla_step() {
+        m_fff_sla_step_z   = DBL_MAX;
+        m_fff_sla_step_ext = UINT_MAX;
+    }
+
     void set_clipping_plane(unsigned int id, const ClippingPlane& plane) {
         if (id < 2) {
             m_clipping_planes[id] = plane;
             m_sla_caps[id].reset();
+            m_fff_sla_cap.reset();
         }
     }
-    void reset_clipping_planes_cache() { m_sla_caps[0].triangles.clear(); m_sla_caps[1].triangles.clear(); }
+    void reset_clipping_planes_cache() { m_sla_caps[0].triangles.clear(); m_sla_caps[1].triangles.clear(); m_fff_sla_cap.reset(); m_fff_preview_high_z = -DBL_MAX; m_fff_sla_step_z = DBL_MAX; m_fff_sla_step_ext = UINT_MAX; }
     void set_use_clipping_planes(bool use) { m_use_clipping_planes = use; }
 
     bool                                get_use_clipping_planes() const { return m_use_clipping_planes; }
@@ -823,7 +857,13 @@ public:
     std::vector<float> get_gcode_layers_times() const { return m_gcode_viewer.get_layers_times(); }
     const std::vector<float>& get_gcode_layers_times_cache() const { return m_gcode_layers_times_cache; }
     void reset_gcode_layers_times_cache() { m_gcode_layers_times_cache.clear(); }
-    void set_volumes_z_range(const std::array<double, 2>& range) { m_volumes.set_range(range[0] - 1e-6, range[1] + 1e-6); }
+    void set_volumes_z_range(const std::array<double, 2>& range) {
+        m_volumes.set_range(range[0] - 1e-6, range[1] + 1e-6);
+        if (m_fff_preview_high_z != range[1]) {
+            m_fff_preview_high_z = range[1];
+            m_fff_sla_cap.reset();
+        }
+    }
     void set_toolpaths_z_range(const std::array<unsigned int, 2>& range);
     size_t get_gcode_extruders_count() { return m_gcode_viewer.get_extruders_count(); }
 
@@ -1028,6 +1068,7 @@ private:
     void _render_camera_target_validation_box();
 #endif // ENABLE_SHOW_CAMERA_TARGET
     void _render_sla_slices();
+    void _render_fff_sla_slices();
     void _render_selection_sidebar_hints() { m_selection.render_sidebar_hints(m_sidebar_field); }
     bool _render_undo_redo_stack(const bool is_undo, float pos_x);
     bool _render_arrange_menu(float pos_x, bool current_bed);

@@ -680,7 +680,18 @@ void ObjectList::update_extruder_in_config(const wxDataViewItem& item)
     const int extruder = m_objects_model->GetExtruderNumber(item);
     m_config->set_key_value("extruder", new ConfigOptionInt(extruder));
 
-    // update scene
+    // When changing the object-level extruder, clear volume-level overrides that
+    // would otherwise shadow it (3MF files often store extruder per-volume).
+    if (item_type & itObject) {
+        const int obj_idx = m_objects_model->GetIdByItem(item);
+        if (obj_idx >= 0) {
+            for (ModelVolume* vol : (*m_objects)[obj_idx]->volumes)
+                if (vol->config.has("extruder"))
+                    vol->config.erase("extruder");
+            wxGetApp().plater()->changed_objects({ size_t(obj_idx) });
+            return;
+        }
+    }
     wxGetApp().plater()->update();
 }
 
@@ -1096,8 +1107,9 @@ void ObjectList::extruder_editing()
         if (!item) return;
 
         const int selection = m_extruder_editor->GetSelection();
-        if (selection >= 0) 
-            m_objects_model->SetExtruder(m_extruder_editor->GetString(selection), item);
+        if (selection >= 0)
+            m_objects_model->SetExtruder(
+                selection == 0 ? _(L("default")) : wxString::Format("%d", selection), item);
 
         m_extruder_editor->Hide();
         update_extruder_in_config(item);
@@ -4798,6 +4810,17 @@ void ObjectList::OnEditingDone(wxDataViewEvent &event)
         return;
 
     m_is_editing_started = false;
+
+    // Guarantee the extruder config is updated even if
+    // wxEVT_DATAVIEW_ITEM_VALUE_CHANGED was dropped by GTK re-entrancy.
+    if (event.GetColumn() == colExtruder) {
+        wxDataViewItem item = event.GetItem();
+        if (m_objects_model->GetItemType(item) == itObject)
+            m_objects_model->UpdateVolumesExtruderBitmap(item);
+        update_extruder_in_config(item);
+        return;
+    }
+
     if (event.GetColumn() != colName)
         return;
 
@@ -4827,10 +4850,11 @@ void ObjectList::set_extruder_for_selected_items(const int extruder) const
 
     take_snapshot(_L("Change Extruders"));
 
+    std::vector<size_t> object_idxs;
     for (const wxDataViewItem& item : sels)
     {
         ModelConfig& config = get_item_config(item);
-        
+
         if (config.has("extruder")) {
             if (extruder == 0)
                 config.erase("extruder");
@@ -4840,7 +4864,7 @@ void ObjectList::set_extruder_for_selected_items(const int extruder) const
         else if (extruder > 0)
             config.set_key_value("extruder", new ConfigOptionInt(extruder));
 
-        const wxString extruder_str = extruder == 0 ? wxString (_(L("default"))) : 
+        const wxString extruder_str = extruder == 0 ? wxString (_(L("default"))) :
                                       wxString::Format("%d", config.extruder());
 
         auto const type = m_objects_model->GetItemType(item);
@@ -4853,11 +4877,26 @@ void ObjectList::set_extruder_for_selected_items(const int extruder) const
         const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(item) :
                             m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item));
 
+        // When setting the object-level extruder, clear any volume-level extruder
+        // overrides so they don't silently shadow the object-level change.
+        // (3MF files often bake extruder into each volume; without this the object
+        //  config change has no visible effect.)
+        if ((type & itObject) && obj_idx >= 0) {
+            for (ModelVolume* vol : (*m_objects)[obj_idx]->volumes)
+                if (vol->config.has("extruder"))
+                    vol->config.erase("extruder");
+        }
+
         wxGetApp().plater()->canvas3D()->ensure_on_bed(obj_idx, printer_technology() != ptSLA);
+        if (obj_idx >= 0)
+            object_idxs.push_back(size_t(obj_idx));
     }
 
-    // update scene
-    wxGetApp().plater()->update();
+    // Notify plater of the changed objects so colors update and re-slice is triggered.
+    if (!object_idxs.empty())
+        wxGetApp().plater()->changed_objects(object_idxs);
+    else
+        wxGetApp().plater()->update();
 }
 
 wxDataViewItemArray ObjectList::reorder_volumes_and_get_selection(size_t obj_idx, std::function<bool(const ModelVolume*)> add_to_selection/* = nullptr*/)

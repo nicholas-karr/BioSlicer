@@ -452,7 +452,12 @@ std::string Print::validate(std::vector<std::string>* warnings) const
     if (warnings) {
         if (m_config.bed_temperature_extruder == 0) {
             for (size_t a = 0; a < extruders.size(); ++a) {
+                // SLA channels intentionally use bed_temperature = 0; skip them.
+                if (m_config.channel_type.get_at(extruders[a]) == "sla")
+                    continue;
                 for (size_t b = a + 1; b < extruders.size(); ++b) {
+                    if (m_config.channel_type.get_at(extruders[b]) == "sla")
+                        continue;
                     if (std::abs(m_config.bed_temperature.get_at(extruders[a]) - m_config.bed_temperature.get_at(extruders[b])) > 15
                      || std::abs(m_config.first_layer_bed_temperature.get_at(extruders[a]) - m_config.first_layer_bed_temperature.get_at(extruders[b])) > 15) {
                         warnings->emplace_back("_BED_TEMPS_DIFFER");
@@ -935,8 +940,29 @@ void Print::process()
         } else if (! this->config().complete_objects.value) {
         	// Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
         	m_tool_ordering = ToolOrdering(*this, -1, false);
-            if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1))
-                throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
+            if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1)) {
+                // Allow SLA-only prints: if any layer region uses an SLA extruder the print
+                // is non-empty even though no FFF toolpaths exist.
+                bool has_sla_regions = false;
+                const auto &sla_flags = this->config().sla_material_extruder.values;
+                if (!sla_flags.empty()) {
+                    for (const PrintObject *pobj : m_objects) {
+                        for (const Layer *layer : pobj->layers()) {
+                            for (const LayerRegion *lr : layer->regions()) {
+                                const unsigned int ext1 = lr->region().extruder(frPerimeter);
+                                if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1]) {
+                                    has_sla_regions = true;
+                                    break;
+                                }
+                            }
+                            if (has_sla_regions) break;
+                        }
+                        if (has_sla_regions) break;
+                    }
+                }
+                if (!has_sla_regions)
+                    throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
+            }
         }
         this->set_done(psWipeTower);
     }
@@ -1026,6 +1052,29 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
 
 void Print::_make_skirt()
 {
+    // Skip skirt for SLA-only prints — no FFF toolpaths means nothing to prime.
+    {
+        const auto &sla_flags = m_config.sla_material_extruder.values;
+        if (!sla_flags.empty()) {
+            bool any_fff = false;
+            for (const PrintObject *obj : m_objects) {
+                for (const Layer *layer : obj->layers()) {
+                    for (const LayerRegion *lr : layer->regions()) {
+                        const unsigned int ext = lr->region().extruder(frPerimeter);
+                        if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1]) {
+                            any_fff = true;
+                            break;
+                        }
+                    }
+                    if (any_fff) break;
+                }
+                if (any_fff) break;
+            }
+            if (!any_fff)
+                return;
+        }
+    }
+
     // First off we need to decide how tall the skirt must be.
     // The skirt_height option from config is expressed in layers, but our
     // object might have different layer heights, so we need to find the print_z

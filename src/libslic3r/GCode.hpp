@@ -47,6 +47,7 @@
 #include <memory>
 #include <map>
 #include <string>
+#include <unordered_map>
 
 //#include "GCode/PressureEqualizer.hpp"
 
@@ -466,6 +467,12 @@ private:
     bool                                m_brim_done;
     // Flag indicating whether the nozzle temperature changes from 1st to 2nd layer were performed.
     bool                                m_second_layer_things_done;
+    // Per-SLA-extruder frame counters: extruder_id → number of layers shown so far.
+    std::unordered_map<unsigned int, size_t> m_sla_layer_counters;
+    // Last SLA extruder for which BIOSLICER_MATERIAL_SWAP was emitted; -1 if none.
+    int                                 m_last_sla_extruder{ -1 };
+    // 1-based video position assigned to each SLA extruder (ext0 → position) by the embedding loop.
+    std::unordered_map<unsigned int, unsigned int> m_sla_video_index;
     // G-code that is due to be written before the next extrusion
     std::string                         m_pending_pre_extrusion_gcode;
     // Pointer to currently exporting PrintObject and instance index.

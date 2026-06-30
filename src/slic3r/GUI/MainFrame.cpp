@@ -62,6 +62,7 @@
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GalleryDialog.hpp"
+#include "ShapeGenDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
@@ -1523,6 +1524,14 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { load_configbundle(); }, "import_config_bundle", nullptr,
             []() {return true; }, this);
         append_submenu(fileMenu, import_menu, wxID_ANY, _L("&Import"), "");
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate &Objects") + dots,
+            _L("Generate a multi-material SLA+FFF object and place it on the bed"),
+            [this](wxCommandEvent&) {
+                ShapeGenDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
 
         wxMenu* export_menu = new wxMenu();
         wxMenuItem* item_export_gcode = append_menu_item(export_menu, wxID_ANY, _L("Export &G-code") + dots + "\tCtrl+G", _L("Export current plate as G-code"),

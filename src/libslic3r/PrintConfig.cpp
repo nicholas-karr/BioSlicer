@@ -1477,6 +1477,7 @@ void PrintConfigDef::init_fff_params()
         "POM",
         "PSU",
         "PVDF",
+        "Resin",
         "SCAFF"
     });
     def->mode = comAdvanced;
@@ -3198,6 +3199,33 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBools{ false });
 
+    def = this->add("sla_material_exposure_time", coFloats);
+    def->label = L("SLA exposure time");
+    def->tooltip = L("Time in seconds to hold each SLA frame for resin curing. A G4 dwell is emitted after SLA_SHOW_FRAME for this duration. Set per SLA extruder.");
+    def->sidetext = L("s");
+    def->min = 0;
+    def->max = 3600;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 5.0 });
+
+    def = this->add("sla_material_delay_before_exposure", coFloats);
+    def->label = L("SLA delay before exposure");
+    def->tooltip = L("Dwell time in seconds added before SLA_SHOW_FRAME to allow the resin layer to settle. Set per SLA extruder.");
+    def->sidetext = L("s");
+    def->min = 0;
+    def->max = 30;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 3.0 });
+
+    def = this->add("sla_material_delay_after_exposure", coFloats);
+    def->label = L("SLA delay after exposure");
+    def->tooltip = L("Dwell time in seconds added after the SLA exposure G4 dwell before layer separation. Set per SLA extruder.");
+    def->sidetext = L("s");
+    def->min = 0;
+    def->max = 30;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 0.0 });
+
     def = this->add("sla_material_video_synthesize", coBools);
     def->label = L("Synthesize SLA videos natively");
     def->tooltip = L("When enabled for an SLA extruder, BioSlicer generates the SLA MKV natively during G-code export instead of requiring a pre-existing file.");
@@ -3216,6 +3244,24 @@ void PrintConfigDef::init_fff_params()
     def = this->add("sla_material_video_paths", coStrings);
     def->label = L("SLA material video paths");
     def->tooltip = L("Paths to H.265 MKV files, one per extruder. Files may be embedded into G-code comments or referenced externally.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 3;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("channel_type", coStrings);
+    def->label = L("Channel type");
+    def->tooltip = L("Per-channel type tags used by BioSlicer UI labels (for example: fff, liquid, sla).");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 3;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("channel_label", coStrings);
+    def->label = L("Channel label");
+    def->tooltip = L("Per-channel display labels shown in channel selectors. Leave empty to use automatic labels.");
     def->multiline = true;
     def->full_width = true;
     def->height = 3;
@@ -3246,6 +3292,22 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionInt(1024));
 
+    def = this->add("sla_material_video_synth_proj_width", coFloat);
+    def->label = L("SLA projector width");
+    def->tooltip = L("Physical width of the SLA projector illumination area in millimetres. The synthesized video frame maps to this area centered on the bed. Set to 0 to derive from the bed dimensions.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("sla_material_video_synth_proj_height", coFloat);
+    def->label = L("SLA projector height");
+    def->tooltip = L("Physical height of the SLA projector illumination area in millimetres. See SLA projector width.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     def = this->add("sla_material_video_synth_fps", coInt);
     def->label = L("SLA synthesized video FPS");
     def->tooltip = L("Frame rate used when encoding synthesized SLA MKV videos.");
@@ -3257,7 +3319,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("sla_material_video_synth_lossless", coBool);
     def->label = L("Lossless synthesized SLA videos");
-    def->tooltip = L("Encode synthesized SLA videos in lossless mode using software libx265.");
+    def->tooltip = L("Encode synthesized SLA videos in lossless mode (uses FFV1 codec).");
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(true));
 
@@ -4121,7 +4183,9 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_before_wipe", "retract_restart_extra", "retract_before_travel", "wipe",
         "travel_slope", "travel_max_lift", "travel_ramping_lift", "travel_lift_before_obstacle",
         "retract_layer_change", "retract_length_toolchange", "retract_restart_extra_toolchange", "extruder_colour",
-        "default_filament_profile", "nozzle_high_flow"
+        "default_filament_profile", "nozzle_high_flow",
+        "channel_type", "sla_material_extruder", "sla_material_exposure_time",
+        "sla_material_delay_before_exposure", "sla_material_delay_after_exposure"
     };
 
     m_extruder_retract_keys = {

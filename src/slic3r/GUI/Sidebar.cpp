@@ -23,6 +23,8 @@
 
 #include <cstddef>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <boost/algorithm/string.hpp>
 
 #include <wx/sizer.h>
@@ -238,9 +240,6 @@ void Sidebar::show_preset_comboboxes()
     for (size_t i = 4; i < 8; ++i)
         m_presets_sizer->Show(i, showSLA);
 
-    // Keep SLA material selector visible in FFF mode to support hybrid tool setups.
-    m_presets_sizer->Show(6, true);
-    m_presets_sizer->Show(7, true);
 
     m_frequently_changed_parameters->Show(!showSLA);
 
@@ -614,37 +613,111 @@ static wxString make_filament_combo_tag(int extr_idx)
     if (nozzle > 0.0)
         tag += wxString::Format(" %.1fmm", nozzle);
 
+    const auto *sla_channels = dynamic_cast<const ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"));
+    const auto *sla_video_names = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_names"));
+    const auto *sla_video_paths = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_paths"));
+    const auto *channel_types = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("channel_type"));
+    const auto *channel_labels = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("channel_label"));
+
+    bool has_custom_label = false;
+    if (channel_labels != nullptr && extr_idx >= 0 && size_t(extr_idx) < channel_labels->values.size()) {
+        wxString custom = from_u8(channel_labels->values[size_t(extr_idx)]);
+        custom.Trim(true).Trim(false);
+        if (!custom.IsEmpty()) {
+            tag = custom;
+            has_custom_label = true;
+        }
+    }
+
+    auto has_non_ws = [](const std::string &s) {
+        return s.find_first_not_of(" \t\r\n") != std::string::npos;
+    };
+
+    auto normalized_channel_type = [&](size_t i) {
+        std::string t;
+        if (channel_types != nullptr && i < channel_types->values.size())
+            t = channel_types->values[i];
+        t.erase(std::remove_if(t.begin(), t.end(), [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
+        std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return t;
+    };
+
+    auto is_liquid_idx = [&](size_t i) {
+        const std::string t = normalized_channel_type(i);
+        return t == "liquid" || t == "liq";
+    };
+
+    if (extr_idx >= 0 && tag.StartsWith("Channel ") && is_liquid_idx(size_t(extr_idx))) {
+        int lane_idx = 0;
+        for (size_t i = 0; i <= size_t(extr_idx); ++i) {
+            if (is_liquid_idx(i))
+                ++lane_idx;
+        }
+
+        if (lane_idx > 0) {
+            const int row = (lane_idx - 1) / 4;
+            const int col = (lane_idx - 1) % 4 + 1;
+            if (row < 26)
+                tag = wxString::Format("Liquid Lane %c%d", char('A' + row), col);
+            else
+                tag = wxString::Format("Liquid Lane R%dC%d", row + 1, col);
+        }
+    }
+
+    auto is_sla_idx = [&](size_t i) {
+        if (normalized_channel_type(i) == "sla")
+            return true;
+        const bool marked_in_bool = sla_channels != nullptr && i < sla_channels->values.size() && sla_channels->values[i];
+        const bool has_name = sla_video_names != nullptr && i < sla_video_names->values.size() && has_non_ws(sla_video_names->values[i]);
+        const bool has_path = sla_video_paths != nullptr && i < sla_video_paths->values.size() && has_non_ws(sla_video_paths->values[i]);
+        return marked_in_bool || has_name || has_path;
+    };
+
+    const size_t extruders_count = size_t(std::max(0, wxGetApp().extruders_edited_cnt()));
+    bool any_explicit_sla = false;
+    for (size_t i = 0; i < extruders_count; ++i) {
+        if (is_sla_idx(i)) {
+            any_explicit_sla = true;
+            break;
+        }
+    }
+    const bool use_10ch_fallback = !any_explicit_sla && extruders_count == 10;
+
     int sla_bucket_idx = 0;
     bool is_sla_channel = false;
-    if (const auto *sla_channels = dynamic_cast<const ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"))) {
-        const size_t upto = std::min<size_t>(size_t(std::max(0, extr_idx)) + 1, sla_channels->values.size());
-        for (size_t i = 0; i < upto; ++i) {
-            if (sla_channels->values[i]) {
-                ++sla_bucket_idx;
-                if (int(i) == extr_idx)
-                    is_sla_channel = true;
-            }
+    const size_t upto = size_t(std::max(0, extr_idx)) + 1;
+    for (size_t i = 0; i < upto; ++i) {
+        const bool is_sla = use_10ch_fallback ? (i >= 8) : is_sla_idx(i);
+        if (is_sla) {
+            ++sla_bucket_idx;
+            if (int(i) == extr_idx)
+                is_sla_channel = true;
         }
     }
 
-    if (is_sla_channel) {
-        tag += wxString::Format(" | SLA Bucket %d", sla_bucket_idx);
+    if (!has_custom_label) {
+        if (is_sla_channel) {
+            tag += wxString::Format(" | SLA Bucket %d", sla_bucket_idx);
 
-        if (const auto *sla_video_names = dynamic_cast<const ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_names"))) {
-            if (extr_idx >= 0 && size_t(extr_idx) < sla_video_names->values.size()) {
-                wxString sla_name = from_u8(sla_video_names->values[size_t(extr_idx)]);
-                sla_name.Trim(true).Trim(false);
-                if (!sla_name.IsEmpty())
-                    tag += wxString::Format(" | %s", sla_name);
+            if (sla_video_names != nullptr) {
+                if (extr_idx >= 0 && size_t(extr_idx) < sla_video_names->values.size()) {
+                    wxString sla_name = from_u8(sla_video_names->values[size_t(extr_idx)]);
+                    sla_name.Trim(true).Trim(false);
+                    if (!sla_name.IsEmpty())
+                        tag += wxString::Format(" | %s", sla_name);
+                }
             }
         }
-    }
-    else {
-        tag += " | FFF";
-    }
+        else if (extr_idx >= 0 && is_liquid_idx(size_t(extr_idx))) {
+            tag += " | LIQUID";
+        }
+        else {
+            tag += " | FFF";
+        }
 
-    if (nozzle > 0.0)
-        tag += wxString::Format(" | %.1fmm nozzle", nozzle);
+        if (nozzle > 0.0)
+            tag += wxString::Format(" | %.1fmm nozzle", nozzle);
+    }
 
     return tag;
 }
@@ -735,9 +808,6 @@ void Sidebar::update_printer_presets_combobox()
 
 void Sidebar::update_presets(Preset::Type preset_type)
 {
-    PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
-    const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
-
     switch (preset_type) {
     case Preset::TYPE_FILAMENT:
     {

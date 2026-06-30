@@ -146,8 +146,7 @@ class HybridScriptSmokeTests(unittest.TestCase):
         script_path = repo_root / "scripts" / "gen_hybrid_3mf_and_slice.py"
         slicer_path = repo_root / "build" / "src" / "prusa-slicer"
 
-        if not slicer_path.exists():
-            self.skipTest(f"Missing slicer binary: {slicer_path}")
+        self.assertTrue(slicer_path.exists(), f"Missing slicer binary: {slicer_path}")
 
         if shutil.which("ffmpeg") is None:
             raise AssertionError("ffmpeg is required for native synthesis smoke test")
@@ -188,15 +187,17 @@ class HybridScriptSmokeTests(unittest.TestCase):
             self.assertIn("sla_material_video_synthesize = 0,1", override_text)
 
             gcode_text = gcode_path.read_text(encoding="utf-8", errors="replace")
+            # Hybrid print: extruder 0 is FFF (PLA scaffold), extruder 1 is SLA.
             # Validate FDM content: at least one extrusion move with an E axis value.
             self.assertRegex(gcode_text, re.compile(r"^G1\s+.*\bE[-+]?(?:\d|\.\d)", re.MULTILINE))
-            self.assertIn("; bioslicer_sla_material_map extruder=1 name=resin_basic embedded=1", gcode_text)
-            self.assertIn("; bioslicer_sla_video begin name=resin_basic extruder=1", gcode_text)
-            self.assertIn("; bioslicer_sla_video end name=resin_basic", gcode_text)
+            self.assertIn("; bioslicer_sla_material_map extruder=1 name=ch2 embedded=1", gcode_text)
+            self.assertRegex(gcode_text, r"; bioslicer_sla_video[_ ]begin name=ch2 extruder=1")
+            self.assertIn("; bioslicer_sla_video end name=ch2", gcode_text)
 
             extracted = runtime.extract_videos_from_gcode(str(gcode_path), str(out_dir / "video_extract"))
-            self.assertIn("resin_basic", extracted)
-            video_path = Path(extracted["resin_basic"])
+            self.assertIn("ch2", extracted)
+            self.assertNotIn("ch1", extracted)
+            video_path = Path(extracted["ch2"])
             self.assertTrue(video_path.exists(), f"Missing extracted video: {video_path}")
 
             width, height = _probe_video_size(video_path)

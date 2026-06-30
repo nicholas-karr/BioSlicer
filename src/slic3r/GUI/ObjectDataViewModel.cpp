@@ -1319,8 +1319,11 @@ void ObjectDataViewModel::GetValue(wxVariant &variant, const wxDataViewItem &ite
         variant << DataViewBitmapText(node->m_name, node->m_bmp.GetBitmapFor(m_ctrl));
 		break;
 	case colExtruder:
-		variant << DataViewBitmapText(node->m_extruder, node->m_extruder_bmp.GetBitmapFor(m_ctrl));
-		break;
+        // Keep the raw numeric string ("5") so CreateEditorCtrl's atoi() round-trips
+        // correctly.  The BitmapChoiceRenderer::Render() translates it to the channel
+        // label ("SLA 1") for display.
+        variant << DataViewBitmapText(node->m_extruder, node->m_extruder_bmp.GetBitmapFor(m_ctrl));
+        break;
 	case colEditing:
 		variant << node->m_action_icon.GetBitmapFor(m_ctrl);
 		break;

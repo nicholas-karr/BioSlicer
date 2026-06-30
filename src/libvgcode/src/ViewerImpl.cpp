@@ -1671,9 +1671,17 @@ void ViewerImpl::update_view_full_range()
     const bool travels_visible = m_settings.options_visibility[size_t(EOptionType::Travels)];
     const bool wipes_visible   = m_settings.options_visibility[size_t(EOptionType::Wipes)];
 
+    // CustomGCode vertices (SLA frames, color changes, pauses) are always
+    // included in the navigable range for the moves slider, even when the
+    // CustomGCodes display option is turned off.  This ensures SLA-only layers
+    // (which have no Extrude vertices) remain scrollable.
+    auto is_navigable = [this](const PathVertex& v) {
+        return is_visible(v, m_settings) || v.type == EMoveType::CustomGCode;
+    };
+
     auto first_it = m_vertices.begin();
     while (first_it != m_vertices.end() &&
-           (first_it->layer_id < layers_range[0] || !is_visible(*first_it, m_settings))) {
+           (first_it->layer_id < layers_range[0] || !is_navigable(*first_it))) {
         ++first_it;
     }
 
@@ -1700,7 +1708,7 @@ void ViewerImpl::update_view_full_range()
         if (last_it != first_it)
             --last_it;
 
-        // remove disabled trailing options, if any 
+        // remove disabled trailing options, if any (but keep CustomGCode vertices)
         auto rev_first_it = std::make_reverse_iterator(first_it);
         if (rev_first_it != m_vertices.rbegin())
             --rev_first_it;
@@ -1709,7 +1717,7 @@ void ViewerImpl::update_view_full_range()
             --rev_last_it;
 
         bool reduced = false;
-        while (rev_last_it != rev_first_it && !is_visible(*rev_last_it, m_settings)) {
+        while (rev_last_it != rev_first_it && !is_navigable(*rev_last_it)) {
             ++rev_last_it;
             reduced = true;
         }

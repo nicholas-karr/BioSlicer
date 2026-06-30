@@ -113,14 +113,18 @@ def main() -> int:
 
     objects = build_pattern_objects()
     write_3mf(path_3mf, objects, model_name=args.name)
+    # Extruder 1 is the FFF (PLA) scaffold; extruder 2 is the SLA channel.
     write_sla_override_ini(
         path_override_ini,
-        sla_extruder=1,
+        sla_flags=[0, 1],
+        video_names=["", "ch2"],
+        synth_flags=[0, 1],
+        embed_flags=[0, 1],
+        video_paths=["", ""],
         synth_width=synth_width,
         synth_height=synth_height,
         synth_fps=synth_fps,
         synth_lossless=synth_lossless,
-        video_name="resin_basic",
     )
 
     run_slice(
@@ -130,7 +134,7 @@ def main() -> int:
         path_override_ini,
         extruder_count=2,
         layer_height=0.8,
-        start_note="Material map: T0 Generic PLA, T1 Generic SLA Resin (assumed hybrid profile)",
+        start_note="Material map: T0 PLA (FFF), T1 SLA ch2 (hybrid print)",
     )
 
     print(f"Wrote 3MF: {path_3mf}")

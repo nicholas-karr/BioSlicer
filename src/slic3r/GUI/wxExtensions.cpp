@@ -9,6 +9,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <cctype>
 
 #include <wx/sizer.h>
 #include <wx/accel.h>
@@ -367,18 +368,77 @@ static std::vector<int> get_sla_bucket_indices_for_extruders(size_t extruders_co
         return bucket_indices;
 
     const auto *sla_material_extruder = dynamic_cast<const Slic3r::ConfigOptionBools *>(printer_preset.config.option("sla_material_extruder"));
-    if (sla_material_extruder == nullptr)
-        return bucket_indices;
+    const auto *sla_video_names = dynamic_cast<const Slic3r::ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_names"));
+    const auto *sla_video_paths = dynamic_cast<const Slic3r::ConfigOptionStrings *>(printer_preset.config.option("sla_material_video_paths"));
+    const auto *channel_types = dynamic_cast<const Slic3r::ConfigOptionStrings *>(printer_preset.config.option("channel_type"));
+
+    auto has_non_ws = [](const std::string &s) {
+        return s.find_first_not_of(" \t\r\n") != std::string::npos;
+    };
+
+    auto normalized_channel_type = [&](size_t i) {
+        std::string t;
+        if (channel_types != nullptr && i < channel_types->values.size())
+            t = channel_types->values[i];
+        t.erase(std::remove_if(t.begin(), t.end(), [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
+        std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return t;
+    };
+
+    auto is_sla_channel = [&](size_t i) {
+        if (normalized_channel_type(i) == "sla")
+            return true;
+        const bool marked_in_bool = sla_material_extruder != nullptr && i < sla_material_extruder->values.size() && sla_material_extruder->values[i];
+        const bool has_name = sla_video_names != nullptr && i < sla_video_names->values.size() && has_non_ws(sla_video_names->values[i]);
+        const bool has_path = sla_video_paths != nullptr && i < sla_video_paths->values.size() && has_non_ws(sla_video_paths->values[i]);
+        return marked_in_bool || has_name || has_path;
+    };
+
+    bool any_explicit_sla = false;
+    for (size_t i = 0; i < extruders_count; ++i) {
+        if (is_sla_channel(i)) {
+            any_explicit_sla = true;
+            break;
+        }
+    }
+
+    const bool use_10ch_fallback = !any_explicit_sla && extruders_count == 10;
 
     int bucket_index = 0;
-    const size_t count = std::min(extruders_count, sla_material_extruder->values.size());
+    const size_t count = extruders_count;
     for (size_t i = 0; i < count; ++i) {
-        if (sla_material_extruder->values[i])
+        const bool is_sla = use_10ch_fallback ? (i >= 8) : is_sla_channel(i);
+        if (is_sla)
             bucket_indices[i] = ++bucket_index;
     }
 
     return bucket_indices;
 }
+
+static std::string get_channel_type_for_extruder(size_t extruder_idx)
+{
+    const Slic3r::Preset &printer_preset = Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
+    const auto *channel_types = dynamic_cast<const Slic3r::ConfigOptionStrings *>(printer_preset.config.option("channel_type"));
+    std::string t;
+    if (channel_types != nullptr && extruder_idx < channel_types->values.size())
+        t = channel_types->values[extruder_idx];
+    t.erase(std::remove_if(t.begin(), t.end(), [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
+    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return t;
+}
+
+static wxString get_channel_label_for_extruder(size_t extruder_idx)
+{
+    const Slic3r::Preset &printer_preset = Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
+    const auto *channel_labels = dynamic_cast<const Slic3r::ConfigOptionStrings *>(printer_preset.config.option("channel_label"));
+    if (channel_labels == nullptr || extruder_idx >= channel_labels->values.size())
+        return wxString();
+
+    wxString label = Slic3r::GUI::from_u8(channel_labels->values[extruder_idx]);
+    label.Trim(true).Trim(false);
+    return label;
+}
+
 
 static std::vector<double> get_nozzle_diameters_for_extruders(size_t extruders_count)
 {
@@ -396,6 +456,36 @@ static std::vector<double> get_nozzle_diameters_for_extruders(size_t extruders_c
     return nozzle_diameters;
 }
 
+wxString extruder_type_label(size_t extruder_0based_idx)
+{
+    const size_t total = size_t(std::max(0, Slic3r::GUI::wxGetApp().extruders_edited_cnt()));
+    const std::vector<int> sla_indices = get_sla_bucket_indices_for_extruders(std::max(total, extruder_0based_idx + 1));
+
+    const int bucket_index = extruder_0based_idx < sla_indices.size() ? sla_indices[extruder_0based_idx] : 0;
+    if (bucket_index > 0)
+        return wxString::Format("SLA %d", bucket_index);
+
+    const std::string channel_type = get_channel_type_for_extruder(extruder_0based_idx);
+    if (channel_type == "liquid" || channel_type == "liq") {
+        int liquid_idx = 0;
+        for (size_t i = 0; i <= extruder_0based_idx; ++i) {
+            const std::string t = get_channel_type_for_extruder(i);
+            if (t == "liquid" || t == "liq")
+                ++liquid_idx;
+        }
+        return wxString::Format("LIQUID %d", liquid_idx);
+    }
+
+    int fff_idx = 0;
+    for (size_t i = 0; i <= extruder_0based_idx; ++i) {
+        const int bi = i < sla_indices.size() ? sla_indices[i] : 0;
+        const std::string t = get_channel_type_for_extruder(i);
+        if (bi == 0 && t != "liquid" && t != "liq")
+            ++fff_idx;
+    }
+    return wxString::Format("FFF %d", fff_idx);
+}
+
 static wxString make_extruder_selector_label(size_t extruder_idx,
                                              bool use_full_item_name,
                                              const std::vector<int> &sla_bucket_indices,
@@ -404,10 +494,17 @@ static wxString make_extruder_selector_label(size_t extruder_idx,
     const int display_index = int(extruder_idx) + 1;
     const int bucket_index = extruder_idx < sla_bucket_indices.size() ? sla_bucket_indices[extruder_idx] : 0;
     const bool is_sla_tool = bucket_index > 0;
+    const std::string channel_type = get_channel_type_for_extruder(extruder_idx);
+    const bool is_liquid_tool = channel_type == "liquid" || channel_type == "liq";
     const double nozzle_diameter = extruder_idx < nozzle_diameters.size() ? nozzle_diameters[extruder_idx] : 0.0;
+    const wxString channel_label = get_channel_label_for_extruder(extruder_idx);
 
     if (!use_full_item_name)
-        return is_sla_tool ? wxString::Format("%d [S%d]", display_index, bucket_index) : wxString::Format("%d [F]", display_index);
+        return extruder_type_label(extruder_idx);
+
+    // Full item name (settings dialog): use channel_label as the only descriptor when set.
+    if (!channel_label.IsEmpty())
+        return wxString::Format("%s %d (%s)", _(L("Extruder")), display_index, channel_label);
 
     wxString label = wxString::Format("%s %d", _(L("Extruder")), display_index);
     if (nozzle_diameter > 0.0)
@@ -415,6 +512,8 @@ static wxString make_extruder_selector_label(size_t extruder_idx,
 
     if (is_sla_tool)
         label += wxString::Format(" [SLA %s %d]", _(L("Bucket")), bucket_index);
+    else if (is_liquid_tool)
+        label += " [LIQUID]";
     else
         label += " [FFF]";
 

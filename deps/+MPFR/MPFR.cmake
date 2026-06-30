@@ -33,8 +33,10 @@ else ()
             ${CMAKE_COMMAND} -E env
                 sh -c
                 "autoreconf -f -i && \
+                 CC='${CMAKE_C_COMPILER}' \
+                 CXX='${CMAKE_CXX_COMPILER}' \
                  CFLAGS='${_gmp_ccflags}' \
-                 CXXFLAGS='${_gmp_ccflags}' \
+                 CXXFLAGS='${_gmp_cxxflags}' \
                  ./configure ${_cross_compile_arg} \
                              --prefix='${${PROJECT_NAME}_DEP_INSTALL_PREFIX}' \
                              --enable-shared=no \

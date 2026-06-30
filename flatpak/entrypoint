@@ -1,0 +1,69 @@
+#!/usr/bin/env sh
+
+DESKTOP_FILE=~/.local/share/applications/PrusaSlicerURLProtocol.desktop
+if [ -f "$DESKTOP_FILE" ]; then
+    if grep -q flatpak "$DESKTOP_FILE"; then
+      rm -f "$DESKTOP_FILE"
+    fi
+fi
+
+PRUSA_SLICER_APP_LOCALE_ERROR="An error occured while setting up locale"
+PRUSA_SLICER_APP_FALLBACK_LOCALE=en_US.UTF-8
+USE_LOCALE_WORKAROUND=$( (/app/bin/prusa-slicer --help 2>&1 | grep "$PRUSA_SLICER_APP_LOCALE_ERROR") >/dev/null && echo true || echo false )
+
+echo "--------------------------------------------------------------------------"
+echo "Message: $(date +%T): Starting BioSlicer flatpak with entrypoint script"
+echo "--------------------------------------------------------------------------"
+
+if [ $USE_LOCALE_WORKAROUND = true ]; then
+    echo "WARN: detected locale error, trying to use fallback locale"
+    LANG_PRESENT=$( (locale -a | grep -q "^$LANG$") && echo true || echo false )
+    if [ $LANG_PRESENT = true ]; then
+        export LC_ALL=$LANG
+        echo "WARN: $LANG is available, setting LC_ALL to $LC_ALL."
+    else
+        export LC_ALL=$PRUSA_SLICER_APP_FALLBACK_LOCALE
+        echo "WARN: $LANG is not available in locale -a. Setting LC_ALL to $LC_ALL."
+    fi
+fi
+
+if XDG_CONFIG_HOME=$HOME/.config /app/bin/uses-dark-theme.py; then
+    export GTK_THEME='Adwaita:dark'
+    export PRUSA_SLICER_DARK_THEME='true'
+    echo "Message: $(date +%T): INFO: using dark theme variant"
+fi
+
+# VirtualBox and some other virtualised aarch64 environments don't have a
+# working Wayland compositor inside the guest.  Force GTK to use X11 so the
+# app doesn't fail silently when WAYLAND_DISPLAY is set but non-functional.
+if [ -z "${BIOSLICER_NO_FORCE_X11:-}" ]; then
+    export GDK_BACKEND=x11
+fi
+
+# Glycin (GNOME's sandboxed image loader) uses flatpak-spawn --sandbox to
+# decode SVG icons in a nested sandbox.  The portal verifies the caller by
+# reading /run/user/$UID/.flatpak/<instance>/bwrapinfo.json, which bwrap
+# writes when the outer sandbox starts.
+#
+# Safety net: if bwrapinfo.json is absent for any reason (bwrap race, unusual
+# host environment), write it here from /proc/self/ns/{mnt,pid}.  The portal
+# check passes because glycin runs in the same mount namespace as this process.
+# This is a no-op when bwrapinfo.json is already present (the normal case).
+for _bs_inst in "/run/user/$(id -u)/.flatpak"/*/; do
+    [ -d "$_bs_inst" ] || continue
+    [ -f "${_bs_inst}bwrapinfo.json" ] && continue
+    _bs_mnt=$(stat -Lc %i /proc/self/ns/mnt 2>/dev/null) || continue
+    _bs_pid_ns=$(stat -Lc %i /proc/self/ns/pid 2>/dev/null) || continue
+    printf '{\n    "child-pid": %s,\n    "mnt-namespace": %s,\n    "pid-namespace": %s\n}\n' \
+        "$$" "$_bs_mnt" "$_bs_pid_ns" > "${_bs_inst}bwrapinfo.json" 2>/dev/null || continue
+    echo "Message: $(date +%T): INFO: wrote missing bwrapinfo.json for glycin nested-sandbox"
+done
+unset _bs_inst _bs_mnt _bs_pid_ns
+
+/app/bin/set-dark-theme-variant.py &
+/app/bin/prusa-slicer "$@"
+_rc=$?
+if [ $_rc -ne 0 ]; then
+    echo "Message: $(date +%T): prusa-slicer exited with code $_rc" >&2
+fi
+exit $_rc

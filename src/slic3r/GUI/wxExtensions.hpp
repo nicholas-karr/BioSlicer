@@ -79,6 +79,10 @@ void apply_extruder_selector(Slic3r::GUI::BitmapComboBox** ctrl,
                              wxSize size = wxDefaultSize,
                              bool use_thin_icon = false);
 
+// Returns "FFF N", "SLA N", "LIQUID N", or custom channel_label for the given
+// 0-based extruder index. Used for compact display in the object list column.
+wxString extruder_type_label(size_t extruder_0based_idx);
+
 inline wxSize get_preferred_size(const wxBitmapBundle& bmp, wxWindow* parent)
 {
     if (!bmp.IsOk())

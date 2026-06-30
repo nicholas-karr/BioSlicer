@@ -151,6 +151,7 @@
 
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
 #include "WipeTowerDialog.hpp"
+#include "ShapeGenDialog.hpp"
 
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Platform.hpp"
@@ -537,6 +538,7 @@ struct Plater::priv
 	bool warnings_dialog();
 
     void on_action_add(SimpleEvent&);
+    void on_action_bioslicer_shape(SimpleEvent&);
     void on_action_split_objects(SimpleEvent&);
     void on_action_split_volumes(SimpleEvent&);
     void on_action_layersediting(SimpleEvent&);
@@ -751,6 +753,7 @@ void Plater::priv::init()
 
         // 3DScene/Toolbar:
         view3D_canvas->Bind(EVT_GLTOOLBAR_ADD, &priv::on_action_add, this);
+        view3D_canvas->Bind(EVT_GLTOOLBAR_BIOSLICER_SHAPE, &priv::on_action_bioslicer_shape, this);
         view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE, [this](SimpleEvent&) { q->remove_selected(); });
         view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE_ALL, [this](SimpleEvent&) { delete_all_objects_from_model(); });
 //        view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE_ALL, [q](SimpleEvent&) { q->reset_with_confirm(); });
@@ -3514,6 +3517,14 @@ void Plater::priv::on_action_add(SimpleEvent&)
         q->add_model();
 }
 
+void Plater::priv::on_action_bioslicer_shape(SimpleEvent&)
+{
+    if (q == nullptr)
+        return;
+    ShapeGenDialog dlg(q);
+    dlg.ShowModal();
+}
+
 void Plater::priv::on_action_split_objects(SimpleEvent&)
 {
     split_object();
@@ -5435,6 +5446,8 @@ void Plater::reset_with_confirm()
 }
 
 bool Plater::delete_object_from_model(size_t obj_idx) { return p->delete_object_from_model(obj_idx); }
+
+std::vector<size_t> Plater::add_model_objects(const ModelObjectPtrs& model_objects) { return p->load_model_objects(model_objects); }
 
 void Plater::remove_selected()
 {

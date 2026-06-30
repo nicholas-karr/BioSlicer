@@ -38,8 +38,7 @@ static const std::string MODEL_PREFIX = "model:";
 // Thus we will let PrusaSlicer 2.3.2 and couple of follow-up versions to download the version number from an alternate file until the PrusaSlicer 2.3.0/2.3.1
 // are phased out, then we will revert to the original name.
 // For 2.6.0-alpha1 we have switched back to the original. The file should contain data for AppUpdater.cpp
-static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version";
-//static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version2";
+static const std::string VERSION_CHECK_URL = "https://raw.githubusercontent.com/nicholas-karr/BioSlicer/master/BioSlicer.version";
 // Url to index archive zip that contains latest indicies
 static const std::string INDEX_ARCHIVE_URL= "https://files.prusa3d.com/wp-content/uploads/repository/vendor_indices.zip";
 // Url to folder with vendor profile files. Used when downloading new profiles that are not in resources folder.
@@ -80,6 +79,9 @@ void AppConfig::set_defaults()
             set("no_templates", "0");
         if (get("show_incompatible_presets").empty())
             set("show_incompatible_presets", "0");
+
+        if (get("view_mode").empty())
+            set("view_mode", "expert");
 
         if (get("show_drop_project_dialog").empty())
             set("show_drop_project_dialog", "1");
@@ -135,7 +137,7 @@ void AppConfig::set_defaults()
  
        if (get("notify_release").empty())
            set("notify_release", "all"); // or "none" or "release"
-
+           
 #if ENABLE_ENVIRONMENT_MAP
         if (get("use_environment_map").empty())
             set("use_environment_map", "0");

@@ -23,8 +23,10 @@ void Layers::update(const PathVertex& vertex, uint32_t vertex_id)
         // this code assumes that gcode paths are sent sequentially, one layer after the other
         assert(vertex.layer_id == static_cast<uint32_t>(m_items.size()));
         Item& item = m_items.emplace_back(Item());
-        if (vertex.type == EMoveType::Extrude && vertex.role != EGCodeExtrusionRole::Custom)
-            item.z = vertex.position[2];
+        // Always seed item.z from the first vertex of the layer so that SLA-only
+        // layers (which have no Extrude vertices) still get a valid Z value.
+        // A later Extrude vertex will override this if the layer also has FFF paths.
+        item.z = vertex.position[2];
         item.range.set(vertex_id, vertex_id);
         item.times = vertex.times;
         item.contains_colorprint_options |= is_colorprint_option(vertex);

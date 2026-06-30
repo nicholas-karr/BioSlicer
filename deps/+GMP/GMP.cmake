@@ -18,7 +18,10 @@ if (MSVC)
 
 else ()
     string(TOUPPER "${CMAKE_BUILD_TYPE}" _buildtype_upper)
-    set(_gmp_ccflags "${CMAKE_CXX_FLAGS_${_buildtype_upper}} -fPIC -DPIC -Wall -Wmissing-prototypes -Wpointer-arith -pedantic -fomit-frame-pointer -fno-common")
+    set(_gmp_cflags  "${CMAKE_C_FLAGS_${_buildtype_upper}}   -std=gnu11 -fPIC -DPIC -Wall -Wmissing-prototypes -Wpointer-arith -pedantic -fomit-frame-pointer -fno-common")
+    set(_gmp_cxxflags "${CMAKE_CXX_FLAGS_${_buildtype_upper}}            -fPIC -DPIC -Wall -Wpointer-arith -pedantic -fomit-frame-pointer -fno-common")
+    # _gmp_ccflags kept for backward compat with MPFR.cmake which references it
+    set(_gmp_ccflags "${_gmp_cflags}")
     set(_gmp_build_tgt "${CMAKE_SYSTEM_PROCESSOR}")
 
     set(_cross_compile_arg "")
@@ -41,6 +44,9 @@ else ()
         if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
             set(_gmp_ccflags "${_gmp_ccflags} -march=armv7-a") # Works on RPi-4
             set(_gmp_build_tgt armv7)
+        elseif(CMAKE_CROSSCOMPILING)
+            # --build must be the HOST (build machine), not the cross-compile target
+            set(_gmp_build_tgt "${CMAKE_HOST_SYSTEM_PROCESSOR}")
         endif()
         set(_gmp_build_tgt "--build=${_gmp_build_tgt}-pc-linux-gnu")
     else ()
@@ -58,7 +64,7 @@ else ()
         URL_HASH SHA256=eae9326beb4158c386e39a356818031bd28f3124cf915f8c5b1dc4c7a36b4d7c
         DOWNLOAD_DIR ${${PROJECT_NAME}_DEP_DOWNLOAD_DIR}/GMP
         BUILD_IN_SOURCE ON 
-        CONFIGURE_COMMAND  env "CFLAGS=${_gmp_ccflags}" "CXXFLAGS=${_gmp_ccflags}" ./configure ${_cross_compile_arg} --enable-shared=no --enable-cxx=yes --enable-static=yes "--prefix=${${PROJECT_NAME}_DEP_INSTALL_PREFIX}" ${_gmp_build_tgt}
+        CONFIGURE_COMMAND  env "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}" "CFLAGS=${_gmp_cflags}" "CXXFLAGS=${_gmp_cxxflags}" ./configure ${_cross_compile_arg} --enable-shared=no --enable-cxx=yes --enable-static=yes "--prefix=${${PROJECT_NAME}_DEP_INSTALL_PREFIX}" ${_gmp_build_tgt}
         BUILD_COMMAND     make -j
         INSTALL_COMMAND   make install
     )

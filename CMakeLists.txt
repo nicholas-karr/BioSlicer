@@ -12,6 +12,17 @@ cmake_minimum_required(VERSION 3.13)
 project(PrusaSlicer)
 
 include("version.inc")
+
+option(SLIC3R_RELEASE_BUILD "Official release build (disables dev date suffix in version)" OFF)
+
+if(SLIC3R_RELEASE_BUILD)
+    set(SLIC3R_VERSION "${SLIC3R_VERSION_BASE}")
+else()
+    string(TIMESTAMP SLIC3R_BUILD_DATE "%Y%m%d")
+    set(SLIC3R_VERSION "${SLIC3R_VERSION_BASE}+dev.${SLIC3R_BUILD_DATE}")
+endif()
+set(SLIC3R_BUILD_ID "BioSlicer-${SLIC3R_VERSION}")
+
 include(GNUInstallDirs)
 include(CMakeDependentOption)
 
@@ -631,7 +642,7 @@ if (WIN32)
 elseif (SLIC3R_FHS)
     # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
     set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/PrusaSlicer")
-    install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
+    install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/PrusaSlicer"
         PATTERN "*/udev" EXCLUDE
     )
     install(FILES src/platform/unix/PrusaSlicer.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)

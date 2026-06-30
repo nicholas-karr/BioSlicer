@@ -705,7 +705,7 @@ void DesktopIntegrationDialog::find_all_desktop_files(std::vector<boost::filesys
         if (apps_path.empty()) {
             continue;
         }
-        for (const std::string& filename : {"PrusaSlicer","PrusaSlicerGcodeViewer","PrusaSlicerURLProtocol"}) {
+        for (const std::string& filename : {"BioSlicer","BioSlicerGcodeViewer","BioSlicerURLProtocol"}) {
             for (const std::string& suffix : {"" , "-beta", "-alpha", "_beta", "_alpha"}) {
                 boost::filesystem::path file_path = apps_path / GUI::format("%1%%2%.desktop", filename, suffix);
                 boost::system::error_code ec;

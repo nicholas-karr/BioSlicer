@@ -9,6 +9,10 @@
 #include "I18N.hpp"
 #include "BitmapComboBox.hpp"
 #include "Plater.hpp"
+#include "libslic3r/PresetBundle.hpp"
+
+#include <algorithm>
+#include <cctype>
 
 #include <wx/dc.h>
 #ifdef wxHAS_GENERIC_DATAVIEWCTRL
@@ -28,6 +32,9 @@
 
 using Slic3r::GUI::from_u8;
 using Slic3r::GUI::into_u8;
+
+
+
 
 
 //-----------------------------------------------------------------------------
@@ -274,6 +281,16 @@ bool BitmapChoiceRenderer::GetValue(wxVariant& value) const
     return true;
 }
 
+// Translate a raw numeric extruder string ("5") to its channel label ("SLA 1").
+// Returns the input unchanged for non-numeric values (e.g. "default").
+static wxString extruder_display_label(const wxString& raw)
+{
+    long n = 0;
+    if (raw.ToLong(&n) && n > 0)
+        return extruder_type_label(size_t(n - 1));
+    return raw;
+}
+
 bool BitmapChoiceRenderer::Render(wxRect rect, wxDC* dc, int state)
 {
     int xoffset = 0;
@@ -290,11 +307,12 @@ bool BitmapChoiceRenderer::Render(wxRect rect, wxDC* dc, int state)
           rect.height= icon_sz.GetHeight();
     }
 
+    const wxString label = extruder_display_label(m_value.GetText());
 #ifdef _WIN32
     // workaround for Windows DarkMode : Don't respect to the state & wxDATAVIEW_CELL_SELECTED to avoid update of the text color
-    RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
+    RenderText(label, xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
 #else
-    RenderText(m_value.GetText(), xoffset, rect, dc, state);
+    RenderText(label, xoffset, rect, dc, state);
 #endif
 
     return true;
@@ -302,7 +320,7 @@ bool BitmapChoiceRenderer::Render(wxRect rect, wxDC* dc, int state)
 
 wxSize BitmapChoiceRenderer::GetSize() const
 {
-    wxSize sz = GetTextExtent(m_value.GetText());
+    wxSize sz = GetTextExtent(extruder_display_label(m_value.GetText()));
 
     if (m_value.GetBitmap().IsOk())
         sz.x += m_value.GetBitmap().GetWidth() + 4;
@@ -337,8 +355,10 @@ wxWindow* BitmapChoiceRenderer::CreateEditorCtrl(wxWindow* parent, wxRect labelR
 
     int def_id = get_default_extruder_idx ? get_default_extruder_idx() : 0;
     c_editor->Append(_L("default"), def_id < 0 ? wxNullBitmap : *icons[def_id]);
-    for (size_t i = 0; i < icons.size(); i++)
-        c_editor->Append(wxString::Format("%d", i+1), *icons[i]);
+
+    for (size_t i = 0; i < icons.size(); i++) {
+        c_editor->Append(extruder_type_label(i), *icons[i]);
+    }
 
     c_editor->SetSelection(atoi(data.GetText().c_str()));
 
@@ -347,8 +367,8 @@ wxWindow* BitmapChoiceRenderer::CreateEditorCtrl(wxWindow* parent, wxRect labelR
     c_editor->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& evt) {
         // to avoid event propagation to other sidebar items
         evt.StopPropagation();
-        // FinishEditing grabs new selection and triggers config update. We better call
-        // it explicitly, automatic update on KILL_FOCUS didn't work on Linux.
+        // FinishEditing grabs new selection and triggers config update. We call
+        // it explicitly because automatic update on KILL_FOCUS didn't work on Linux.
         this->FinishEditing();
     });
 #else
@@ -372,7 +392,7 @@ bool BitmapChoiceRenderer::GetValueFromEditorCtrl(wxWindow* ctrl, wxVariant& val
    
     DataViewBitmapText bmpText;
 
-    bmpText.SetText(c->GetString(selection));
+    bmpText.SetText(wxString::Format("%d", selection));
     bmpText.SetBitmap(c->GetItemBitmap(selection));
 
     value << bmpText;
