@@ -89,6 +89,12 @@ build_host_flatpak() {
     echo ""
     echo "==> Building BioSlicer flatpak for ${ARCH} (native)..."
 
+    if _is_build_current "${ARCH}" "${BUNDLE}"; then
+        echo "==> [${ARCH}] No changes since last build — skipping rebuild."
+        _deploy_bundle "${ARCH}" "${BUNDLE}"
+        return 0
+    fi
+
     rm -rf "${REPO_DIR}"
     if [ -d "${STATE_DIR}/rofiles" ]; then
         for mnt in "${STATE_DIR}/rofiles"/rofiles-*; do
@@ -118,6 +124,7 @@ build_host_flatpak() {
     sha256sum "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
 
     _deploy_bundle "${ARCH}" "${BUNDLE}"
+    _save_build_hash "${ARCH}"
 }
 
 # ── Clang cross-compile build (aarch64 from x86_64 host) ─────────────────────
@@ -136,6 +143,12 @@ build_cross_aarch64() {
 
     echo ""
     echo "==> Building BioSlicer for aarch64 via Clang cross-compilation..."
+
+    if _is_build_current "${ARCH}" "${BUNDLE}"; then
+        echo "==> [aarch64] No changes since last build — skipping rebuild."
+        _deploy_bundle "aarch64" "${BUNDLE}"
+        return 0
+    fi
 
     # ── Sysroot ───────────────────────────────────────────────────────────────
     local SDK_LOC
@@ -384,6 +397,7 @@ EOF
     sha256sum "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
 
     _deploy_bundle "aarch64" "${BUNDLE}"
+    _save_build_hash "aarch64"
 }
 
 # ── Deploy helper ─────────────────────────────────────────────────────────────
@@ -397,6 +411,29 @@ _deploy_bundle() {
     chmod 644 "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak" \
               "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak.sha256"
 }
+
+# ── Build-hash helpers (fast no-op when nothing changed) ──────────────────────
+
+_compute_build_hash() {
+    local git_head diff_hash manifest_md5
+    git_head=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo "unknown")
+    # Include a hash of uncommitted working-tree changes so edits that haven't
+    # been committed still invalidate the cached bundle.
+    diff_hash=$(git -C "${ROOT_DIR}" diff HEAD 2>/dev/null | md5sum | awk '{print $1}')
+    manifest_md5=$(md5sum "${SCRIPT_DIR}/${APP_ID}.yml" 2>/dev/null | awk '{print $1}' || echo "unknown")
+    echo "${git_head}:${diff_hash}:${manifest_md5}:${SUFFIX}"
+}
+
+_hash_file() { echo "${ROOT_DIR}/.flatpak-build-${1}-hash"; }
+
+_is_build_current() {
+    local ARCH="$1" BUNDLE="$2"
+    local hf; hf="$(_hash_file "${ARCH}")"
+    [ -f "${hf}" ] && [ -f "${BUNDLE}" ] && [ -f "${BUNDLE}.sha256" ] && \
+        [ "$(_compute_build_hash)" = "$(cat "${hf}")" ]
+}
+
+_save_build_hash() { _compute_build_hash > "$(_hash_file "$1")"; }
 
 if ! $NO_BUILD; then
 
@@ -414,17 +451,49 @@ for ARCH in "${ARCHS[@]}"; do
     fi
 done
 
-# ── Build each arch ───────────────────────────────────────────────────────────
+# ── Build each arch in parallel ───────────────────────────────────────────────
+
+declare -A _BUILD_PIDS _BUILD_LOGS
+_TAIL_PIDS=()
 
 for ARCH in "${ARCHS[@]}"; do
+    _LOG="${ROOT_DIR}/.flatpak-${ARCH}.log"
+    _BUILD_LOGS["${ARCH}"]="${_LOG}"
+    : > "${_LOG}"
+
     if [ "${ARCH}" = "${HOST_ARCH}" ]; then
-        build_host_flatpak "${ARCH}"
+        ( build_host_flatpak "${ARCH}" ) > "${_LOG}" 2>&1 &
     elif [ "${ARCH}" = "aarch64" ] && ${_can_cross_aarch64}; then
-        build_cross_aarch64
+        ( build_cross_aarch64 ) > "${_LOG}" 2>&1 &
     else
         echo "WARNING: No build path for ${ARCH} on host ${HOST_ARCH} — skipping." >&2
+        continue
+    fi
+
+    _BUILD_PIDS["${ARCH}"]=$!
+    echo "==> [${ARCH}] Build started (PID ${_BUILD_PIDS["${ARCH}"]}, log: ${_LOG})"
+    tail -f --pid="${_BUILD_PIDS["${ARCH}"]}" "${_LOG}" | sed -u "s/^/[${ARCH}] /" &
+    _TAIL_PIDS+=($!)
+done
+
+_FAILED_ARCHS=()
+for ARCH in "${!_BUILD_PIDS[@]}"; do
+    if ! wait "${_BUILD_PIDS["${ARCH}"]}"; then
+        _FAILED_ARCHS+=("${ARCH}")
     fi
 done
+
+for _tpid in "${_TAIL_PIDS[@]}"; do
+    wait "${_tpid}" 2>/dev/null || true
+done
+
+if [ "${#_FAILED_ARCHS[@]}" -gt 0 ]; then
+    for ARCH in "${_FAILED_ARCHS[@]}"; do
+        echo "" >&2
+        echo "==> [${ARCH}] Build FAILED. Full log: ${_BUILD_LOGS["${ARCH}"]}" >&2
+    done
+    exit 1
+fi
 
 # Keep BioSlicer${SUFFIX}.flatpak pointing to the x86_64 bundle for backward compat.
 _built_x86=false

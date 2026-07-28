@@ -801,9 +801,6 @@ void Layer::make_perimeters()
                 // so the same expanded_slices must be passed here too, or source_slice_idx
                 // can run past the end of curr_region.slices() (segfault on mixed FFF+SLA objects).
                 this->sort_perimeters_into_islands(expanded_slices, curr_region_id, perimeter_and_gapfill_ranges, std::move(fill_expolygons), fill_expolygons_ranges, layer_region_ids);
-                // The SLA portion of the unioned boundary was only needed to get the outer
-                // perimeter contour right; clip infill back down to the FFF-only area.
-                curr_region.m_fill_expolygons = intersection_ex(curr_region.slices().surfaces, curr_region.fill_expolygons());
             }
         } else {
             SurfaceCollection new_slices;

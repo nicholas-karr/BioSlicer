@@ -179,9 +179,9 @@ static indexed_triangle_set make_hex_prism(float cx, float cy, float r, float z_
     int vbc = (int)its.vertices.size(); its.vertices.push_back({cx, cy, z_lo});
     int vtc = (int)its.vertices.size(); its.vertices.push_back({cx, cy, z_hi});
     int vb  = (int)its.vertices.size();
-    for (int k = 0; k < 6; ++k) { float a = k*(float)(M_PI/3.0); its.vertices.push_back({cx+r*std::cos(a), cy+r*std::sin(a), z_lo}); }
+    for (int k = 0; k < 6; ++k) { float a = k*(float)(M_PI/3.0) + (float)(M_PI/6.0); its.vertices.push_back({cx+r*std::cos(a), cy+r*std::sin(a), z_lo}); }
     int vt  = (int)its.vertices.size();
-    for (int k = 0; k < 6; ++k) { float a = k*(float)(M_PI/3.0); its.vertices.push_back({cx+r*std::cos(a), cy+r*std::sin(a), z_hi}); }
+    for (int k = 0; k < 6; ++k) { float a = k*(float)(M_PI/3.0) + (float)(M_PI/6.0); its.vertices.push_back({cx+r*std::cos(a), cy+r*std::sin(a), z_hi}); }
     for (int k = 0; k < 6; ++k) {
         int k1 = (k+1)%6;
         its.indices.push_back({vbc, vb+k1, vb+k});      // bottom cap (-Z)
@@ -189,6 +189,35 @@ static indexed_triangle_set make_hex_prism(float cx, float cy, float r, float z_
         its.indices.push_back({vb+k, vb+k1, vt+k});     // side wall
         its.indices.push_back({vb+k1, vt+k1, vt+k});
     }
+    return its;
+}
+
+// Square frustum (or pyramid if s1==0): centered at XY origin, z in [z_lo, z_hi].
+// Outward normals on all faces.
+static indexed_triangle_set make_square_frustum(float s0, float s1, float z_lo, float z_hi)
+{
+    indexed_triangle_set its;
+    float h0 = s0 * 0.5f, h1 = s1 * 0.5f;
+    // Bottom verts 0-3, top verts 4-7
+    its.vertices.push_back({-h0, -h0, z_lo}); // 0
+    its.vertices.push_back({ h0, -h0, z_lo}); // 1
+    its.vertices.push_back({ h0,  h0, z_lo}); // 2
+    its.vertices.push_back({-h0,  h0, z_lo}); // 3
+    its.vertices.push_back({-h1, -h1, z_hi}); // 4
+    its.vertices.push_back({ h1, -h1, z_hi}); // 5
+    its.vertices.push_back({ h1,  h1, z_hi}); // 6
+    its.vertices.push_back({-h1,  h1, z_hi}); // 7
+    // Bottom cap (-Z)
+    its.indices.push_back({0, 2, 1}); its.indices.push_back({0, 3, 2});
+    // Top cap (+Z) — skip when degenerate (pyramid apex)
+    if (h1 > 1e-4f) {
+        its.indices.push_back({4, 5, 6}); its.indices.push_back({4, 6, 7});
+    }
+    // Four side faces
+    its.indices.push_back({0, 1, 5}); its.indices.push_back({0, 5, 4}); // front -Y
+    its.indices.push_back({1, 2, 6}); its.indices.push_back({1, 6, 5}); // right +X
+    its.indices.push_back({2, 3, 7}); its.indices.push_back({2, 7, 6}); // back  +Y
+    its.indices.push_back({3, 0, 4}); its.indices.push_back({3, 4, 7}); // left  -X
     return its;
 }
 
@@ -231,7 +260,12 @@ static indexed_triangle_set make_zband(int shape_idx, float size, float full_hei
     case 1:  seg = its_make_cylinder(half, seg_h, step); break;
     case 2:  seg = its_make_cylinder(std::max(half*(1.f-z_mid/fh), 0.5f), seg_h, step); break;
     case 3:  seg = its_make_cylinder(std::max(std::sqrt(std::max(0.f, half*half-(z_mid-half)*(z_mid-half))), 0.5f), seg_h, step); break;
-    case 4:  { float s=std::max(size*(1.f-z_mid/fh),0.5f); seg=its_make_cube(s,s,seg_h); break; }
+    case 4: {
+        float s_lo = size * std::max(1.f - z_lo / fh, 0.f);
+        float s_hi = size * std::max(1.f - z_hi / fh, 0.f);
+        // Frustum already has z_lo/z_hi baked in — return directly.
+        return make_square_frustum(s_lo, s_hi, z_lo, z_hi);
+    }
     case 5: { // Helix: tube segment for this Z range; translate handles z_lo offset
         float tube_r = half * std::clamp(s_params.hs_tube_pct, 5, 40) / 100.0f;
         float path_r = half - tube_r;
@@ -299,11 +333,10 @@ static indexed_triangle_set make_grid_cell(int shape_idx, float size, float heig
 // ---------------------------------------------------------------------------
 // Real hexagonal honeycomb
 // ---------------------------------------------------------------------------
-// Tiles the shape footprint with flat-top hexagonal prisms.
-// Each cell gets one full-size hex prism (ext1 / FFF wall) plus one inner
-// hex prism (ext5 / SLA cell interior) added on top of it. Because ext5 is
-// loaded second, the slicer assigns it to the overlapping interior region,
-// leaving only the ring between R and R_inner as FFF wall material.
+// Material 0 = the complete shape body (defines all geometry).
+// Material 1 = inner hex prisms (R_in) overlapping the body — the slicer
+//              resolves the overlap, making cell interiors material 1 and
+//              the wall ring + inter-cell regions material 0.
 static std::vector<indexed_triangle_set>
 build_honeycomb(int shape_idx, float size, float height, int n_cells, int wall_pct, int n_materials)
 {
@@ -314,6 +347,11 @@ build_honeycomb(int shape_idx, float size, float height, int n_cells, int wall_p
     const float R_in  = R * (1.f - std::clamp(wall_pct, 5, 50) / 100.f);
     const float dx    = std::sqrt(3.f) * R;
     const float dy    = 1.5f * R;
+
+    // Full shape body is material 0 — same geometry as Single pattern.
+    meshes[0] = make_body(shape_idx, size, height);
+    if (shape_idx == 0)  // its_make_cube is corner-at-origin; center it to match hex coords
+        for (auto& v : meshes[0].vertices) { v.x() -= half; v.y() -= half; }
 
     const int cols = (int)std::ceil(size / dx) + 2;
     const int rows = (int)std::ceil(size / dy) + 2;
@@ -332,8 +370,25 @@ build_honeycomb(int shape_idx, float size, float height, int n_cells, int wall_p
             }
             if (!in_shape) continue;
 
-            its_append(meshes[0],               make_hex_prism(cx, cy, R,    0.f, height));
-            its_append(meshes[1 % n_materials], make_hex_prism(cx, cy, R_in, 0.f, height));
+            // Clip inner hex height to the shape surface so we don't generate
+            // large amounts of geometry that can't possibly overlap the body.
+            float cell_h = height;
+            switch (shape_idx) {
+            case 2: {
+                float r = std::sqrt(r2);
+                cell_h = height * std::max(0.f, 1.f - r / half);
+                break;
+            }
+            case 4: {
+                float r = std::max(std::abs(cx), std::abs(cy));
+                cell_h = height * std::max(0.f, 1.f - r / half);
+                break;
+            }
+            default: break;
+            }
+            if (cell_h < 0.1f) continue;
+
+            its_append(meshes[1 % n_materials], make_hex_prism(cx, cy, R_in, 0.f, cell_h));
         }
     }
     return meshes;
@@ -384,7 +439,7 @@ build_pattern(int shape_idx, float size, float height, int pattern_idx,
         break;
     }
     case 2: { // Helix — boundary rotates 1 sector per Z-band, configurable revolutions + width
-        const int n_a  = 16;  // fixed angular resolution
+        const int n_a  = 32;  // angular resolution (sectors / X-columns per Z-band)
         const int n_rev = std::max(1, (int)std::round(p.hx_revolutions));
         const int n_z  = n_a * n_rev;
         // Divide sectors into n_materials groups rotating with the helix phase.
@@ -590,7 +645,7 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
     grid->Add(m_spin_n_materials, 1, wxEXPAND | wxALL, 4);
 
     // Stripes row
-    m_stripe_rows_label = new wxStaticText(this, wxID_ANY, _L("Rows:"));
+    m_stripe_rows_label = new wxStaticText(this, wxID_ANY, _L("Stripes:"));
     m_spin_stripe_rows  = new wxSpinCtrl(this, wxID_ANY, wxEmptyString,
         wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 2, 32, s_params.stripe_rows);
     grid->Add(m_stripe_rows_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);

@@ -959,10 +959,12 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
                     }
                     if (exts_ptr) {
                         const unsigned int last_fff_vtx = values[idx] - 1; // 0-based
+                        unsigned int sla_step = 0;
                         for (const unsigned int ext_id : *exts_ptr) {
+                            ++sla_step; // 1-based per-layer counter stored in alternate_values
                             const int sla_pos = (int)new_values.size();
                             new_values.push_back(0u);
-                            new_alt.push_back(0u);
+                            new_alt.push_back(sla_step);
                             m_sla_steps_by_pos[sla_pos] = { layer_z, ext_id, fff_range_start, last_fff_vtx };
                         }
                     }
@@ -1330,8 +1332,13 @@ void Preview::on_moves_slider_scroll_changed()
         }
         m_canvas->set_fff_sla_step(info.layer_z, info.ext_id);
     } else {
-        // FFF move: clear any SLA step filter and advance the gcode view normally.
-        m_canvas->clear_fff_sla_step();
+        // FFF move: SLA is a discrete step — hide all SLA geometry while the
+        // slider is at any FFF position.  SLA only becomes visible when the
+        // higher thumb reaches an explicit SLA sentinel position.
+        if (!m_sla_steps_by_pos.empty())
+            m_canvas->set_fff_sla_step(-1.0, 0u);
+        else
+            m_canvas->clear_fff_sla_step();
         const int lower_val = m_moves_slider->GetLowerValue();
         m_canvas->update_gcode_sequential_view_current(
             lower_val > 0 ? static_cast<unsigned int>(lower_val - 1) : 0u,

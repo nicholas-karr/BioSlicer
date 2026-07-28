@@ -14191,7 +14191,7 @@ msgid "Untitled"
 msgstr ""
 
 #: src/slic3r/GUI/MainFrame.cpp:599
-msgid "based on Slic3r"
+msgid "based on PrusaSlicer, Slic3r"
 msgstr ""
 
 #: src/slic3r/GUI/MainFrame.cpp:639

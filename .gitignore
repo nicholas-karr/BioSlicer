@@ -39,3 +39,5 @@ changes.patch
 /*.flatpak.sha256
 /flatpak/*.log
 /flatpak/bioslicer-deps-src.tar.gz
+/*.log
+/*-hash
