@@ -172,6 +172,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DropletGenDialog.hpp
     GUI/ShapeGenDialog.cpp
     GUI/ShapeGenDialog.hpp
+    GUI/VesselTreeDialog.cpp
+    GUI/VesselTreeDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
     GUI/GUI_ObjectManipulation.hpp
     GUI/GUI_ObjectSettings.cpp
