@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
 	test_utils.cpp
 	test_vessel.cpp
 	test_vessel_junctions.cpp
+	test_vessel_fill.cpp
 	test_vessel_centreline.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
