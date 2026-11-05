@@ -64,6 +64,7 @@
 #include "GalleryDialog.hpp"
 #include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
+#include "TestCouponDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
@@ -1543,6 +1544,14 @@ void MainFrame::init_menubar_as_editor()
             _L("Generate a droplet series: a grid or line of droplets, or an array of wells with their droplets"),
             [this](wxCommandEvent&) {
                 DropletGenDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate Test &Coupon") + dots,
+            _L("Generate a coupon to find the thinnest wall, narrowest channel, steepest overhang or smallest feature that prints"),
+            [this](wxCommandEvent&) {
+                TestCouponDialog dlg(this);
                 dlg.ShowModal();
             }, "shape_gallery", nullptr, []() { return true; }, this);
 

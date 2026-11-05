@@ -170,8 +170,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/DropletMarkers.cpp
     GUI/DropletMarkers.hpp
     GUI/DropletGenDialog.hpp
+    GUI/ParamDialog.cpp
+    GUI/ParamDialog.hpp
     GUI/ShapeGenDialog.cpp
     GUI/ShapeGenDialog.hpp
+    GUI/TestCouponDialog.cpp
+    GUI/TestCouponDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
     GUI/GUI_ObjectManipulation.hpp
     GUI/GUI_ObjectSettings.cpp

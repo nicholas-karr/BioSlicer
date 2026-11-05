@@ -698,3 +698,25 @@ BIOSLICER_OVERRIDE PARAM=droplet_nl_per_us EXTRUDER=8 VALUE=0.04
 The comment line is read by the preview, which shows each droplet as a step of the moves slider and counts the
 settle time and the drops in the time estimate. After the droplets the nozzle returns to the layer height, and
 the tool of the next extrusions is selected again.
+
+## Test coupons
+
+**File > Generate Test Coupon** places a small calibration object on the bed. Every length is in millimetres
+and every angle in degrees. The window shows the unit next to each number. A coupon is one object and goes
+into undo like any other action.
+
+| Coupon | What it shows | Features |
+|---|---|---|
+| Wall thickness | the thinnest free-standing wall that prints | walls of growing thickness on a base plate |
+| Channel width | the narrowest channel that stays open | round or square channels of growing width through a block |
+| Overhang | the steepest overhang that prints without support | arms leaning away from posts at growing angles from the vertical (0 is a wall, 90 is a bridge) |
+| Resolution | the smallest pin and hole that print | a row of round pins on a plate and a row of round holes through it, getting smaller |
+
+*First feature* is the size of the first wall, channel, angle or diameter, and *Change per feature* is added for
+each next one (for the resolution coupon it is taken away). The defaults are 6 walls from 0.4 mm in steps of
+0.2 mm, 6 channels from 0.6 mm in steps of 0.2 mm with 1.5 mm of solid around them, 6 arms from 20 to 70
+degrees, and 8 pins from 1.0 mm down in steps of 0.1 mm. The generators are in `src/libslic3r/TestCoupon.hpp`.
+
+Round features are regular polygons of 64 sides inscribed in the nominal circle, so a hole is up to 0.2 %
+smaller than its nominal diameter. A coupon that cannot exist (a wall thinner than 0.05 mm, an angle of 0 or
+more than 85 degrees, features that do not get smaller) is refused with the reason in the window.

@@ -344,6 +344,8 @@ set(SLIC3R_SOURCES
     Semver.cpp
     ShapeGen.cpp
     ShapeGen.hpp
+    TestCoupon.cpp
+    TestCoupon.hpp
     ShortEdgeCollapse.cpp
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
