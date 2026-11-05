@@ -21,6 +21,7 @@ public:
 private:
     void rebuild_preview();
     void refresh_controls();
+    bool primitive_controls_changed() const;
     void remove_temp_object();
     void on_place(wxCommandEvent&);
     void on_cancel(wxCommandEvent&);
@@ -41,6 +42,13 @@ private:
     wxSpinCtrl*       m_spin_hs_tube      { nullptr };
     wxStaticText*     m_hs_strands_label  { nullptr };
     wxSpinCtrl*       m_spin_hs_strands   { nullptr };
+
+    // Rows for the exact primitives (shapes after Helix), labelled per shape by refresh_controls
+    static constexpr int MaxPrimitiveParams = 5;
+    wxStaticText*     m_size_label        { nullptr };
+    wxStaticText*     m_height_label      { nullptr };
+    wxStaticText*     m_prim_labels[MaxPrimitiveParams] {};
+    wxSpinCtrlDouble* m_prim_spins[MaxPrimitiveParams]  {};
 
     wxStaticText*     m_status_label      { nullptr };
     wxButton*         m_btn_place         { nullptr };

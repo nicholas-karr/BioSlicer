@@ -31,6 +31,7 @@ class ModelConfig;
 class ModelObject;
 class ModelVolume;
 class TriangleMesh;
+enum class PrimitiveType;
 enum class ModelVolumeType : int;
 
 // FIXME: broken build on mac os because of this is missing:
@@ -258,8 +259,14 @@ public:
     bool                is_selected_object_cut();
     void                load_subobject(ModelVolumeType type, bool from_galery = false);
     void                load_from_files(const wxArrayString& input_files, ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery = false);
-    void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
-    void                load_shape_object(const std::string &type_name);
+    void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type, const TriangleMesh* custom_mesh = nullptr);
+    void                load_shape_object(const std::string &type_name, const TriangleMesh* custom_mesh = nullptr);
+    // Asks for exact dimensions in mm and adds the primitive as a new object (type INVALID) or as a part of the selected object.
+    void                load_primitive(PrimitiveType primitive, const ModelVolumeType type);
+    // Whole-surface mesh tools for the selected object, all distances in mm.
+    void                offset_selected_surface();
+    void                make_hollow_shell();
+    void                analyze_wall_thickness();
     void                load_shape_object_from_gallery();
     void                load_shape_object_from_gallery(const wxArrayString& input_files);
     void                load_mesh_object(const TriangleMesh &mesh, const std::string &name, bool center = true);

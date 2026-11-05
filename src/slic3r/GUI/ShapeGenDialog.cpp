@@ -18,6 +18,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/MeshPrimitives.hpp"
 #include "libslic3r/PresetBundle.hpp"
 
 namespace Slic3r {
@@ -49,7 +50,15 @@ struct ShapeGenParams {
     int    hs_turns       = 3;    // helix revolutions
     int    hs_tube_pct    = 20;   // tube radius as % of cylinder radius (5-40)
     int    hs_strands     = 1;    // number of parallel helix strands
+    // Exact primitives: values in mm (counts for segment fields) per PrimitiveType
+    std::vector<double> prim[int(PrimitiveType::Count)];
 };
+
+// Shape indices after Helix map to PrimitiveType in order.
+static constexpr int FirstPrimitiveShape = 6;
+
+static bool is_primitive_shape(int shape) { return shape >= FirstPrimitiveShape; }
+static PrimitiveType primitive_of_shape(int shape) { return PrimitiveType(shape - FirstPrimitiveShape); }
 
 static ShapeGenParams s_params;
 
@@ -600,6 +609,17 @@ static void build_helix_into_model(Model& out_model, float size, float height,
 static void build_into_model(Model& out_model, int shape_idx, float size,
                               float height, int pattern_idx, const ShapeGenParams& p)
 {
+    if (is_primitive_shape(shape_idx)) {
+        const PrimitiveType type = primitive_of_shape(shape_idx);
+        ModelObject* obj = out_model.add_object();
+        obj->name = primitive_name(type);
+        ModelVolume* vol = obj->add_volume(TriangleMesh(make_primitive(type, p.prim[int(type)])));
+        vol->name = "Body";
+        const std::vector<int> extruders = make_extruder_list(1);
+        vol->config.set_key_value("extruder", new ConfigOptionInt(extruders.empty() ? 5 : extruders[0]));
+        return;
+    }
+
     // Helix shape has its own multi-volume construction
     if (shape_idx == 5) {
         build_helix_into_model(out_model, size, height, p);
@@ -662,6 +682,11 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
     wxArrayString shapes;
     for (const char* s : {"Cube", "Cylinder", "Cone", "Sphere", "Pyramid", "Helix"})
         shapes.Add(s);
+    for (int i = 0; i < int(PrimitiveType::Count); ++i)
+        shapes.Add(_(primitive_name(PrimitiveType(i))));
+    for (int i = 0; i < int(PrimitiveType::Count); ++i)
+        if (s_params.prim[i].empty())
+            s_params.prim[i] = primitive_default_params(PrimitiveType(i));
     m_choice_shape = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, shapes);
     m_choice_shape->SetSelection(s_params.shape);
     add_row(_L("Shape:"), m_choice_shape);
@@ -669,12 +694,25 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
     m_spin_size = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
         wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 5.0, 200.0, s_params.size, 1.0);
     m_spin_size->SetDigits(1);
-    add_row(_L("Size (mm):"), m_spin_size);
+    m_size_label = new wxStaticText(this, wxID_ANY, _L("Size (mm):"));
+    grid->Add(m_size_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    grid->Add(m_spin_size,  1, wxEXPAND | wxALL, 4);
 
     m_spin_sla_h = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
         wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1.0, 200.0, s_params.sla_h, 1.0);
     m_spin_sla_h->SetDigits(1);
-    add_row(_L("Height (mm):"), m_spin_sla_h);
+    m_height_label = new wxStaticText(this, wxID_ANY, _L("Height (mm):"));
+    grid->Add(m_height_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    grid->Add(m_spin_sla_h,   1, wxEXPAND | wxALL, 4);
+
+    // Exact primitive rows (shown for the shapes after Helix). Values are typed in mm.
+    for (int i = 0; i < MaxPrimitiveParams; ++i) {
+        m_prim_labels[i] = new wxStaticText(this, wxID_ANY, wxEmptyString);
+        m_prim_spins[i]  = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString,
+            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0., 1., 0., 1.);
+        grid->Add(m_prim_labels[i], 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+        grid->Add(m_prim_spins[i],  1, wxEXPAND | wxALL, 4);
+    }
 
     wxArrayString patterns;
     for (const char* p : {"Single", "Stripes", "Checkerboard", "Helix", "Honeycomb"})
@@ -809,6 +847,8 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
     m_spin_hs_turns->Bind(wxEVT_SPINCTRL,      trigger);
     m_spin_hs_tube->Bind(wxEVT_SPINCTRL,       trigger);
     m_spin_hs_strands->Bind(wxEVT_SPINCTRL,    trigger);
+    for (auto* spin : m_prim_spins)
+        spin->Bind(wxEVT_SPINCTRLDOUBLE, trigger);
 
     m_btn_place->Bind(wxEVT_BUTTON,   &ShapeGenDialog::on_place,  this);
     btn_cancel->Bind(wxEVT_BUTTON,    &ShapeGenDialog::on_cancel, this);
@@ -828,6 +868,7 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
             m_spin_hs_tube->GetValue()        != s_params.hs_tube_pct    ||
             m_spin_hs_strands->GetValue()     != s_params.hs_strands     ||
             m_choice_shape->GetSelection()    != s_params.shape          ||
+            primitive_controls_changed()                                 ||
             m_choice_pattern->GetSelection()  != s_params.pattern)
             rebuild_preview();
     });
@@ -844,8 +885,9 @@ ShapeGenDialog::~ShapeGenDialog()
 
 void ShapeGenDialog::refresh_controls()
 {
-    const int pat     = s_params.pattern;
-    const bool helix  = (s_params.shape == 5);
+    const bool primitive = is_primitive_shape(s_params.shape);
+    const int pat     = primitive ? 0 : s_params.pattern;
+    const bool helix  = (s_params.shape == 5) || primitive;
 
     // When Helix shape is selected, the shape itself defines the material layout;
     // pattern and material controls are not applicable.
@@ -874,15 +916,47 @@ void ShapeGenDialog::refresh_controls()
     m_spin_hc_bands->Show(!helix && pat == 4);
 
     // Helix shape parameters
-    m_hs_turns_label->Show(helix);
-    m_spin_hs_turns->Show(helix);
-    m_hs_tube_label->Show(helix);
-    m_spin_hs_tube->Show(helix);
-    m_hs_strands_label->Show(helix);
-    m_spin_hs_strands->Show(helix);
+    const bool helix_only = (s_params.shape == 5);
+    m_hs_turns_label->Show(helix_only);
+    m_spin_hs_turns->Show(helix_only);
+    m_hs_tube_label->Show(helix_only);
+    m_spin_hs_tube->Show(helix_only);
+    m_hs_strands_label->Show(helix_only);
+    m_spin_hs_strands->Show(helix_only);
+
+    // Exact primitives replace the generic size and height rows by one row per parameter.
+    m_size_label->Show(!primitive);
+    m_spin_size->Show(!primitive);
+    m_height_label->Show(!primitive);
+    m_spin_sla_h->Show(!primitive);
+    const std::vector<PrimitiveParamInfo> no_params;
+    const auto& info = primitive ? primitive_param_info(primitive_of_shape(s_params.shape)) : no_params;
+    for (int i = 0; i < MaxPrimitiveParams; ++i) {
+        const bool used = i < int(info.size());
+        m_prim_labels[i]->Show(used);
+        m_prim_spins[i]->Show(used);
+        if (!used)
+            continue;
+        const std::vector<double>& values = s_params.prim[int(primitive_of_shape(s_params.shape))];
+        m_prim_labels[i]->SetLabel(_(info[i].label) + (*info[i].unit ? wxString(" (") + info[i].unit + ")" : wxString()));
+        m_prim_spins[i]->SetRange(info[i].min, info[i].max);
+        m_prim_spins[i]->SetDigits(info[i].integer ? 0 : 4);
+        m_prim_spins[i]->SetValue(values[i]);
+    }
 
     Layout();
     Fit();
+}
+
+bool ShapeGenDialog::primitive_controls_changed() const
+{
+    if (!is_primitive_shape(s_params.shape))
+        return false;
+    const std::vector<double>& values = s_params.prim[int(primitive_of_shape(s_params.shape))];
+    for (size_t i = 0; i < values.size() && i < size_t(MaxPrimitiveParams); ++i)
+        if (m_prim_spins[i]->GetValue() != values[i])
+            return true;
+    return false;
 }
 
 void ShapeGenDialog::remove_temp_object()
@@ -915,6 +989,12 @@ void ShapeGenDialog::rebuild_preview()
     s_params.hs_tube_pct    = m_spin_hs_tube->GetValue();
     s_params.hs_strands     = m_spin_hs_strands->GetValue();
 
+    if (is_primitive_shape(s_params.shape)) {
+        std::vector<double>& values = s_params.prim[int(primitive_of_shape(s_params.shape))];
+        for (size_t i = 0; i < values.size() && i < size_t(MaxPrimitiveParams); ++i)
+            values[i] = m_prim_spins[i]->GetValue();
+    }
+
     Plater::SuppressSnapshots suppress(wxGetApp().plater());
 
     const int   shape   = s_params.shape;
@@ -925,11 +1005,25 @@ void ShapeGenDialog::rebuild_preview()
     remove_temp_object();
 
     Model temp;
+    if (is_primitive_shape(shape)) {
+        const PrimitiveType type = primitive_of_shape(shape);
+        if (const std::string err = primitive_validate(type, s_params.prim[int(type)]); !err.empty()) {
+            m_status_label->SetLabel(_(err.c_str()));
+            m_btn_place->Enable(false);
+            Layout();
+            return;
+        }
+        m_btn_place->Enable(true);
+    }
     build_into_model(temp, shape, size, sla_h, pattern, s_params);
 
     m_temp_obj_idxs = wxGetApp().plater()->add_model_objects(temp.objects);
 
-    if (s_params.shape == 5) {
+    if (is_primitive_shape(shape)) {
+        const PrimitiveType type = primitive_of_shape(shape);
+        m_status_label->SetLabel(wxString::Format(_L("Preview: %s  |  volume %.3f mm3"),
+            _(primitive_name(type)), primitive_volume(type, s_params.prim[int(type)])));
+    } else if (s_params.shape == 5) {
         m_status_label->SetLabel(wxString::Format(
             _L("Preview: Helix  |  %d strand(s)  |  %.1f mm"),
             s_params.hs_strands, sla_h));

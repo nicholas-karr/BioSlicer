@@ -8,6 +8,8 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TextConfiguration.hpp"
 #include "libslic3r/BuildVolume.hpp" // IWYU pragma: keep
+#include "libslic3r/MeshShell.hpp"
+#include "libslic3r/MeshThickness.hpp"
 #include "libslic3r/ModelProcessing.hpp"
 #include "libslic3r/FileReader.hpp"
 #include "GUI_ObjectList.hpp"
@@ -44,6 +46,7 @@
 #include <wx/bookctrl.h> // IWYU pragma: keep
 
 #include "slic3r/Utils/FixModelByWin10.hpp"
+#include "MeshToolsDialogs.hpp"
 
 #ifdef __WXMSW__
 #include "wx/uiaction.h"
@@ -1692,10 +1695,10 @@ static TriangleMesh create_mesh(const std::string& type_name, const BoundingBoxf
     return TriangleMesh(mesh);
 }
 
-void ObjectList::load_generic_subobject(const std::string& type_name, const ModelVolumeType type)
+void ObjectList::load_generic_subobject(const std::string& type_name, const ModelVolumeType type, const TriangleMesh* custom_mesh)
 {
     if (type == ModelVolumeType::INVALID) {
-        load_shape_object(type_name);
+        load_shape_object(type_name, custom_mesh);
         return;
     }
 
@@ -1721,7 +1724,7 @@ void ObjectList::load_generic_subobject(const std::string& type_name, const Mode
     // Bounding box of the selected instance in world coordinate system including the translation, without modifiers.
     BoundingBoxf3 instance_bb = model_object.instance_bounding_box(instance_idx);
 
-    TriangleMesh mesh = create_mesh(type_name, instance_bb);
+    TriangleMesh mesh = custom_mesh ? *custom_mesh : create_mesh(type_name, instance_bb);
     
 	// Mesh will be centered when loading.
     ModelVolume *new_volume = model_object.add_volume(std::move(mesh), type);
@@ -1769,7 +1772,7 @@ void ObjectList::load_generic_subobject(const std::string& type_name, const Mode
     selection_changed();
 }
 
-void ObjectList::load_shape_object(const std::string& type_name)
+void ObjectList::load_shape_object(const std::string& type_name, const TriangleMesh* custom_mesh)
 {
     const Selection& selection = wxGetApp().plater()->canvas3D()->get_selection();
     assert(selection.get_object_idx() == -1); // Add nothing is something is selected on 3DScene
@@ -1780,11 +1783,162 @@ void ObjectList::load_shape_object(const std::string& type_name)
 
     // Create mesh
     BoundingBoxf3 bb;
-    TriangleMesh mesh = create_mesh(type_name, bb);
+    TriangleMesh mesh = custom_mesh ? *custom_mesh : create_mesh(type_name, bb);
     load_mesh_object(mesh, _u8L("Shape") + "-" + into_u8(_(type_name)));
     if (!m_objects->empty())
         m_objects->back()->volumes.front()->source.is_from_builtin_objects = true;
     wxGetApp().mainframe->update_title();
+}
+
+void ObjectList::load_primitive(PrimitiveType primitive, const ModelVolumeType type)
+{
+    std::vector<double> params;
+    if (!show_primitive_dialog(wxGetApp().plater(), primitive, params))
+        return;
+    const TriangleMesh mesh(make_primitive(primitive, params));
+    if (mesh.empty())
+        return;
+    load_generic_subobject(primitive_name(primitive), type, &mesh);
+}
+
+namespace {
+
+// Mesh of one model part in millimetres of the printed object: volume matrix and instance scaling applied, no rotation or offset.
+Transform3d part_to_mm_matrix(const ModelVolume &volume, const ModelInstance &instance)
+{
+    Transform3d scale = Transform3d::Identity();
+    scale.scale(instance.get_scaling_factor());
+    return scale * volume.get_matrix();
+}
+
+} // namespace
+
+// Runs op on every model part of the selected object, in millimetres, and replaces the part meshes by the results.
+static bool apply_mesh_tool(ObjectList &list, int obj_idx, const wxString &snapshot_name,
+                            const std::function<indexed_triangle_set(const indexed_triangle_set &)> &op)
+{
+    ModelObject *obj = list.object(obj_idx);
+    if (obj == nullptr || obj->instances.empty())
+        return false;
+    const ModelInstance &instance = *obj->instances.front();
+
+    std::vector<std::pair<ModelVolume *, indexed_triangle_set>> results;
+    {
+        wxBusyCursor wait;
+        for (ModelVolume *volume : obj->volumes) {
+            if (!volume->is_model_part())
+                continue;
+            const Transform3d to_mm = part_to_mm_matrix(*volume, instance);
+            indexed_triangle_set its = volume->mesh().its;
+            its_transform(its, to_mm);
+            indexed_triangle_set out = op(its);
+            if (out.indices.empty())
+                return false;
+            its_transform(out, Transform3d(to_mm.inverse()));
+            results.emplace_back(volume, std::move(out));
+        }
+    }
+    if (results.empty())
+        return false;
+
+    auto plater = wxGetApp().plater();
+    plater->take_snapshot(snapshot_name);
+    plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after changing the mesh."));
+    list.update_info_items(obj_idx);
+    for (auto &r : results) {
+        r.first->set_mesh(std::move(r.second));
+        r.first->calculate_convex_hull();
+        r.first->set_new_unique_id();
+    }
+    obj->invalidate_bounding_box();
+    obj->ensure_on_bed(true);
+    plater->changed_mesh(obj_idx);
+    list.update_item_error_icon(obj_idx, -1);
+    return true;
+}
+
+void ObjectList::offset_selected_surface()
+{
+    const int obj_idx = get_selected_obj_idx();
+    if (obj_idx < 0)
+        return;
+    static double distance_mm = 1.;
+    if (!show_offset_dialog(wxGetApp().plater(), distance_mm))
+        return;
+    const double d = distance_mm;
+    if (!apply_mesh_tool(*this, obj_idx, _L("Offset surface"), [d](const indexed_triangle_set &its) { return mesh_offset(its, d); }))
+        show_error(wxGetApp().plater(), _L("The surface could not be offset by this distance. A shrink larger than the thickness of the object removes it."));
+}
+
+void ObjectList::make_hollow_shell()
+{
+    const int obj_idx = get_selected_obj_idx();
+    if (obj_idx < 0)
+        return;
+    static double wall_mm = 2., port_radius_mm = 2.;
+    static int    ports   = 0;
+    if (!show_shell_dialog(wxGetApp().plater(), wall_mm, ports, port_radius_mm))
+        return;
+    const double wall = wall_mm, radius = port_radius_mm;
+    const int    n_ports = ports;
+    std::string  error;
+    const bool ok = apply_mesh_tool(*this, obj_idx, _L("Make hollow shell"), [&](const indexed_triangle_set &its) {
+        ShellParams p;
+        p.wall_thickness_mm = wall;
+        if (n_ports >= 1) {
+            ShellPort port;
+            if (find_shell_port(its, Vec3d::UnitZ(), radius, port))
+                p.ports.push_back(port);
+        }
+        if (n_ports >= 2) {
+            ShellPort port;
+            if (find_shell_port(its, -Vec3d::UnitZ(), radius, port))
+                p.ports.push_back(port);
+        }
+        return make_shell(its, p, &error);
+    });
+    if (!ok)
+        show_error(wxGetApp().plater(), error.empty() ? _L("The shell could not be made.") : from_u8(_u8L(error.c_str())));
+}
+
+void ObjectList::analyze_wall_thickness()
+{
+    const int obj_idx = get_selected_obj_idx();
+    if (obj_idx < 0)
+        return;
+    ModelObject *obj = object(obj_idx);
+    if (obj == nullptr || obj->instances.empty())
+        return;
+    const ModelInstance &instance = *obj->instances.front();
+
+    WallThicknessResult best;
+    Vec3d               world_location = Vec3d::Zero();
+    {
+        wxBusyCursor wait;
+        for (const ModelVolume *volume : obj->volumes) {
+            if (!volume->is_model_part())
+                continue;
+            const Transform3d to_mm = part_to_mm_matrix(*volume, instance);
+            indexed_triangle_set its = volume->mesh().its;
+            its_transform(its, to_mm);
+            const WallThicknessResult r = Slic3r::analyze_wall_thickness(its);
+            if (r.valid && r.min_thickness_mm < best.min_thickness_mm) {
+                best = r;
+                // Back to the object, then place it with the instance rotation and offset.
+                Transform3d scale = Transform3d::Identity();
+                scale.scale(instance.get_scaling_factor());
+                world_location = instance.get_transformation().get_matrix() * (scale.inverse() * r.min_location);
+            }
+        }
+    }
+    if (!best.valid) {
+        show_error(wxGetApp().plater(), _L("The wall thickness could not be measured. The object needs a closed surface."));
+        return;
+    }
+    show_info(wxGetApp().plater(),
+              wxString::Format(_L("Thinnest wall: %.3f mm\nLocation on the bed: X %.2f mm, Y %.2f mm, Z %.2f mm"),
+                               best.min_thickness_mm, world_location.x(), world_location.y(), world_location.z()),
+              _L("Wall thickness"));
 }
 
 void ObjectList::load_shape_object_from_gallery()

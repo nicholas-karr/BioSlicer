@@ -1,8 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/MeshPrimitives.hpp"
+#include "libslic3r/NumericTransform.hpp"
+#include "mesh_test_utils.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem/operations.hpp>
@@ -722,4 +726,100 @@ SCENARIO("Importing a 3mf with a missing object id fails cleanly", "[3mf]") {
             }
         }
     }
+}
+
+SCENARIO("Typed size, position and rotation survive a 3mf file cycle", "[3mf][NumericTransform]") {
+    GIVEN("a model whose instance is placed with exact millimetre and degree values") {
+        Model src_model;
+        load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &src_model);
+        src_model.add_default_instances();
+        ModelObject *src_object = src_model.objects.front();
+
+        NumericTransform wanted;
+        wanted.position_mm  = Vec3d(12.345678, -7.25, 3.125);
+        wanted.rotation_deg = Vec3d(12.5, -30., 47.25);
+        wanted.size_mm      = Vec3d(33.3, 22.2, 11.1);
+        REQUIRE(apply_numeric_transform(*src_object, 0, wanted).empty());
+
+        THEN("the values read back from the model are the typed values") {
+            const NumericTransform got = get_numeric_transform(*src_object, 0);
+            // The bounding box is computed from single precision vertices.
+            CHECK((got.position_mm - wanted.position_mm).cwiseAbs().maxCoeff() < 1e-4);
+            CHECK(got.rotation_deg.isApprox(wanted.rotation_deg, 1e-9));
+            CHECK(got.size_mm.isApprox(wanted.size_mm, 1e-9));
+        }
+
+        WHEN("the model is saved and loaded as 3mf") {
+            const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/numeric_transform.3mf";
+            REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
+            Model dst_model;
+            DynamicPrintConfig dst_config;
+            {
+                ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+                boost::optional<Semver> version;
+                REQUIRE(load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false, version));
+            }
+            boost::filesystem::remove(test_file);
+            REQUIRE(dst_model.objects.size() == 1);
+            REQUIRE(dst_model.objects.front()->instances.size() == 1);
+
+            THEN("position is kept to 0.0001 mm, rotation to 0.001 degree and size to 0.0001 mm") {
+                const NumericTransform got = get_numeric_transform(*dst_model.objects.front(), 0);
+                INFO("position " << got.position_mm.transpose() << " rotation " << got.rotation_deg.transpose() << " size " << got.size_mm.transpose());
+                CHECK((got.position_mm - wanted.position_mm).cwiseAbs().maxCoeff() < 1e-4);
+                CHECK((got.rotation_deg - wanted.rotation_deg).cwiseAbs().maxCoeff() < 1e-3);
+                CHECK((got.size_mm - wanted.size_mm).cwiseAbs().maxCoeff() < 1e-4);
+            }
+        }
+    }
+}
+
+TEST_CASE("Numeric transform rejects values that would break the object", "[NumericTransform]") {
+    Model model;
+    load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &model);
+    model.add_default_instances();
+    ModelObject &obj = *model.objects.front();
+    const NumericTransform before = get_numeric_transform(obj, 0);
+
+    NumericTransform bad = before;
+    bad.size_mm.x() = 0.;
+    CHECK_FALSE(apply_numeric_transform(obj, 0, bad).empty());
+    bad = before;
+    bad.position_mm.y() = std::numeric_limits<double>::quiet_NaN();
+    CHECK_FALSE(apply_numeric_transform(obj, 0, bad).empty());
+    CHECK_FALSE(apply_numeric_transform(obj, 5, before).empty());
+
+    const NumericTransform after = get_numeric_transform(obj, 0);
+    CHECK(after.size_mm.isApprox(before.size_mm, 1e-12));
+    CHECK(after.position_mm.isApprox(before.position_mm, 1e-12));
+}
+
+TEST_CASE("A primitive keeps its volume and bounding box through a 3mf file cycle", "[3mf][MeshPrimitives]") {
+    const std::vector<double> params = {15., 4., 64., 32.};
+    Model src_model;
+    ModelObject *obj = src_model.add_object();
+    obj->add_volume(TriangleMesh(make_primitive(PrimitiveType::Torus, params)));
+    obj->add_instance();
+
+    const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/primitive.3mf";
+    REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
+    Model dst_model;
+    DynamicPrintConfig dst_config;
+    {
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        boost::optional<Semver> version;
+        REQUIRE(load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false, version));
+    }
+    boost::filesystem::remove(test_file);
+    REQUIRE(dst_model.objects.size() == 1);
+
+    const TriangleMesh loaded = dst_model.mesh();
+    const TriangleMesh saved  = src_model.mesh();
+    const double ideal = primitive_volume(PrimitiveType::Torus, params);
+    CHECK(double(loaded.its.vertices.size()) == double(saved.its.vertices.size()));
+    const double loaded_volume = test::volume_mm3(loaded.its);
+    CHECK(std::abs(loaded_volume - test::volume_mm3(saved.its)) < 1e-6 * ideal);
+    CHECK((ideal - loaded_volume) / ideal <= primitive_volume_tolerance(PrimitiveType::Torus, params));
+    CHECK(loaded.bounding_box().size().x() == Catch::Approx(38.).margin(1e-3));
+    CHECK(loaded.bounding_box().size().z() == Catch::Approx(8.).margin(1e-3));
 }

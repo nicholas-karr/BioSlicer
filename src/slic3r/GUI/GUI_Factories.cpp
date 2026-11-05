@@ -17,6 +17,7 @@
 #include "OptionsGroup.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
+#include "libslic3r/MeshPrimitives.hpp"
 #include "format.hpp"
 #include "Gizmos/GLGizmoEmboss.hpp"
 #include "Gizmos/GLGizmoSVG.hpp"
@@ -598,6 +599,15 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
             append_menu_item(sub_menu, wxID_ANY, _(item), "",
                 [type, item](wxCommandEvent&) { obj_list()->load_generic_subobject(item, type); }, "", menu);
         }
+
+    // Primitives with exact dimensions typed in millimetres.
+    sub_menu->AppendSeparator();
+    for (int i = 0; i < int(PrimitiveType::Count); ++i) {
+        const PrimitiveType primitive = PrimitiveType(i);
+        append_menu_item(sub_menu, wxID_ANY, _(primitive_name(primitive)) + dots, _L("Add a shape with exact dimensions in mm"),
+            [type, primitive](wxCommandEvent&) { obj_list()->load_primitive(primitive, type); }, "", menu);
+    }
+    sub_menu->AppendSeparator();
 
     append_menu_item_add_text(sub_menu, type);
     append_menu_item_add_svg(sub_menu, type);
@@ -1261,10 +1271,29 @@ void MenuFactory::create_common_object_menu(wxMenu* menu)
 
     append_menu_item_fix_through_winsdk(menu);
     append_menu_item_simplify(menu);
+    append_menu_items_mesh_tools(menu);
     append_menu_items_mirror(menu);
 
     append_menu_items_split(menu);
     append_menu_items_solid_editing(menu, false, true, true);
+    menu->AppendSeparator();
+}
+
+void MenuFactory::append_menu_items_mesh_tools(wxMenu* menu)
+{
+    auto single_object = []() {
+        const Selection& selection = plater()->canvas3D()->get_selection();
+        return selection.is_single_full_instance() || selection.is_single_full_object();
+    };
+    wxMenu* tools_menu = new wxMenu();
+    append_menu_item(tools_menu, wxID_ANY, _L("Offset surface") + dots, _L("Grow or shrink the surface by a distance in mm"),
+        [](wxCommandEvent&) { obj_list()->offset_selected_surface(); }, "", menu, single_object, m_parent);
+    append_menu_item(tools_menu, wxID_ANY, _L("Make hollow shell") + dots, _L("Hollow the object with a wall thickness in mm, optionally with openings"),
+        [](wxCommandEvent&) { obj_list()->make_hollow_shell(); }, "", menu, single_object, m_parent);
+    append_menu_item(tools_menu, wxID_ANY, _L("Measure wall thickness"), _L("Report the thinnest wall in mm and where it is"),
+        [](wxCommandEvent&) { obj_list()->analyze_wall_thickness(); }, "", menu, single_object, m_parent);
+    append_submenu(menu, tools_menu, wxID_ANY, _L("Shell and thickness tools"), _L("Offset, hollow and measure the object in millimetres"), "",
+        single_object, m_parent);
     menu->AppendSeparator();
 }
 

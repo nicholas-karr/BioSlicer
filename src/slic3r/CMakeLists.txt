@@ -172,6 +172,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DropletMarkers.cpp
     GUI/DropletMarkers.hpp
     GUI/DropletGenDialog.hpp
+    GUI/MeshToolsDialogs.cpp
+    GUI/MeshToolsDialogs.hpp
     GUI/ShapeGenDialog.cpp
     GUI/ShapeGenDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
