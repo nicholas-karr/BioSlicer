@@ -1267,6 +1267,8 @@ void MenuFactory::append_menu_items_mesh_tools(wxMenu* menu)
         [](wxCommandEvent&) { obj_list()->make_hollow_shell(); }, "", menu, single_object, m_parent);
     append_menu_item(tools_menu, wxID_ANY, _L("Measure wall thickness"), _L("Report the thinnest wall in mm and where it is"),
         [](wxCommandEvent&) { obj_list()->analyze_wall_thickness(); }, "", menu, single_object, m_parent);
+    append_menu_item(tools_menu, wxID_ANY, _L("Dimensions report") + dots, _L("Size, volume, surface area and thinnest wall in mm, with CSV export"),
+        [](wxCommandEvent&) { obj_list()->show_dimensions_report(); }, "", menu, single_object, m_parent);
     append_submenu(menu, tools_menu, wxID_ANY, _L("Shell and thickness tools"), _L("Offset, hollow and measure the object in millimetres"), "",
         single_object, m_parent);
     menu->AppendSeparator();

@@ -6,13 +6,19 @@
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/dialog.h>
+#include <wx/filedlg.h>
+#include <wx/textctrl.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
 
 #include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "GUI.hpp"
+#include "format.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Utils.hpp"
+#include <boost/nowide/fstream.hpp>
 
 namespace Slic3r {
 namespace GUI {
@@ -175,6 +181,51 @@ bool show_shell_dialog(wxWindow *parent, double &wall_thickness_mm, int &ports, 
     }
     dlg->Destroy();
     return ok;
+}
+
+void show_dimensions_report_dialog(wxWindow *parent, const std::vector<DimensionsReport> &reports)
+{
+    wxString text;
+    for (const DimensionsReport &r : reports) {
+        text += from_u8(r.name) + "\n";
+        text += wxString::Format(_L("  Size: %.3f x %.3f x %.3f mm\n"), r.size.x(), r.size.y(), r.size.z());
+        text += wxString::Format(_L("  Bounding box: X %.3f to %.3f, Y %.3f to %.3f, Z %.3f to %.3f mm\n"),
+                                 r.bbox_min.x(), r.bbox_max.x(), r.bbox_min.y(), r.bbox_max.y(), r.bbox_min.z(), r.bbox_max.z());
+        text += wxString::Format(_L("  Volume: %.3f mm3 (%.4f ml)\n"), r.volume_mm3, r.volume_ml);
+        text += wxString::Format(_L("  Surface area: %.3f mm2\n"), r.surface_area_mm2);
+        if (r.thickness_valid)
+            text += wxString::Format(_L("  Thinnest wall: %.3f mm at X %.2f, Y %.2f, Z %.2f mm\n"), r.min_wall_thickness_mm,
+                                     r.min_wall_location.x(), r.min_wall_location.y(), r.min_wall_location.z());
+        else
+            text += _L("  Thinnest wall: not measurable (the surface is not closed)\n");
+        if (r.open_edges > 0)
+            text += wxString::Format(_L("  Warning: %d open edges, volume and wall thickness may be wrong\n"), int(r.open_edges));
+    }
+
+    wxDialog *dlg = make_dialog(parent, _L("Dimensions report"));
+    auto *body    = new wxTextCtrl(dlg, wxID_ANY, text, wxDefaultPosition, wxSize(560, 260), wxTE_MULTILINE | wxTE_READONLY);
+    auto *save    = new wxButton(dlg, wxID_ANY, _L("Save as CSV") + dots);
+    auto *outer   = new wxBoxSizer(wxVERTICAL);
+    outer->Add(body, 1, wxEXPAND | wxALL, 8);
+    auto *row = new wxBoxSizer(wxHORIZONTAL);
+    row->Add(save, 0, wxRIGHT, 8);
+    row->AddStretchSpacer();
+    row->Add(dlg->CreateStdDialogButtonSizer(wxCLOSE), 0);
+    outer->Add(row, 0, wxEXPAND | wxALL, 8);
+    dlg->SetSizerAndFit(outer);
+    save->Bind(wxEVT_BUTTON, [&](wxCommandEvent &) {
+        wxFileDialog fd(dlg, _L("Save dimensions report"), wxEmptyString, "dimensions.csv", "CSV (*.csv)|*.csv",
+                        wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (fd.ShowModal() != wxID_OK)
+            return;
+        boost::nowide::ofstream file(into_u8(fd.GetPath()), std::ios::binary);
+        file << dimensions_report_csv(reports);
+        if (!file.good())
+            show_error(dlg, _L("The file could not be written."));
+    });
+    dlg->CentreOnParent();
+    dlg->ShowModal();
+    dlg->Destroy();
 }
 
 } // namespace GUI
