@@ -32,14 +32,21 @@ private:
     void on_place(wxCommandEvent &);
     void on_cancel(wxCommandEvent &);
     void on_export_csv(wxCommandEvent &);
+    void on_import_csv(wxCommandEvent &);
+
+    // Entries of m_mode.
+    enum { MODE_BRANCHING, MODE_FILL, MODE_IMPORTED };
 
     // Mesh of the object the tree has to stay inside, in bed coordinates. Empty if there is none.
     bool bounds_mesh(const std::string &object_name, indexed_triangle_set &out) const;
 
+    wxChoice         *m_mode             { nullptr };
     wxSpinCtrlDouble *m_root_radius      { nullptr };
     wxSpinCtrlDouble *m_root_length      { nullptr };
     wxSpinCtrl       *m_levels           { nullptr };
+    wxSpinCtrl       *m_children         { nullptr };
     wxSpinCtrlDouble *m_length_ratio     { nullptr };
+    wxSpinCtrlDouble *m_taper            { nullptr };
     wxChoice         *m_radius_rule      { nullptr };
     wxStaticText     *m_flow_split_label { nullptr };
     wxSpinCtrlDouble *m_flow_split       { nullptr };
@@ -51,9 +58,13 @@ private:
     wxSpinCtrlDouble *m_angle_jitter     { nullptr };
     wxSpinCtrlDouble *m_length_jitter    { nullptr };
     wxSpinCtrlDouble *m_min_radius       { nullptr };
+    wxSpinCtrlDouble *m_fill_step        { nullptr };
+    wxSpinCtrl       *m_fill_points      { nullptr };
+    wxSpinCtrlDouble *m_fill_clearance   { nullptr };
     wxSpinCtrl       *m_seed             { nullptr };
     wxSpinCtrlDouble *m_wall             { nullptr };
     wxSpinCtrl       *m_sides            { nullptr };
+    wxChoice         *m_curves           { nullptr };
     wxChoice         *m_bounds           { nullptr };
     wxStaticText     *m_root_x_label     { nullptr };
     wxSpinCtrlDouble *m_root_x           { nullptr };
@@ -63,6 +74,15 @@ private:
     wxSpinCtrlDouble *m_root_z           { nullptr };
     wxStaticText     *m_status           { nullptr };
     wxButton         *m_btn_place        { nullptr };
+    wxButton         *m_btn_import       { nullptr };
+
+    // Controls with their labels that apply to grown trees, to branching rules only, to filling only, and to curved vessels.
+    std::vector<wxWindow *> m_grown_rows;
+    std::vector<wxWindow *> m_branching_rows;
+    std::vector<wxWindow *> m_fill_rows;
+    std::vector<wxWindow *> m_curved_rows;
+    // Centreline loaded by on_import_csv(), in bed coordinates.
+    vessel::Skeleton        m_imported;
 
     std::vector<std::string> m_bounds_names; // names behind the entries of m_bounds, entry 0 is "none"
     std::vector<size_t>      m_temp_obj_idxs;

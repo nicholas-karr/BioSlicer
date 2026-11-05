@@ -701,33 +701,58 @@ the tool of the next extrusions is selected again.
 
 ## Vessel Tree Generator
 
-*File > Generate Vessel Tree* makes a branching tree of tubes (blood vessels, perfusion channels) as one watertight
-object. Select a tree it made and use the same menu entry to edit it. Every length is in millimetres.
+*File > Generate Vessel Tree* makes a tree of tubes (blood vessels, perfusion channels) as one watertight object.
+Select a tree it made and use the same menu entry to edit it. Every length is in millimetres. *How to make the tree*
+picks one of three ways:
+
+- *Grow by branching rules*: every vessel ends in a junction where 2 or 3 new vessels start, a set number of times.
+- *Fill the chosen object*: vessels grow from the root towards points spread through the object chosen under *Keep
+  the vessels inside this object*, until it is filled, and never leave it.
+- *Use imported centreline points*: the tree follows a table of points and radii (*Import Points (CSV)*), for
+  example the centrelines measured on a scan.
 
 | Field | Meaning |
 |-------|---------|
-| Root vessel radius, length | Radius and length of the first tube. |
-| Number of branching levels | Levels of bifurcations. A tree with *n* levels has 2^(n+1) - 1 tubes and 2^n ends (fewer if a limit below stops growth). |
+| Root vessel radius, length | Radius and length of the first tube. In fill mode the root runs straight for this length before it branches. |
+| Number of branching levels | Levels of junctions. With 2 vessels per junction, *n* levels give 2^(n+1) - 1 tubes and 2^n ends (fewer if a limit below stops growth). |
+| Vessels leaving each junction | 2 (bifurcation) or 3 (trifurcation). The first child is turned away in a random plane, the others are spread evenly around the parent axis. |
 | Child length / parent length | Length of each child tube relative to its parent. |
-| Radius of child vessels | *Murray's law*: parent^3 = child A^3 + child B^3, with the flow share of the first child setting how the radii divide (0.5 gives two children of 0.794 times the parent radius). *Fixed ratio* gives both children the same fraction of the parent radius. |
-| Branching angles | *Murray optimal* uses the angles that minimise pumping power, cos(a) = (rp^4 + ra^4 - rb^4) / (2 rp^2 ra^2), which is 37.5 degrees per child for equal children. *Fixed angle* sets the angle between the two children, shared in inverse proportion to their radii. |
-| Random angle / length variation | Limits of a random change of each branching angle and length. The branching plane of every bifurcation is also chosen at random. |
+| Radius at the end of a vessel / at its start | Tapering: each vessel narrows linearly to this fraction of its start radius (0.2 to 1). The children of a junction get their radii from the end radius of the parent. |
+| Radius of child vessels | *Murray's law*: parent^3 = sum of the children^3, with the flow share of the first child setting how the radii divide; the other children share the rest equally (0.5 with 2 children gives two children of 0.794 times the parent radius). *Fixed ratio* gives every child the same fraction of the parent radius. |
+| Branching angles | *Murray optimal* uses the angles that minimise pumping power: each child pulls along its axis with its radius squared, and the pulls balance the parent's. For 2 children cos(a) = (rp^4 + ra^4 - rb^4) / (2 rp^2 ra^2), which is 37.5 degrees per child for equal children; for 3 equal children it is 46.1 degrees. *Fixed angle* sets the angle between 2 children (10 to 170 degrees), shared in inverse proportion to their radii; with 3 children each leaves at half of it from the parent axis. |
+| Random angle / length variation | Limits of a random change of each branching angle and length. The branching plane of every junction is also chosen at random. |
 | Stop below this radius | Branches that would be thinner than this are not grown. |
+| Growth step, Target points, Smallest distance from the object surface | Fill mode: vessels grow in steps of this length towards this many points spread through the object. No part of any vessel wall, end or junction comes closer to the object's surface than the distance given; vessels that would are cut off with everything they feed. Vessels that do not share a junction never touch. Radii follow Murray's law with equal flow to every end: a vessel feeding *k* of the *N* ends has the root radius times (k / N)^(1/3). |
 | Random seed | The same settings and seed always give the same tree. |
-| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is at least this thick, along the tubes and at the junctions (measured by ray casting in the tests). It must be smaller than the radius of the thinnest tube. |
+| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the outer wall is at least this thick along the tubes and through the junctions (measured by ray casting in the tests). It must be smaller than the radius of the thinnest tube. Where two child lumens part, the wall between them (the carina) tapers to an edge, as in a real vessel. |
 | Detail | Corners per cross section. The cross section is a regular polygon inscribed in the true circle, so the volume is low by 0.16 percent at 64 corners and 0.64 percent at 32. |
-| Keep the vessels inside this object | Tubes that would leave the chosen object are shortened to end one radius before its surface, or left out. The root start (X, Y, Z in bed coordinates) must be inside the object. The tubes can still touch the surface of the object where they run close to it at a shallow angle. |
+| Curved vessels | Fill and imported trees: *Smooth curves* sweeps a spline through the points, *Straight pieces* joins them with straight tubes that meet in exact mitre joints (the volume is then pi r^2 times the length of the polyline). A curve tighter than the vessel is wide is refused with a message naming the vessel. |
+| Keep the vessels inside this object | Branching rules: tubes that would leave the chosen object are shortened to end one radius before its surface, or left out; they can still touch the surface where they run close to it at a shallow angle. Fill mode: the object to fill. The root start (X, Y, Z in bed coordinates) must be inside the object. |
 
-*Export Points (CSV)* saves the centreline as a table for experiments: one row for the start and one for the end of
-every vessel, with the columns `branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm`. `point` is 0 for the start and 1
-for the end, `parent` is -1 for the root, and the numbers read back as exactly the values the tree was built from.
-Positions are relative to the root start (0, 0, 0) unless a bounding object is chosen, then they are bed coordinates.
+A junction is the round end of the parent vessel when every child is at least 3 percent narrower than the parent, so
+the surface does not bulge there; otherwise it is a ball 3 percent wider than the widest vessel that meets there.
+Children start at the centre of the junction. Tests over random junctions (2 and 3 children, 10 to 170 degrees,
+child radius 0.2 to 1 times the parent's, vessels as short as 1.05 parent radii, solid and hollow) check that the
+mesh is watertight, manifold, free of zero-area triangles and self-intersections, that no vertex lies further than
+5 percent of the local radius from a vessel axis, that the volume is within 1 percent of the exact union of the ideal
+tubes, and that the outer wall is at least 98 percent of the thickness asked for.
 
-Tubes are straight and meet in ball shaped junctions whose radius is 1.1 times that of the tube entering them. The
-preview uses 12 corners and no wall; the object added to the bed uses the settings as given. Adding or editing a
-tree is one undo step. The settings are stored in the 3mf project (`Metadata/BioSlicer_vessel_trees.txt`), so a
-saved project can be edited later, and the tree can be regenerated from them.
+*Export Points (CSV)* saves the centreline as a table for experiments: one row for every centreline point of every
+vessel, with the columns `branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm`. `point` counts the points of a vessel
+from 0 at its start, `parent` is -1 for the root, and the numbers read back as exactly the values the tree was built
+from. Positions are relative to the root start (0, 0, 0) unless a bounding object is chosen, then they are bed
+coordinates. *Import Points (CSV)* reads the same table (the header line is optional) in bed coordinates: vessels are
+numbered 0, 1, 2 ... in order, every vessel names an earlier one as its parent and starts at its last point (up to
+0.01 mm away is moved onto it), and a mistake is reported with its line number.
 
-Surfaces are combined in exact arithmetic and rounded to the float vertices of the mesh at the end; in exactly symmetric trees this can leave a few zero-area triangles, which do not open the mesh. The same code can sweep a single tube along a path of points (straight or Catmull-Rom spline with a sample spacing in
-mm, a radius at every point, round or elliptical section, round or flat ends, optional hollow lumen); it lives in
-`src/libslic3r/Vessel` and is covered by `tests/libslic3r/test_vessel.cpp`.
+The preview uses 12 corners and no wall; the object added to the bed uses the settings as given. Adding or editing a
+tree is one undo step. The settings, and imported points, are stored in the 3mf project
+(`Metadata/BioSlicer_vessel_trees.txt`), so a saved project can be edited later, and the tree can be regenerated
+from them.
+
+Surfaces are combined in exact arithmetic; slivers shorter than 1 micron are removed before the result is rounded to
+the float vertices of the mesh, and the result is checked for zero-area triangles and self-intersections (the
+pieces are turned slightly and combined again if it fails). The same code can sweep a single tube along a path of
+points (straight or Catmull-Rom spline with a sample spacing in mm, a radius at every point, round or elliptical
+section, round or flat ends, optional hollow lumen); it lives in `src/libslic3r/Vessel` and is covered by
+`tests/libslic3r/test_vessel*.cpp`.
