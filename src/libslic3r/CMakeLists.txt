@@ -341,6 +341,8 @@ set(SLIC3R_SOURCES
     PNGReadWrite.cpp
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
+    ParameterSweep.cpp
+    ParameterSweep.hpp
     Semver.cpp
     ShapeGen.cpp
     ShapeGen.hpp

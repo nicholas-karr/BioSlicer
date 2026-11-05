@@ -171,6 +171,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DropletMarkers.hpp
     GUI/DropletGenDialog.hpp
     GUI/ParamDialog.cpp
+    GUI/ParameterSweepDialog.cpp
+    GUI/ParameterSweepDialog.hpp
     GUI/ParamDialog.hpp
     GUI/ShapeGenDialog.cpp
     GUI/ShapeGenDialog.hpp

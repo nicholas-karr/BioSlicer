@@ -65,6 +65,7 @@
 #include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
 #include "TestCouponDialog.hpp"
+#include "ParameterSweepDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
@@ -1552,6 +1553,14 @@ void MainFrame::init_menubar_as_editor()
             _L("Generate a coupon to find the thinnest wall, narrowest channel, steepest overhang or smallest feature that prints"),
             [this](wxCommandEvent&) {
                 TestCouponDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate Parameter &Sweep") + dots,
+            _L("Generate numbered copies of a test piece with one value stepped, and save a table of the copies"),
+            [this](wxCommandEvent&) {
+                ParameterSweepDialog dlg(this);
                 dlg.ShowModal();
             }, "shape_gallery", nullptr, []() { return true; }, this);
 

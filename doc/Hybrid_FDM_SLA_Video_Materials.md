@@ -720,3 +720,38 @@ degrees, and 8 pins from 1.0 mm down in steps of 0.1 mm. The generators are in `
 Round features are regular polygons of 64 sides inscribed in the nominal circle, so a hole is up to 0.2 %
 smaller than its nominal diameter. A coupon that cannot exist (a wall thinner than 0.05 mm, an angle of 0 or
 more than 85 degrees, features that do not get smaller) is refused with the reason in the window.
+
+## Parameter sweeps
+
+**File > Generate Parameter Sweep** makes numbered copies of a small test piece with one value stepped, and
+arranges them in rows on the bed. Use it for dose-response and tolerance studies: one print answers which
+value works.
+
+| Vary | The piece | Unit |
+|---|---|---|
+| Wall thickness | one wall on a base plate | mm |
+| Channel diameter | a block with one round channel | mm |
+| Distance between two channels | a block with two round channels, centre to centre | mm |
+| Droplet volume | a round SLA well with one droplet (needs a droplet channel) | nL |
+
+The first copy has the *value of the first copy*, and each next copy adds *change per copy*. Every copy is its
+own object, named for example `Sweep 3 of 6: channel diameter 1.00 mm`, so it can be moved, deleted or given
+its own settings. With *Engrave the number of each copy* a label strip with the number of the copy, cut 0.6 mm
+into a 1.5 mm strip, stands in front of the piece. The window refuses a sweep whose copies do not fit the bed,
+and says how much room they need.
+
+With *Save a table of the copies* the window asks for a CSV file after placing. It has one line per copy, with
+a decimal point and `\n` line ends, and these columns:
+
+| Column | Meaning |
+|---|---|
+| `index`, `label` | number of the copy, from 1, as engraved |
+| `subject`, `parameter`, `value`, `unit` | what was varied and its value (3 decimals) |
+| `x_mm`, `y_mm` | centre of the copy on the bed, from the bed's lower left corner |
+| `width_mm`, `depth_mm`, `height_mm` | size of the copy including its label |
+| `volume_mm3` | volume of the copy |
+| `droplets` | number of droplets on the copy |
+
+The positions are those the copies are placed at; they change if the objects are moved afterwards. The
+generator is in `src/libslic3r/ParameterSweep.hpp`. Stepping a print setting of an arbitrary object is not
+part of the sweep.

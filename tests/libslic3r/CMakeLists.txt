@@ -21,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
 	test_expolygon.cpp
 	test_geometry.cpp
 	test_measure.cpp
+	test_parameter_sweep.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
 	test_polyline.cpp
