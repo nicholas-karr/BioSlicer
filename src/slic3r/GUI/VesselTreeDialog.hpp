@@ -32,6 +32,8 @@ private:
     void on_place(wxCommandEvent &);
     void on_cancel(wxCommandEvent &);
     void on_export_csv(wxCommandEvent &);
+    void on_import_csv(wxCommandEvent &);
+    void update_import_state();
 
     // Mesh of the object the tree has to stay inside, in bed coordinates. Empty if there is none.
     bool bounds_mesh(const std::string &object_name, indexed_triangle_set &out) const;
@@ -61,11 +63,21 @@ private:
     wxSpinCtrlDouble *m_root_y           { nullptr };
     wxStaticText     *m_root_z_label     { nullptr };
     wxSpinCtrlDouble *m_root_z           { nullptr };
+    wxSpinCtrlDouble *m_min_feature      { nullptr };
+    wxStaticText     *m_import_note      { nullptr };
+    wxButton         *m_btn_clear_import { nullptr };
     wxStaticText     *m_status           { nullptr };
+    wxStaticText     *m_warnings         { nullptr };
     wxButton         *m_btn_place        { nullptr };
 
     std::vector<std::string> m_bounds_names; // names behind the entries of m_bounds, entry 0 is "none"
     std::vector<size_t>      m_temp_obj_idxs;
+    // Controls that only matter when the tree is grown, not when it comes from a table.
+    std::vector<wxWindow *>  m_growth_controls;
+    // Table of vessels read from a file, empty when the tree is grown from the settings.
+    std::string              m_imported_csv;
+    // Name of the object the saved tree had to stay inside when that object is no longer in the scene.
+    std::string              m_missing_bounds;
     int                      m_edit_object_idx { -1 };
     bool                     m_finished { false };
 };
