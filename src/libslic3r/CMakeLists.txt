@@ -287,6 +287,8 @@ set(SLIC3R_SOURCES
     MeshNormals.hpp
     MeshPrimitives.cpp
     MeshPrimitives.hpp
+    MeshShell.cpp
+    MeshShell.hpp
     MeshThickness.cpp
     MeshThickness.hpp
     MeshNormals.cpp
