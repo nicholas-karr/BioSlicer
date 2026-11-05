@@ -497,6 +497,10 @@ set(SLIC3R_SOURCES
     BranchingTree/BranchingTree.hpp
     BranchingTree/PointCloud.cpp
     BranchingTree/PointCloud.hpp
+    Vessel/VesselTree.cpp
+    Vessel/VesselTree.hpp
+    Vessel/VesselTube.cpp
+    Vessel/VesselTube.hpp
     Arachne/BeadingStrategy/BeadingStrategy.hpp
     Arachne/BeadingStrategy/BeadingStrategy.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.hpp
