@@ -1,0 +1,11 @@
+deps/build*
+deps/.pkg_cache
+build*
+CMakeLists.txt.user
+CMakeUserPresets.json
+pybgcode.egg-info
+dist/
+Testing
+.py-build*
+__pycache__
+venv
