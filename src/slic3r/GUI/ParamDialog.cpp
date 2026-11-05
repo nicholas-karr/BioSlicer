@@ -22,7 +22,7 @@ ParamDialog::ParamDialog(wxWindow *parent, const wxString &title, const wxString
     m_grid = new wxFlexGridSizer(2, 8, 0);
     m_grid->AddGrowableCol(1);
     m_status = new wxStaticText(this, wxID_ANY, wxEmptyString);
-    m_place  = new wxButton(this, wxID_OK, place_label);
+    m_place  = new wxButton(this, wxID_ANY, place_label);
     m_place->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         if (place())
             EndModal(wxID_OK);

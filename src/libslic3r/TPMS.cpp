@@ -93,7 +93,7 @@ indexed_triangle_set make_lattice(const Params &p, std::string *error)
     Vec3i dims;
     for (int a = 0; a < 3; ++ a)
         dims[a] = int(std::ceil(p.size[a] / voxel)) + 2 * pad;
-    if (double(dims.x()) * dims.y() * dims.z() > 1e8)
+    if (double(dims.x()) * dims.y() * dims.z() > 5e7)
         return fail("The lattice needs too many samples. Use a larger cell or a smaller box.");
 
     // Node i sits at origin + i * voxel; the odd offset keeps the faces of the box away from the nodes.

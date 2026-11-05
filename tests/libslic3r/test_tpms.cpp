@@ -189,3 +189,14 @@ TEST_CASE("A lattice that cannot be made says why", "[TPMS]")
     CHECK(make_lattice(p, &error).indices.empty());
     CHECK_FALSE(error.empty());
 }
+
+TEST_CASE("A lattice that needs more than fifty million samples is refused before it uses the memory", "[TPMS]")
+{
+    // 100 mm with samples every 0.25 mm: 406 samples on a side, 67 million in all.
+    Params p;
+    p.size = Vec3d(100., 100., 100.);
+    p.cell = 5.;
+    std::string error;
+    CHECK(make_lattice(p, &error).indices.empty());
+    CHECK(error.find("too many samples") != std::string::npos);
+}
