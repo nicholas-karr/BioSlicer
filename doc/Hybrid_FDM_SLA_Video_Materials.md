@@ -711,14 +711,26 @@ into undo like any other action.
 | Channel width | the narrowest channel that stays open | round or square channels of growing width through a block |
 | Overhang | the steepest overhang that prints without support | arms leaning away from posts at growing angles from the vertical (0 is a wall, 90 is a bridge) |
 | Resolution | the smallest pin and hole that print | a row of round pins on a plate and a row of round holes through it, getting smaller |
+| Droplet volume | the droplet that fills a well without overflowing | a row of round SLA wells, well A1, A2, ... each with one droplet of a growing volume in nL (needs a droplet channel) |
 
 *First feature* is the size of the first wall, channel, angle or diameter, and *Change per feature* is added for
 each next one (for the resolution coupon it is taken away). The defaults are 6 walls from 0.4 mm in steps of
 0.2 mm, 6 channels from 0.6 mm in steps of 0.2 mm with 1.5 mm of solid around them, 6 arms from 20 to 70
 degrees, and 8 pins from 1.0 mm down in steps of 0.1 mm. The generators are in `src/libslic3r/TestCoupon.hpp`.
 
+### Reading a printed coupon
+
+Features are in the order of the table above, left to right on the bed, from the first value to the last. Write
+down the value of the last feature that is complete: the last wall that stands, the narrowest channel you can
+pass a thread or liquid through, the steepest arm that is not drooping or curled, the smallest pin that is
+upright and hole that is open, or the largest droplet that stays in its well. The values are the numbers in the
+window: with the defaults, wall 1 is 0.4 mm and each next wall is 0.2 mm thicker, so the sixth wall is 1.4 mm.
+The sweep below does the same for one copy per value and also saves a table, which is easier to match to a
+print of many pieces.
+
 Round features are regular polygons of 64 sides inscribed in the nominal circle, so a hole is up to 0.2 %
-smaller than its nominal diameter. A coupon that cannot exist (a wall thinner than 0.05 mm, an angle of 0 or
+smaller than its nominal diameter. In the droplet volume coupon the droplet of well A1 has the first volume and
+each next well adds the change per feature; wells are 6 mm wide inside, with 0.8 mm walls and a 0.4 mm floor. A coupon that cannot exist (a wall thinner than 0.05 mm, an angle of 0 or
 more than 85 degrees, features that do not get smaller) is refused with the reason in the window.
 
 ## Parameter sweeps

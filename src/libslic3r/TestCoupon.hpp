@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "Droplet.hpp"
 #include "TriangleMesh.hpp"
 
 namespace Slic3r {
@@ -22,6 +23,8 @@ struct Coupon
     std::string          parameter;
     std::string          unit;
     std::vector<double>  values;
+    // Droplets to dispense on the coupon, in the coordinates of the mesh. Only the droplet volume coupon has any.
+    DropletSets          droplets;
 
     bool valid() const { return error.empty() && ! mesh.indices.empty(); }
 };
@@ -90,6 +93,26 @@ struct ResolutionCouponParams
     double margin { 2. };
 };
 Coupon make_resolution_coupon(const ResolutionCouponParams &params);
+
+// A row of round SLA wells, each with one droplet of a growing volume. Shows the volume that fills a well without
+// overflowing and the smallest volume that lands where it should. The volumes are in nanolitres, and the wells
+// are named A1, A2, ... in the order of the volumes.
+struct DropletVolumeCouponParams
+{
+    double first_volume_nl { 10. };
+    double step_nl { 10. };
+    int    count { 6 };
+    // Inner diameter of a well, the wall around it, and the height of the wall above the floor.
+    double well_diameter { 6. };
+    double wall { 0.8 };
+    double wall_height { 3. };
+    double floor_thickness { 0.4 };
+    // Space between the walls of neighbouring wells.
+    double gap { 1. };
+    // Drops fired at each well; the volume is that of one drop.
+    int    drops { 1 };
+};
+Coupon make_droplet_volume_coupon(const DropletVolumeCouponParams &params);
 
 } // namespace Slic3r
 

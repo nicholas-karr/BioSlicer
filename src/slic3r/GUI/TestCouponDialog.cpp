@@ -17,7 +17,7 @@ namespace GUI {
 
 namespace {
 
-enum Kind { WallThickness = 0, ChannelWidth, Overhang, Resolution };
+enum Kind { WallThickness = 0, ChannelWidth, Overhang, Resolution, DropletVolume };
 
 struct Remembered
 {
@@ -32,15 +32,17 @@ TestCouponDialog::TestCouponDialog(wxWindow *parent)
     : ParamDialog(parent, _L("Generate Test Coupon"), _L("Place on bed"))
 {
     m_kind = add_choice(_L("Coupon:"), { _L("Wall thickness: thinnest wall that prints"), _L("Channel width: narrowest channel that stays open"),
-                                         _L("Overhang: steepest overhang without support"), _L("Resolution: smallest pin and hole") }, s_last.kind);
+                                         _L("Overhang: steepest overhang without support"), _L("Resolution: smallest pin and hole"),
+                                         _L("Droplet volume: row of wells with growing droplets (needs a droplet channel)") }, s_last.kind);
     m_profile = add_choice(_L("Channel shape:"), { _L("Round"), _L("Square") }, s_last.profile);
-    m_first   = add_value(_L("First feature"), _L("mm or degrees"), 0.05, 90., s_last.first, 0.1);
-    m_step    = add_value(_L("Change per feature"), _L("mm or degrees"), -20., 20., s_last.step, 0.05);
+    m_first   = add_value(_L("First feature"), _L("mm, degrees or nL"), 0.05, 1000., s_last.first, 0.1);
+    m_step    = add_value(_L("Change per feature"), _L("mm, degrees or nL"), -100., 100., s_last.step, 0.05);
     m_count   = add_count(_L("Number of features"), 1, 20, s_last.count);
     m_wall    = add_value(_L("Wall around channels"), _L("mm"), 0.2, 10., s_last.wall, 0.1);
     m_height  = add_value(_L("Height or length"), _L("mm"), 1., 60., s_last.height, 1., 1);
     add_note(_L("Wall thickness and channel width are in mm and grow by the change per feature. Overhang angles are measured from the vertical "
-                "(0 is a wall, 90 is a bridge). For the resolution coupon the diameters get smaller by the change per feature."));
+                "(0 is a wall, 90 is a bridge). For the resolution coupon the diameters get smaller by the change per feature. "
+                "Droplet volumes are in nanolitres (nL) per drop."));
     finish_layout();
 }
 
@@ -82,6 +84,15 @@ bool TestCouponDialog::place()
         name   = "Overhang coupon";
         break;
     }
+    case DropletVolume: {
+        DropletVolumeCouponParams p;
+        p.first_volume_nl = s_last.first;
+        p.step_nl         = s_last.step;
+        p.count           = s_last.count;
+        coupon = make_droplet_volume_coupon(p);
+        name   = "Droplet volume coupon";
+        break;
+    }
     default: {
         ResolutionCouponParams p;
         p.first_diameter = s_last.first;
@@ -91,6 +102,14 @@ bool TestCouponDialog::place()
         name   = "Resolution coupon";
         break;
     }
+    }
+    int droplet_extruder = 0;
+    if (s_last.kind == DropletVolume) {
+        droplet_extruder = first_droplet_channel();
+        if (droplet_extruder == 0) {
+            set_status(_L("This printer has no droplet channel. Add one in the printer settings first."));
+            return false;
+        }
     }
     if (! coupon.valid()) {
         set_status(wxString::FromUTF8(coupon.error));
@@ -110,6 +129,10 @@ bool TestCouponDialog::place()
     ModelObject *object = model.add_object();
     object->name = name;
     object->add_volume(TriangleMesh(std::move(coupon.mesh)))->name = coupon.parameter;
+    for (DropletSet &set : coupon.droplets) {
+        set.extruder = droplet_extruder;
+        object->droplet_sets.emplace_back(std::move(set));
+    }
     object->center_around_origin();
     object->add_instance();
 

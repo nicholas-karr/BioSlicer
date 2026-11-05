@@ -31,6 +31,8 @@ protected:
     void              set_status(const wxString &text);
     // Call once all fields are added.
     void              finish_layout();
+    // One-based extruder of the first droplet channel of the edited printer, 0 if it has none.
+    static int        first_droplet_channel();
 
     // Reads the fields, makes the objects and adds them to the plater. Returns false, after showing why in the status
     // line, to keep the dialog open.

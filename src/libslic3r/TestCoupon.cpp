@@ -192,4 +192,52 @@ Coupon make_resolution_coupon(const ResolutionCouponParams &p)
     return coupon;
 }
 
+Coupon make_droplet_volume_coupon(const DropletVolumeCouponParams &p)
+{
+    if (p.count < 1)
+        return failed("At least one well is needed.");
+    if (p.first_volume_nl <= 0. || p.first_volume_nl + (p.count - 1) * p.step_nl < 0.1)
+        return failed("The smallest droplet must be at least 0.1 nL.");
+    if (p.well_diameter <= 0. || p.wall <= 0. || p.wall_height <= 0. || p.floor_thickness < 0. || p.gap < 0. || p.drops < 1)
+        return failed("Lengths must be above zero and at least one drop is needed.");
+
+    Coupon coupon;
+    coupon.parameter = "droplet volume";
+    coupon.unit      = "nL";
+    coupon.values    = stepped(p.first_volume_nl, p.step_nl, p.count);
+
+    WellArrayParams well;
+    well.shape           = WellShape::Round;
+    well.cols            = p.count;
+    well.rows            = 1;
+    well.pitch_x         = p.well_diameter + 2. * p.wall + p.gap;
+    well.inner_x         = p.well_diameter;
+    well.inner_y         = p.well_diameter;
+    well.wall_thickness  = p.wall;
+    well.wall_height     = p.wall_height;
+    well.floor_thickness = p.floor_thickness;
+    well.droplets_n      = 1;
+    well.count           = p.drops;
+    WellArray array = make_well_array(well);
+    if (array.mesh.indices.empty())
+        return failed("The wells have no wall.");
+    for (size_t i = 0; i < array.droplets.size(); ++ i)
+        for (DropletPoint &point : array.droplets[i].points)
+            point.volume_nl = coupon.values[i];
+
+    // The array is centred on the first well; move its minimum corner to the origin.
+    const BoundingBoxf3 box = TriangleMesh(array.mesh).bounding_box();
+    const Vec3d shift(-box.min.x(), -box.min.y(), 0.);
+    for (stl_vertex &v : array.mesh.vertices)
+        v += shift.cast<float>();
+    for (DropletSet &set : array.droplets) {
+        set.dip = true;
+        for (DropletPoint &point : set.points)
+            point.pos += shift;
+    }
+    coupon.mesh     = std::move(array.mesh);
+    coupon.droplets = std::move(array.droplets);
+    return coupon;
+}
+
 } // namespace Slic3r

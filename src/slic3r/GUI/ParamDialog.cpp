@@ -9,6 +9,8 @@
 
 #include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -79,6 +81,17 @@ void ParamDialog::set_status(const wxString &text)
     m_status->Wrap(400);
     Layout();
     Fit();
+}
+
+int ParamDialog::first_droplet_channel()
+{
+    const DynamicPrintConfig &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto *types = cfg.option<ConfigOptionStrings>("channel_type");
+    if (types != nullptr)
+        for (size_t i = 0; i < types->values.size(); ++i)
+            if (types->values[i] == "droplet")
+                return int(i) + 1;
+    return 0;
 }
 
 void ParamDialog::finish_layout()

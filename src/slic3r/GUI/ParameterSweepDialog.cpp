@@ -29,17 +29,6 @@ struct Remembered
 };
 Remembered s_last;
 
-// One-based extruder of the first droplet channel of the printer, 0 if there is none.
-int first_droplet_channel(const DynamicPrintConfig &cfg)
-{
-    const auto *types = cfg.option<ConfigOptionStrings>("channel_type");
-    if (types != nullptr)
-        for (size_t i = 0; i < types->values.size(); ++i)
-            if (types->values[i] == "droplet")
-                return int(i) + 1;
-    return 0;
-}
-
 } // namespace
 
 ParameterSweepDialog::ParameterSweepDialog(wxWindow *parent)
@@ -78,7 +67,7 @@ bool ParameterSweepDialog::place()
 
     int droplet_extruder = 0;
     if (params.subject == SweepSubject::DropletVolume) {
-        droplet_extruder = first_droplet_channel(cfg);
+        droplet_extruder = first_droplet_channel();
         if (droplet_extruder == 0) {
             set_status(_L("This printer has no droplet channel. Add one in the printer settings first."));
             return false;

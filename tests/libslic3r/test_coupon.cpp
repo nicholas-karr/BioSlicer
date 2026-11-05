@@ -235,3 +235,49 @@ TEST_CASE("Resolution coupon features must get smaller and stay printable", "[Co
     p.count = 6;        // 1.0 down to 0.0
     CHECK_FALSE(make_resolution_coupon(p).valid());
 }
+
+TEST_CASE("Droplet volume coupon has one well per volume with its droplet inside", "[Coupon]")
+{
+    DropletVolumeCouponParams p;
+    p.first_volume_nl = 10.;
+    p.step_nl         = 10.;
+    p.count           = 6;
+    const Coupon coupon = make_droplet_volume_coupon(p);
+    REQUIRE(coupon.valid());
+    CHECK(coupon.unit == "nL");
+    REQUIRE(coupon.values.size() == 6);
+    CHECK(coupon.values.back() == Approx(60.));
+
+    // Six wells of 6 mm inner diameter with 0.8 mm walls, 1 mm apart: 7.6 mm each plus gaps.
+    const BoundingBoxf3 bb = bbox_of(coupon);
+    CHECK(bb.min.isApprox(Vec3d::Zero(), 1e-3));
+    CHECK(bb.size().x() == Approx(6 * 7.6 + 5 * 1.).margin(0.05));
+    CHECK(bb.size().y() == Approx(7.6).margin(0.05));
+    CHECK(bb.size().z() == Approx(0.4 + 3.).margin(1e-4));
+
+    REQUIRE(coupon.droplets.size() == 6);
+    for (size_t i = 0; i < 6; ++i) {
+        REQUIRE(coupon.droplets[i].points.size() == 1);
+        const DropletPoint &d = coupon.droplets[i].points.front();
+        CHECK(d.volume_nl == Approx(10. * double(i + 1)));
+        // The droplet sits over the middle of its well, on the floor.
+        CHECK(d.pos.x() == Approx(3.8 + double(i) * 8.6).margin(0.05));
+        CHECK(d.pos.y() == Approx(3.8).margin(0.05));
+        CHECK(d.pos.z() == Approx(0.4).margin(1e-6));
+        CHECK(coupon.droplets[i].dip);
+    }
+    CHECK(coupon.droplets[0].name == "A1");
+    CHECK(coupon.droplets[5].name == "A6");
+}
+
+TEST_CASE("Droplet volume coupon refuses droplets that cannot be dispensed", "[Coupon]")
+{
+    DropletVolumeCouponParams p;
+    p.first_volume_nl = 5.;
+    p.step_nl         = -5.;
+    p.count           = 3;      // 5, 0, -5 nL
+    CHECK_FALSE(make_droplet_volume_coupon(p).valid());
+    p = {};
+    p.drops = 0;
+    CHECK_FALSE(make_droplet_volume_coupon(p).valid());
+}
