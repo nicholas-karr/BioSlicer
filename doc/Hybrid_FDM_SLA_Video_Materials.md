@@ -800,3 +800,21 @@ axis to *Solid share at the far end*, for a scaffold that gets denser in one dir
 The share of a block is reached within 2 % when each side is a whole number of repeats; other sizes are
 approximate. The surface is sampled at a twentieth of the repeat, so a block of 100 mm with a repeat of 2 mm is
 refused because it needs too many samples. The generator is in `src/libslic3r/TPMS.hpp`.
+
+## Experiment record
+
+With **Print Settings > Output options > Write an experiment record** on, exporting G-code also writes a JSON
+file next to it, `name.experiment.json` for `name.gcode`. It holds what is needed to make the same print again:
+
+| Key | Content |
+|---|---|
+| `bioslicer_version` | the version of BioSlicer that sliced the print |
+| `presets` | the names of the print, filament and printer presets |
+| `settings_changed_from_default` | every setting whose value differs from the built-in default, as the strings the configuration files use, so the values of the presets and of the user's changes are there |
+| `objects` | for each object: `name`, `input_file`, `settings` (the object's own overrides, for example `layer_height` in mm), `instances` (offset in mm, rotation in radians, scale), `volumes` (name, type, size in mm and the part's own overrides) |
+| `droplets` | every droplet as it is dispensed, in bed coordinates: x, y and z in mm, volume in nL, drop count, extruder, and the index of the object it belongs to (-1 for the project) |
+
+A droplet has its position in mm, its volume in nL and its drop count. The names of objects made by a parameter
+sweep say which value they have, for example `Sweep 3 of 6: channel diameter 1.00 mm`, so the record maps each
+printed copy to its values. The file is written only when the G-code is exported, and the G-code itself is not
+changed. The writer is in `src/libslic3r/ExperimentRecord.hpp`.

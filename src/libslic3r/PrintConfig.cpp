@@ -1769,6 +1769,14 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(0));
 
+    def = this->add("experiment_record", coBool);
+    def->label = L("Write an experiment record");
+    def->tooltip = L("Write a JSON file next to the exported G-code with the BioSlicer version, the preset names, every setting that "
+                     "differs from the default, and for each object its placement, its own settings, its parts and its droplets, "
+                     "so that the print can be reproduced.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("gcode_flavor", coEnum);
     def->label = L("G-code flavor");
     def->tooltip = L("Some G/M-code commands, including temperature control and others, are not universal. "

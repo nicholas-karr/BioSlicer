@@ -341,6 +341,8 @@ set(SLIC3R_SOURCES
     PNGReadWrite.cpp
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
+    ExperimentRecord.cpp
+    ExperimentRecord.hpp
     ParameterSweep.cpp
     ParameterSweep.hpp
     Semver.cpp
