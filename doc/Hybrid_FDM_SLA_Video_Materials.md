@@ -698,3 +698,50 @@ BIOSLICER_OVERRIDE PARAM=droplet_nl_per_us EXTRUDER=8 VALUE=0.04
 The comment line is read by the preview, which shows each droplet as a step of the moves slider and counts the
 settle time and the drops in the time estimate. After the droplets the nozzle returns to the layer height, and
 the tool of the next extrusions is selected again.
+
+## Shells, primitives and dimensional accuracy
+
+All dimensions in these tools are millimetres (angles in degrees) and the tests assert real numbers with the
+tolerances below.
+
+### Primitives
+
+Right-click the empty plate, or an object, and choose **Add Shape** (or **Add part**, **Add negative volume**, **Add
+modifier**), then **Torus**, **Ellipsoid**, **Capsule**, **Cone / Frustum**, **Tube** or **Wedge**. The same shapes are
+in **Generate SLA Shape**. The dialog has one field per parameter with its unit; typed values are used exactly. It shows
+the ideal volume and the largest volume loss caused by the segment count. Undo removes the added shape.
+
+Vertices lie on the ideal surface, so a mesh is slightly smaller than the ideal solid. The bound used by the tests is
+`primitive_volume_tolerance`: an inscribed n-gon keeps `sin(2 pi / n) / (2 pi / n)` of its circle's area, and the
+rounded shapes add the same loss for the pole-to-pole rings. Examples: 180 segments lose about 0.02 %, 64 segments
+about 0.16 %, 16 segments about 2.6 %. Wedge volume is exact. Cone, frustum and tube loss depends only on the
+segment count.
+
+| Shape | Parameters (mm unless noted) | Ideal volume |
+| --- | --- | --- |
+| Torus | ring radius R, tube radius r, segments around ring, segments around tube | 2 pi^2 R r^2 |
+| Ellipsoid | radius X, Y, Z, segments, rings | 4/3 pi a b c |
+| Capsule | radius r, straight length L, segments, rings per end | pi r^2 L + 4/3 pi r^3 |
+| Cone / Frustum | bottom radius, top radius, height, segments | pi h/3 (R^2 + R r + r^2) |
+| Tube | outer radius, inner radius, height, segments | pi h (R^2 - r^2) |
+| Wedge | length, width, high end height, low end height (0 gives a ramp) | length x width x (h1 + h2) / 2 |
+
+### Offset, hollow shell and wall thickness
+
+Select one object, right-click, **Shell and thickness tools**:
+
+- **Offset surface**: grows (positive) or shrinks (negative) the surface by a distance in mm.
+- **Make hollow shell**: wall thickness in mm, with no opening, one opening on top or openings on top and bottom (radius in
+  mm). The outer surface is kept exactly, the cavity is a voxel offset of it. Independent of the SLA hollowing settings.
+- **Measure wall thickness**: reports the thinnest wall in mm and its X, Y, Z position on the bed. It casts rays against the
+  surface normal from four points on every triangle, so it needs a closed surface.
+
+Each operation is one undo step. Offsets are voxel based; the voxel size is the larger of one eighth of the distance and
+1/500 of the model size, so the surface error is a fraction of a voxel. Tests: a sphere shell stays within 1 % of
+`4/3 pi (R^3 - r^3)` and its measured minimum wall is within 0.1 mm of the requested thickness.
+
+### Typed size, position and rotation
+
+The object info panel accepts exact size, position and rotation. In code, `apply_numeric_transform` sets the size along
+the object axes, the rotation in degrees and the position of the bounding box centre. A 3mf save and load keeps
+position to 0.0001 mm, size to 0.0001 mm and rotation to 0.001 degree.
