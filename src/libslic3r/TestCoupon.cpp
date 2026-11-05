@@ -196,10 +196,16 @@ Coupon make_droplet_volume_coupon(const DropletVolumeCouponParams &p)
 {
     if (p.count < 1)
         return failed("At least one well is needed.");
-    if (p.first_volume_nl <= 0. || p.first_volume_nl + (p.count - 1) * p.step_nl < 0.1)
-        return failed("The smallest droplet must be at least 0.1 nL.");
     if (p.well_diameter <= 0. || p.wall <= 0. || p.wall_height <= 0. || p.floor_thickness < 0. || p.gap < 0. || p.drops < 1)
         return failed("Lengths must be above zero and at least one drop is needed.");
+    const double last = p.first_volume_nl + (p.count - 1) * p.step_nl;
+    if (std::min(p.first_volume_nl, last) < 0.1)
+        return failed("The smallest droplet must be at least 0.1 nL.");
+    // 1 mm^3 is 1 uL, which is 1000 nL. The biggest droplets must fit above the floor of their well.
+    const double radius = p.well_diameter * 0.5;
+    const double well_nl = kPi * radius * radius * p.wall_height * 1e3;
+    if (std::max(p.first_volume_nl, last) * p.drops > well_nl)
+        return failed("The biggest droplet does not fit the volume of its well. Use smaller droplets or a taller, wider well.");
 
     Coupon coupon;
     coupon.parameter = "droplet volume";

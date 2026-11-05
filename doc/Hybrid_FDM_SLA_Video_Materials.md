@@ -718,6 +718,14 @@ each next one (for the resolution coupon it is taken away). The defaults are 6 w
 0.2 mm, 6 channels from 0.6 mm in steps of 0.2 mm with 1.5 mm of solid around them, 6 arms from 20 to 70
 degrees, and 8 pins from 1.0 mm down in steps of 0.1 mm. The generators are in `src/libslic3r/TestCoupon.hpp`.
 
+The defaults for the droplet volume coupon are 6 wells from 10 nL in steps of 10 nL. Each well is 6 mm wide inside,
+with 0.8 mm walls and a 0.4 mm floor, and holds its droplet in the middle. Round features are regular polygons of
+64 sides inscribed in the nominal circle, so a hole is up to 0.2 % smaller than its nominal diameter.
+
+A coupon that cannot exist is refused with the reason in the window: a wall thinner than 0.05 mm, an angle of 0
+or more than 85 degrees, features that do not get smaller, a droplet below 0.1 nL, or droplets that would not
+fit the volume of their well. Choosing another coupon in the window loads that coupon's own defaults and limits.
+
 ### Reading a printed coupon
 
 Features are in the order of the table above, left to right on the bed, from the first value to the last. Write
@@ -727,11 +735,6 @@ upright and hole that is open, or the largest droplet that stays in its well. Th
 window: with the defaults, wall 1 is 0.4 mm and each next wall is 0.2 mm thicker, so the sixth wall is 1.4 mm.
 The sweep below does the same for one copy per value and also saves a table, which is easier to match to a
 print of many pieces.
-
-Round features are regular polygons of 64 sides inscribed in the nominal circle, so a hole is up to 0.2 %
-smaller than its nominal diameter. In the droplet volume coupon the droplet of well A1 has the first volume and
-each next well adds the change per feature; wells are 6 mm wide inside, with 0.8 mm walls and a 0.4 mm floor. A coupon that cannot exist (a wall thinner than 0.05 mm, an angle of 0 or
-more than 85 degrees, features that do not get smaller) is refused with the reason in the window.
 
 ## Parameter sweeps
 

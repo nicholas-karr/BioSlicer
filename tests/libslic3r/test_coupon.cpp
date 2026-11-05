@@ -281,3 +281,28 @@ TEST_CASE("Droplet volume coupon refuses droplets that cannot be dispensed", "[C
     p.drops = 0;
     CHECK_FALSE(make_droplet_volume_coupon(p).valid());
 }
+
+TEST_CASE("Droplet volume coupon checks every droplet, not only the last", "[Coupon]")
+{
+    DropletVolumeCouponParams p;
+    // The smallest droplet is the first one, 0.05 nL.
+    p.first_volume_nl = 0.05;
+    p.step_nl         = 0.1;
+    p.count           = 3;
+    const Coupon small = make_droplet_volume_coupon(p);
+    CHECK_FALSE(small.valid());
+    CHECK(small.error.find("0.1 nL") != std::string::npos);
+
+    // A 6 mm well 3 mm tall holds 84 800 nL; 5 drops of 20 000 nL do not fit.
+    p = {};
+    p.first_volume_nl = 20000.;
+    p.step_nl         = 0.;
+    p.count           = 2;
+    p.drops           = 5;
+    const Coupon too_big = make_droplet_volume_coupon(p);
+    CHECK_FALSE(too_big.valid());
+    CHECK(too_big.error.find("does not fit") != std::string::npos);
+
+    p.drops = 4;
+    CHECK(make_droplet_volume_coupon(p).valid());
+}
