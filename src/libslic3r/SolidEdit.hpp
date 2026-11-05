@@ -5,6 +5,7 @@
 // applying negative volumes, and cutting channels. All lengths are in millimetres.
 
 #include "TriangleMesh.hpp"
+#include "BoundingBox.hpp"
 #include "Point.hpp"
 
 #include <string>
@@ -14,10 +15,28 @@ namespace Slic3r {
 
 class Model;
 class ModelObject;
+class ModelVolume;
 
 namespace SolidEdit {
 
 enum class BooleanOp { Union, Subtract, Intersect };
+
+// Size of a result in bed coordinates, in mm, mm3 and ml.
+struct Measurement
+{
+    bool          valid { false };
+    double        volume_mm3 { 0. };
+    double        volume_ml { 0. };
+    BoundingBoxf3 bbox;
+
+    // For example "Volume 1500.00 mm3 (1.500 ml). Size 15.00 x 10.00 x 10.00 mm, from (0.00, 0.00, 0.00) to (15.00, 10.00, 10.00) mm."
+    std::string text() const;
+};
+
+// Measures a mesh after transforming it with trafo.
+Measurement measure(const TriangleMesh &mesh, const Transform3d &trafo = Transform3d::Identity());
+// Measures the union of all solid parts of one instance of an object (volumes of overlapping parts are added).
+Measurement measure(const ModelObject &object, size_t instance_idx = 0);
 
 // Outcome of an operation. When ok is false, error holds a plain-language message and nothing was modified.
 struct Result
@@ -25,6 +44,8 @@ struct Result
     bool        ok { false };
     std::string error;
     TriangleMesh mesh;
+    // Size of the result in bed coordinates, filled in by every successful operation on a model.
+    Measurement measurement;
     // Set by boolean_objects() only: the new object, owned by the model.
     ModelObject *object { nullptr };
 
@@ -50,6 +71,46 @@ Result boolean_objects(Model &model, BooleanOp op, const std::vector<size_t> &ob
 // Subtracts every negative volume from every solid part of the object, then removes the negative volumes.
 // Each part keeps its own material. Parts that vanish are removed.
 Result apply_negative_volumes(ModelObject &object);
+
+// Chain of booleans that produced a part: a base shape and the steps applied to it. The shapes are stored in
+// the local coordinates of the part, so moving, rotating or scaling the part does not invalidate the chain.
+struct HistoryStep
+{
+    BooleanOp    op { BooleanOp::Union };
+    std::string  name;
+    bool         enabled { true };
+    TriangleMesh mesh;
+};
+
+struct History
+{
+    std::string  base_name;
+    TriangleMesh base;
+    std::vector<HistoryStep> steps;
+
+    bool empty() const { return base.its.indices.empty(); }
+    // One line per entry: "Base: A", "Subtract: B", "Union: C (off)".
+    std::vector<std::string> describe() const;
+};
+
+// Text form kept in the 3MF file and in ModelVolume::csg_history. Only characters that are safe inside an
+// XML attribute are used.
+std::string history_to_text(const History &history);
+bool        history_from_text(const std::string &text, History &history);
+
+// Recomputes the part from the base and the enabled steps. Fails with a plain message if a step fails.
+Result regenerate(const History &history);
+
+// Recomputes the part of volume volume_idx from its stored history and replaces its geometry. The part keeps its
+// transformation, name and settings. history is stored on the volume afterwards.
+Result regenerate_volume(ModelObject &object, size_t volume_idx, const History &history);
+
+// Reads the history stored on a volume. Returns false if it has none or it cannot be read.
+bool get_history(const ModelVolume &volume, History &history);
+
+// Parses a point list, one point per line as "X Y Z" in mm. Blank lines are skipped; any other line that is not
+// three numbers is an error naming the line. Commas and semicolons count as spaces.
+bool parse_points(const std::string &text, std::vector<Vec3d> &points, std::string &error);
 
 // A channel is a tube of circular cross-section swept along a polyline.
 struct ChannelParams
