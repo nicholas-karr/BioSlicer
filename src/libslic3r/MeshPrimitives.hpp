@@ -40,6 +40,12 @@ std::vector<double>                      primitive_default_params(PrimitiveType 
 // Empty string when params are usable, otherwise a plain-language reason.
 std::string primitive_validate(PrimitiveType type, const std::vector<double> &params);
 
+// Number of triangles make_primitive() produces for valid params.
+size_t primitive_triangle_count(PrimitiveType type, const std::vector<double> &params);
+
+// Larger meshes are refused by primitive_validate() so a typo cannot freeze the application.
+constexpr size_t primitive_max_triangles = 2000000;
+
 // Closed, outward-oriented mesh. Torus, Ellipsoid and Capsule are centered on the
 // origin. Frustum, Tube and Wedge have their base on z = 0 and are centered in X/Y.
 // Returns an empty mesh when primitive_validate() reports a problem.

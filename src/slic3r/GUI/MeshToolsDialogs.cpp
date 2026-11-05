@@ -1,5 +1,6 @@
 #include "MeshToolsDialogs.hpp"
 
+#include <functional>
 #include <map>
 
 #include <wx/button.h>
@@ -38,7 +39,7 @@ wxDialog *make_dialog(wxWindow *parent, const wxString &title)
     return dlg;
 }
 
-bool run(wxDialog *dlg, wxFlexGridSizer *grid, wxStaticText *note)
+bool run(wxDialog *dlg, wxFlexGridSizer *grid, wxStaticText *note, const std::function<void()> &before_show = {})
 {
     auto *outer = new wxBoxSizer(wxVERTICAL);
     outer->Add(grid, 0, wxEXPAND | wxALL, 8);
@@ -46,6 +47,9 @@ bool run(wxDialog *dlg, wxFlexGridSizer *grid, wxStaticText *note)
         outer->Add(note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
     outer->Add(dlg->CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 8);
     dlg->SetSizerAndFit(outer);
+    if (before_show)
+        before_show();
+    dlg->Fit();
     dlg->CentreOnParent();
     const bool ok = dlg->ShowModal() == wxID_OK;
     return ok;
@@ -124,7 +128,7 @@ bool show_primitive_dialog(wxWindow *parent, PrimitiveType type, std::vector<dou
         c->Bind(wxEVT_TEXT, [&](wxCommandEvent &) { refresh(); });
     }
 
-    bool ok = run(dlg, grid, note);
+    bool ok = run(dlg, grid, note, refresh);
     if (ok) {
         params = read();
         s_last_primitive[type] = params;

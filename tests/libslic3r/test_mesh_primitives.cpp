@@ -185,3 +185,41 @@ TEST_CASE("Bounding boxes are exact when segment counts are multiples of four", 
         CHECK(t.size().z() == Catch::Approx(6.).margin(1e-5));
     }
 }
+
+TEST_CASE("Primitive triangle count is predicted and bounded", "[MeshPrimitives]")
+{
+    const std::vector<std::pair<PrimitiveType, std::vector<double>>> cases = {
+        {PrimitiveType::Torus, {15., 4., 40., 12.}},
+        {PrimitiveType::Ellipsoid, {10., 8., 6., 24., 10.}},
+        {PrimitiveType::Capsule, {5., 20., 24., 6.}},
+        {PrimitiveType::Capsule, {5., 0., 24., 6.}},
+        {PrimitiveType::Frustum, {10., 5., 20., 24.}},
+        {PrimitiveType::Frustum, {10., 0., 20., 24.}},
+        {PrimitiveType::Tube, {10., 8., 30., 24.}},
+        {PrimitiveType::Wedge, {20., 10., 10., 0.}},
+        {PrimitiveType::Wedge, {20., 10., 10., 4.}}};
+    for (const auto &c : cases)
+        CHECK(make_primitive(c.first, c.second).indices.size() == primitive_triangle_count(c.first, c.second));
+
+    // A torus of 2048 x 2048 segments would be 8 million triangles.
+    CHECK_FALSE(primitive_validate(PrimitiveType::Torus, {15., 4., 2048., 2048.}).empty());
+    CHECK(make_primitive(PrimitiveType::Torus, {15., 4., 2048., 2048.}).indices.empty());
+}
+
+TEST_CASE("Raising segments for an extreme accuracy stays within the triangle limit", "[MeshPrimitives]")
+{
+    for (int i = 0; i < int(PrimitiveType::Count); ++i) {
+        const PrimitiveType type = PrimitiveType(i);
+        const std::vector<double> p = primitive_params_for_tolerance(type, primitive_default_params(type), 1e-12);
+        INFO(primitive_name(type));
+        CHECK(primitive_validate(type, p).empty());
+        CHECK(primitive_triangle_count(type, p) <= primitive_max_triangles);
+    }
+}
+
+TEST_CASE("Primitive validation messages show readable limits", "[MeshPrimitives]")
+{
+    const std::string msg = primitive_validate(PrimitiveType::Tube, {10., 8., 0., 64.});
+    CHECK(msg.find("0.01") != std::string::npos);
+    CHECK(msg.find("000000") == std::string::npos);
+}

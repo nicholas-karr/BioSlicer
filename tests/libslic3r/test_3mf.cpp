@@ -823,3 +823,21 @@ TEST_CASE("A primitive keeps its volume and bounding box through a 3mf file cycl
     CHECK(loaded.bounding_box().size().x() == Catch::Approx(38.).margin(1e-3));
     CHECK(loaded.bounding_box().size().z() == Catch::Approx(8.).margin(1e-3));
 }
+
+TEST_CASE("Numeric transform read back and applied again does not move the object", "[NumericTransform]") {
+    Model model;
+    load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &model);
+    model.add_default_instances();
+    ModelObject &obj = *model.objects.front();
+
+    // Angles beyond +-180 degrees come back as an equivalent rotation.
+    NumericTransform wanted = get_numeric_transform(obj, 0);
+    wanted.rotation_deg = Vec3d(200., 10., -190.);
+    wanted.position_mm  = Vec3d(80.5, 60.25, 12.);
+    REQUIRE(apply_numeric_transform(obj, 0, wanted).empty());
+    const Transform3d first = obj.instances.front()->get_matrix();
+
+    REQUIRE(apply_numeric_transform(obj, 0, get_numeric_transform(obj, 0)).empty());
+    const Transform3d second = obj.instances.front()->get_matrix();
+    CHECK(first.matrix().isApprox(second.matrix(), 1e-9));
+}

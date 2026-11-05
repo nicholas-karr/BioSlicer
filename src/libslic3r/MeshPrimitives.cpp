@@ -86,6 +86,15 @@ double polygon_area_factor(double n)
     return 0.5 * n * std::sin(2. * PI / n) / PI;
 }
 
+std::string format_number(double v)
+{
+    std::string s = std::to_string(v);
+    s.erase(s.find_last_not_of('0') + 1);
+    if (!s.empty() && s.back() == '.')
+        s.pop_back();
+    return s;
+}
+
 using Profile = std::vector<std::pair<double, double>>; // (radius, z), bottom to top
 
 // Volume of the solid obtained by revolving the polyline around Z with exact circles.
@@ -301,6 +310,19 @@ std::vector<double> primitive_default_params(PrimitiveType type)
     return ret;
 }
 
+size_t primitive_triangle_count(PrimitiveType type, const std::vector<double> &p)
+{
+    auto u = [&p](size_t i) { return size_t(p[i]); };
+    switch (type) {
+    case PrimitiveType::Torus:     return 2 * u(2) * u(3);
+    case PrimitiveType::Ellipsoid: return 2 * u(3) * (u(4) - 1);
+    case PrimitiveType::Capsule:   return 4 * u(2) * u(3) - (p[1] > 0. ? 0 : 2 * u(2));
+    case PrimitiveType::Frustum:   return (p[0] > 0. && p[1] > 0.) ? 4 * u(3) : 2 * u(3);
+    case PrimitiveType::Tube:      return 8 * u(3);
+    default:                       return p[3] > 0. ? 12 : 8;
+    }
+}
+
 std::string primitive_validate(PrimitiveType type, const std::vector<double> &p)
 {
     const auto &info = primitive_param_info(type);
@@ -308,11 +330,13 @@ std::string primitive_validate(PrimitiveType type, const std::vector<double> &p)
         return L("Wrong number of parameters.");
     for (size_t i = 0; i < p.size(); ++i) {
         if (!std::isfinite(p[i]) || p[i] < info[i].min || p[i] > info[i].max)
-            return std::string(info[i].label) + " must be between " + std::to_string(info[i].min) + " and " +
-                   std::to_string(info[i].max) + ".";
+            return std::string(info[i].label) + " must be between " + format_number(info[i].min) + " and " +
+                   format_number(info[i].max) + ".";
         if (info[i].integer && p[i] != std::floor(p[i]))
             return std::string(info[i].label) + " must be a whole number.";
     }
+    if (primitive_triangle_count(type, p) > primitive_max_triangles)
+        return L("Too many segments: the shape would have more than 2 million triangles.");
     switch (type) {
     case PrimitiveType::Torus:
         if (p[1] >= p[0])
@@ -422,6 +446,15 @@ std::vector<double> primitive_params_for_tolerance(PrimitiveType type, std::vect
         }
         if (!grew)
             break;
+        if (!primitive_validate(type, params).empty()) {
+            // Past the triangle limit: go back to the last usable counts.
+            for (size_t i : count_idx)
+                params[i] = std::max(info[i].min, round4(params[i] / 1.25) - 4.);
+            while (!primitive_validate(type, params).empty())
+                for (size_t i : count_idx)
+                    params[i] = std::max(info[i].min, params[i] - 4.);
+            break;
+        }
     }
     return params;
 }
