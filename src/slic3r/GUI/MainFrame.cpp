@@ -64,6 +64,7 @@
 #include "GalleryDialog.hpp"
 #include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
+#include "VesselTreeDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
@@ -1535,6 +1536,21 @@ void MainFrame::init_menubar_as_editor()
             _L("Generate a multi-material SLA+FFF object and place it on the bed"),
             [this](wxCommandEvent&) {
                 ShapeGenDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate &Vessel Tree") + dots,
+            _L("Generate a branching vessel tree from a root radius, branching levels and angles, or edit the selected vessel tree"),
+            [this](wxCommandEvent&) {
+                int edit_idx = -1;
+                if (m_plater) {
+                    // A selected object that was made by this generator is edited, anything else starts a new tree.
+                    const int sel = wxGetApp().obj_list()->get_selected_obj_idx();
+                    if (sel >= 0 && sel < int(m_plater->model().objects.size()) && !m_plater->model().objects[sel]->vessel_tree_spec.empty())
+                        edit_idx = sel;
+                }
+                VesselTreeDialog dlg(this, edit_idx);
                 dlg.ShowModal();
             }, "shape_gallery", nullptr, []() { return true; }, this);
 

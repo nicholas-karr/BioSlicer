@@ -505,6 +505,10 @@ set(SLIC3R_SOURCES
     BranchingTree/BranchingTree.hpp
     BranchingTree/PointCloud.cpp
     BranchingTree/PointCloud.hpp
+    Vessel/VesselTree.cpp
+    Vessel/VesselTree.hpp
+    Vessel/VesselTube.cpp
+    Vessel/VesselTube.hpp
     Arachne/BeadingStrategy/BeadingStrategy.hpp
     Arachne/BeadingStrategy/BeadingStrategy.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.hpp
@@ -593,6 +597,7 @@ add_library(libslic3r_cgal STATIC
     SolidEdit.hpp SolidEdit.cpp
     TryCatchSignal.hpp TryCatchSignal.cpp
     Triangulation.hpp Triangulation.cpp
+    Vessel/VesselBoolean.hpp Vessel/VesselBoolean.cpp
     SLA/SupportIslands/VoronoiDiagramCGAL.hpp SLA/SupportIslands/VoronoiDiagramCGAL.cpp
 )
 target_include_directories(libslic3r_cgal PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
