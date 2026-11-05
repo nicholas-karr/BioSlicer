@@ -149,6 +149,11 @@ struct BifurcationParams
 Skeleton         make_bifurcation_skeleton(const BifurcationParams &params);
 indexed_triangle_set make_bifurcation(const BifurcationParams &params, const VesselMeshParams &mesh_params);
 
+// The centreline of every branch as a table for experiments and other software: one row per end point,
+// "branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm", with point 0 the start and 1 the end of the branch
+// and parent -1 for the root. Numbers use a decimal point and read back as exactly the same values.
+std::string skeleton_to_csv(const Skeleton &skeleton);
+
 // Everything needed to regenerate a vessel tree object.
 struct VesselSpec
 {

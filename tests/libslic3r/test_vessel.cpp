@@ -2,6 +2,8 @@
 #include <catch2/catch_approx.hpp>
 
 #include <cmath>
+#include <random>
+#include <sstream>
 
 #include <libslic3r/AABBTreeIndirect.hpp>
 #include <libslic3r/BoundingBox.hpp>
@@ -17,10 +19,10 @@ using Catch::Approx;
 
 namespace {
 
-// Boolean results are exact inside CGAL but are rounded to float vertices on the way out, which can make
-// triangles touch by less than a micron, so self-intersection is only asserted for plain tubes.
-// Boolean results may contain zero-area triangles where CGAL rounds an exact intersection point to float.
-// They do not open the mesh or change its volume; at most 1 in SLIVER_LIMIT faces may be one.
+// Meshes are combined in exact arithmetic, but the result is rounded to float vertices on the way out. That can leave
+// zero-area triangles and make triangles touch by less than a micron (mostly in exactly symmetric configurations),
+// so self-intersection is only asserted for plain tubes. The zero-area triangles do not open the mesh or change its
+// volume; at most 1 in SLIVER_LIMIT faces may be one.
 constexpr size_t SLIVER_LIMIT = 10;
 
 // Area of a regular n-gon inscribed in a circle divided by the area of the circle.
@@ -699,4 +701,251 @@ TEST_CASE("Vessel parameters survive a text round trip", "[Vessel]")
 
     VesselSpec junk;
     REQUIRE_FALSE(spec_from_text("hello = world\n", junk));
+}
+
+namespace {
+
+// The path used for tapered spline tubes: a quarter circle of radius 20 mm in the XY plane whose radius
+// falls linearly from 3 mm to 1 mm over the five control points.
+std::vector<PathPoint> tapered_arc()
+{
+    std::vector<PathPoint> arc;
+    for (int i = 0; i <= 4; ++i) {
+        const double a = 0.5 * PI * i / 4.;
+        arc.push_back({Vec3d(20. * std::cos(a), 20. * std::sin(a), 0.), 3. - 0.5 * i});
+    }
+    return arc;
+}
+
+Vec3d random_direction(std::mt19937 &gen)
+{
+    std::normal_distribution<double> n(0., 1.);
+    return Vec3d(n(gen), n(gen), n(gen)).normalized();
+}
+
+} // namespace
+
+TEST_CASE("Tapered spline tube keeps its volume", "[Vessel]")
+{
+    const auto arc = tapered_arc();
+    TubeParams p;
+    p.sides          = 64;
+    p.sample_spacing = 0.4;
+    p.cap_start = p.cap_end = CapStyle::Flat;
+    REQUIRE(validate_tube(arc, p).empty());
+
+    const auto samples = sample_centreline(arc, true, p.sample_spacing);
+    // Radius runs from 3 to 1 mm along the path.
+    REQUIRE(samples.front().radius == Approx(3.));
+    REQUIRE(samples.back().radius == Approx(1.));
+    for (size_t i = 1; i < samples.size(); ++i)
+        REQUIRE(samples[i].radius <= samples[i - 1].radius + 1e-12);
+
+    // Sum of frusta between neighbouring samples: the volume of a tube that follows the path with a radius that changes linearly.
+    double expected = 0.;
+    for (size_t i = 1; i < samples.size(); ++i) {
+        const double l = (samples[i].pos - samples[i - 1].pos).norm(), r0 = samples[i - 1].radius, r1 = samples[i].radius;
+        expected += PI * l / 3. * (r0 * r0 + r0 * r1 + r1 * r1);
+    }
+    const auto its = make_tube(arc, p);
+    const auto chk = check_mesh(its);
+    REQUIRE(chk.watertight());
+    REQUIRE(chk.degenerate_faces == 0);
+    REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(TriangleMesh(its)));
+    // The bend moves volume from the inside to the outside of the curve and nearly cancels; polygon factor of 64 sides applies.
+    REQUIRE(chk.volume == Approx(expected * polygon_area_factor(64)).epsilon(0.01));
+}
+
+TEST_CASE("Hollow tapered spline tube has the same wall along its length", "[Vessel]")
+{
+    const double wall = 0.4, layer_height = 0.2;
+    const auto   arc  = tapered_arc();
+    TubeParams   p;
+    p.sides          = 64;
+    p.sample_spacing = 0.4;
+    p.wall_thickness = wall;
+    const auto its   = make_tube(arc, p);
+    REQUIRE(check_mesh(its).watertight());
+    REQUIRE(check_mesh(its).volume > 0.);
+
+    // At the three inner control points the centreline lies on the circle, so the radial direction is the cross-section normal.
+    for (int i = 1; i <= 3; ++i) {
+        const double a = 0.5 * PI * i / 4.;
+        const Vec3d  origin(20. * std::cos(a), 20. * std::sin(a), 0.);
+        const Vec3d  tilted = (Vec3d(std::cos(a), std::sin(a), 0.) + Vec3d(0, 0, 0.1)).normalized();
+        const auto   t = ray_distances(its, origin, tilted);
+        REQUIRE(t.size() == 2);
+        const double measured = (t[1] - t[0]) * tilted.head<2>().norm();
+        INFO("station " << i << " radius " << 3. - 0.5 * i << " measured wall " << measured);
+        REQUIRE(std::abs(measured - wall) <= layer_height);
+        REQUIRE(measured == Approx(wall).margin(0.02));
+        // The outer surface is at the radius of this station.
+        REQUIRE(t[1] * tilted.head<2>().norm() == Approx(3. - 0.5 * i).epsilon(0.01));
+    }
+}
+
+TEST_CASE("The wall of a hollow bifurcation is never thinner than asked, also at the junction", "[Vessel]")
+{
+    const double wall = 0.4;
+    BifurcationParams bp;
+    bp.parent_radius = 2.;
+    VesselMeshParams mp;
+    mp.sides          = 48;
+    mp.wall_thickness = wall;
+    const auto its = make_bifurcation(bp, mp);
+    REQUIRE(check_mesh(its).watertight());
+
+    // From the junction centre, which is inside the lumen, shoot rays in all directions. Each ray that meets the wall passes
+    // through it: the distance between the first two crossings is at least the perpendicular wall thickness.
+    std::mt19937 gen(7);
+    int          measured = 0;
+    double       thinnest = 1e9;
+    for (int k = 0; k < 400; ++k) {
+        const auto t = ray_distances(its, bp.junction, random_direction(gen));
+        if (t.size() < 2)
+            continue;
+        ++measured;
+        thinnest = std::min(thinnest, t[1] - t[0]);
+    }
+    INFO("rays that crossed the wall " << measured << ", thinnest crossing " << thinnest);
+    REQUIRE(measured > 100);
+    REQUIRE(thinnest >= wall * 0.97);
+}
+
+TEST_CASE("Branch radii measured on the mesh follow Murray's law", "[Vessel]")
+{
+    for (uint32_t seed : {1u, 2u, 3u}) {
+        TreeParams tp;
+        tp.depth       = 2;
+        tp.root_radius = 2.5;
+        tp.root_length = 25.;
+        tp.seed        = seed;
+        const Skeleton sk = generate_tree(tp);
+        VesselMeshParams mp;
+        mp.sides = 48;
+        const auto its = make_tree_mesh(sk, mp);
+        REQUIRE(check_mesh(its).watertight());
+
+        // Distance from the middle of each branch to the surface, perpendicular to the branch.
+        std::vector<double> measured;
+        for (const Branch &b : sk.branches) {
+            const Vec3d axis = (b.end - b.start).normalized();
+            const Vec3d u    = axis.cross(std::abs(axis.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY()).normalized();
+            const Vec3d v    = axis.cross(u);
+            const double a   = 0.3 * 2. * PI / 48.;
+            const auto   t   = ray_distances(its, 0.5 * (b.start + b.end), u * std::cos(a) + v * std::sin(a));
+            REQUIRE(!t.empty());
+            // The polygon lies inside the circle by at most 1 - cos(pi / 48) = 0.2 percent.
+            REQUIRE(t[0] <= b.radius * (1. + 1e-3));
+            REQUIRE(t[0] >= b.radius * 0.99);
+            measured.push_back(t[0]);
+        }
+        for (size_t i = 0; i < sk.branches.size(); ++i)
+            if (!sk.branches[i].is_leaf()) {
+                const double rp = measured[i], ra = measured[sk.branches[i].child_a], rb = measured[sk.branches[i].child_b];
+                REQUIRE(ra * ra * ra + rb * rb * rb == Approx(rp * rp * rp).epsilon(0.02));
+            }
+    }
+}
+
+TEST_CASE("Many seeds give watertight, manifold, deterministic trees", "[Vessel]")
+{
+    int checked = 0;
+    for (uint32_t seed = 1; seed <= 30; ++seed) {
+        TreeParams tp;
+        tp.seed          = seed;
+        tp.depth         = 1 + int(seed % 3);
+        tp.root_radius   = 1.5 + 0.1 * (seed % 7);
+        tp.root_length   = 14. + seed % 5;
+        tp.length_ratio  = 0.7 + 0.02 * (seed % 6);
+        tp.angle_jitter  = 6.;
+        tp.length_jitter = 0.1;
+        if (seed % 4 == 0) {
+            tp.rule.radius_rule  = RadiusRule::FixedRatio;
+            tp.rule.radius_ratio = 0.7 + 0.02 * (seed % 5);
+            tp.rule.angle_rule   = AngleRule::Fixed;
+            tp.rule.total_angle  = 50. + seed;
+        } else {
+            tp.rule.flow_split = 0.35 + 0.01 * (seed % 30);
+        }
+        INFO("seed " << seed);
+
+        const Skeleton sk = generate_tree(tp);
+        REQUIRE(skeleton_to_csv(sk) == skeleton_to_csv(generate_tree(tp)));
+        if (tp.rule.radius_rule == RadiusRule::Murray)
+            for (const Branch &b : sk.branches)
+                if (!b.is_leaf())
+                    REQUIRE(std::pow(sk.branches[b.child_a].radius, 3) + std::pow(sk.branches[b.child_b].radius, 3) ==
+                            Approx(std::pow(b.radius, 3)).epsilon(1e-12));
+
+        VesselMeshParams mp;
+        mp.sides = 12;
+        const auto its = make_tree_mesh(sk, mp);
+        const auto chk = check_mesh(its);
+        REQUIRE(chk.watertight());
+        REQUIRE(chk.volume > 0.);
+        REQUIRE(its_number_of_patches(its) == 1);
+
+        if (seed % 5 == 0) {
+            mp.wall_thickness = 0.25;
+            const auto hollow = make_tree_mesh(sk, mp);
+            const auto hchk   = check_mesh(hollow);
+            REQUIRE(hchk.watertight());
+            REQUIRE(hchk.volume > 0.);
+            REQUIRE(hchk.volume < chk.volume);
+            REQUIRE(its_number_of_patches(hollow) == 1);
+        }
+        ++checked;
+    }
+    REQUIRE(checked == 30);
+}
+
+TEST_CASE("Centreline CSV lists every branch end with its radius", "[Vessel]")
+{
+    TreeParams tp;
+    tp.depth        = 3;
+    tp.root_radius  = 2. / 3.; // not a short decimal
+    tp.root_length  = 10. / 7.;
+    tp.root_position = Vec3d(1. / 3., -2. / 3., 0.1);
+    tp.angle_jitter = 5.;
+    tp.seed         = 21;
+    const Skeleton sk = generate_tree(tp);
+    const std::string csv = skeleton_to_csv(sk);
+
+    std::istringstream in(csv);
+    std::string        line;
+    REQUIRE(std::getline(in, line));
+    REQUIRE(line == "branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm");
+    size_t rows = 0;
+    while (std::getline(in, line)) {
+        std::vector<std::string> f;
+        std::istringstream       row(line);
+        for (std::string cell; std::getline(row, cell, ',');)
+            f.push_back(cell);
+        REQUIRE(f.size() == 8);
+        const Branch &b = sk.branches[std::stoul(f[0])];
+        REQUIRE(std::stoi(f[1]) == b.parent);
+        REQUIRE(std::stoi(f[2]) == b.depth);
+        const Vec3d &p = f[3] == "0" ? b.start : b.end;
+        // Exactly the same numbers, not just close.
+        REQUIRE(std::stod(f[4]) == p.x());
+        REQUIRE(std::stod(f[5]) == p.y());
+        REQUIRE(std::stod(f[6]) == p.z());
+        REQUIRE(std::stod(f[7]) == b.radius);
+        ++rows;
+    }
+    REQUIRE(rows == 2 * sk.branches.size());
+    REQUIRE(sk.branches[0].parent == -1);
+
+    SECTION("parameters with awkward numbers read back as the same numbers")
+    {
+        VesselSpec in_spec;
+        in_spec.tree = tp;
+        VesselSpec out_spec;
+        REQUIRE(spec_from_text(spec_to_text(in_spec), out_spec));
+        REQUIRE(out_spec.tree.root_radius == tp.root_radius);
+        REQUIRE(out_spec.tree.root_length == tp.root_length);
+        REQUIRE(out_spec.tree.root_position == tp.root_position);
+        REQUIRE(skeleton_to_csv(generate_tree(out_spec.tree)) == csv);
+    }
 }

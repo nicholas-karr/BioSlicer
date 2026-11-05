@@ -2,16 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <map>
 #include <memory>
 #include <numeric>
 #include <sstream>
 #include <tuple>
 
+#include "VesselBoolean.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Geometry.hpp"
-#include "libslic3r/MeshBoolean.hpp"
 #include "libslic3r/libslic3r.h"
 
 namespace Slic3r { namespace vessel {
@@ -154,28 +156,6 @@ private:
     Random            m_random;
     Skeleton          m_skeleton;
 };
-
-using CGALMeshPtr = MeshBoolean::cgal::CGALMeshPtr;
-
-// Union of closed meshes, combined pairwise so that the operands stay small.
-CGALMeshPtr union_all(const std::vector<indexed_triangle_set> &pieces)
-{
-    std::vector<CGALMeshPtr> meshes;
-    meshes.reserve(pieces.size());
-    for (const indexed_triangle_set &p : pieces)
-        meshes.emplace_back(MeshBoolean::cgal::triangle_mesh_to_cgal(p));
-    while (meshes.size() > 1) {
-        std::vector<CGALMeshPtr> next;
-        next.reserve((meshes.size() + 1) / 2);
-        for (size_t i = 0; i < meshes.size(); i += 2) {
-            if (i + 1 < meshes.size())
-                MeshBoolean::cgal::plus(*meshes[i], *meshes[i + 1]);
-            next.emplace_back(std::move(meshes[i]));
-        }
-        meshes = std::move(next);
-    }
-    return std::move(meshes.front());
-}
 
 // One solid piece per branch and per junction. Radii are reduced by `inset`. The root start and the
 // leaf ends are moved outwards by `extension` and get `caps`.
@@ -325,13 +305,11 @@ indexed_triangle_set make_tree_mesh(const Skeleton &skeleton, const VesselMeshPa
         throw InvalidArgument(err);
 
     const bool hollow = params.wall_thickness > 0.;
-    CGALMeshPtr outer = union_all(make_pieces(skeleton, params, 0., 0., hollow ? CapStyle::Flat : params.caps));
-    if (hollow) {
+    std::vector<indexed_triangle_set> lumen;
+    if (hollow)
         // The lumen sticks out of the open ends so that the cut leaves no skin behind.
-        CGALMeshPtr lumen = union_all(make_pieces(skeleton, params, params.wall_thickness, params.wall_thickness, CapStyle::Flat));
-        MeshBoolean::cgal::minus(*outer, *lumen);
-    }
-    indexed_triangle_set result = MeshBoolean::cgal::cgal_to_indexed_triangle_set(*outer);
+        lumen = make_pieces(skeleton, params, params.wall_thickness, params.wall_thickness, CapStyle::Flat);
+    indexed_triangle_set result = combine_meshes(make_pieces(skeleton, params, 0., 0., hollow ? CapStyle::Flat : params.caps), lumen);
     canonicalize(result);
     return result;
 }
@@ -377,9 +355,34 @@ namespace {
 const char *radius_rule_name(RadiusRule r) { return r == RadiusRule::Murray ? "murray" : "fixed_ratio"; }
 const char *angle_rule_name(AngleRule r) { return r == AngleRule::MurrayOptimal ? "murray_optimal" : "fixed"; }
 
-std::string num(double v) { return float_to_string_decimal_point(v, 9); }
+// Shortest text with a decimal point that reads back as exactly the same double.
+std::string num(double v)
+{
+    for (int digits : {15, 16, 17}) {
+        std::ostringstream o;
+        o.imbue(std::locale::classic());
+        o << std::setprecision(digits) << v;
+        if (digits == 17 || string_to_double_decimal_point(o.str()) == v)
+            return o.str();
+    }
+    return {};
+}
 
 } // namespace
+
+std::string skeleton_to_csv(const Skeleton &skeleton)
+{
+    std::string out = "branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm\n";
+    for (size_t i = 0; i < skeleton.branches.size(); ++i) {
+        const Branch &b = skeleton.branches[i];
+        for (int point = 0; point < 2; ++point) {
+            const Vec3d &p = point == 0 ? b.start : b.end;
+            out += std::to_string(i) + "," + std::to_string(b.parent) + "," + std::to_string(b.depth) + "," + std::to_string(point) + "," +
+                   num(p.x()) + "," + num(p.y()) + "," + num(p.z()) + "," + num(b.radius) + "\n";
+        }
+    }
+    return out;
+}
 
 std::string spec_to_text(const VesselSpec &s)
 {

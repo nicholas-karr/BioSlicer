@@ -737,7 +737,8 @@ SCENARIO("Vessel tree parameters of an object survive a 3mf file cycle", "[3mf][
 
         vessel::VesselSpec spec;
         spec.tree.depth       = 4;
-        spec.tree.root_radius = 2.5;
+        spec.tree.root_radius = 2.5 / 3.; // not a short decimal
+        spec.tree.angle_jitter = 7.;
         spec.tree.seed        = 77;
         spec.mesh.wall_thickness = 0.4;
         spec.bounds_object    = "Heart wall";
@@ -774,8 +775,21 @@ SCENARIO("Vessel tree parameters of an object survive a 3mf file cycle", "[3mf][
                 REQUIRE(loaded.mesh.wall_thickness == Catch::Approx(0.4));
                 REQUIRE(loaded.bounds_object == "Heart wall");
                 const vessel::Skeleton a = vessel::generate_tree(spec.tree), b = vessel::generate_tree(loaded.tree);
+                // Every branch is the same to the last bit.
+                REQUIRE(vessel::skeleton_to_csv(a) == vessel::skeleton_to_csv(b));
                 REQUIRE(a.branches.size() == b.branches.size());
-                REQUIRE(a.branches.back().end.isApprox(b.branches.back().end, 1e-6));
+                for (size_t i = 0; i < a.branches.size(); ++i) {
+                    REQUIRE(a.branches[i].start == b.branches[i].start);
+                    REQUIRE(a.branches[i].end == b.branches[i].end);
+                    REQUIRE(a.branches[i].radius == b.branches[i].radius);
+                }
+                // So is the mesh made from it.
+                vessel::VesselMeshParams small_mesh = spec.mesh;
+                small_mesh.sides = 12;
+                vessel::TreeParams small = spec.tree;
+                small.depth = 2;
+                REQUIRE(vessel::make_tree_mesh(vessel::generate_tree(small), small_mesh).vertices ==
+                        vessel::make_tree_mesh(vessel::generate_tree(small), small_mesh).vertices);
             }
         }
     }
