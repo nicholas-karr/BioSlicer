@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
 	test_data.hpp
 	test_extrusion_entity.cpp
 	test_fill.cpp
+	test_fill_lattice.cpp
 	test_flow.cpp
 	test_gaps.cpp
 	test_gcode.cpp
