@@ -19,12 +19,6 @@ using Catch::Approx;
 
 namespace {
 
-// Meshes are combined in exact arithmetic, but the result is rounded to float vertices on the way out. That can leave
-// zero-area triangles and make triangles touch by less than a micron (mostly in exactly symmetric configurations),
-// so self-intersection is only asserted for plain tubes. The zero-area triangles do not open the mesh or change its
-// volume; at most 1 in SLIVER_LIMIT faces may be one.
-constexpr size_t SLIVER_LIMIT = 10;
-
 // Area of a regular n-gon inscribed in a circle divided by the area of the circle.
 double polygon_area_factor(int n) { return n * std::sin(2. * PI / n) / (2. * PI); }
 
@@ -256,10 +250,42 @@ TEST_CASE("Tube input is validated with plain messages", "[Vessel]")
     p.aspect = 1.5;
     REQUIRE(!validate_tube(straight_path(2., 10.), p).empty());
 
-    // A right angle corner with a 2 mm radius would fold the tube into itself.
+    // A spline through a right angle corner bends more sharply than a 2 mm radius allows.
     p = straight_params(32, CapStyle::Flat);
     const std::vector<PathPoint> corner = {{Vec3d(0, 0, 0), 2.}, {Vec3d(10, 0, 0), 2.}, {Vec3d(10, 10, 0), 2.}};
+    p.spline = true;
     REQUIRE(!validate_tube(corner, p).empty());
+
+    // Straight pieces meet in a mitre joint, which reaches 2 mm * tan(45 degrees) = 2 mm along each piece. Two right
+    // angle turns 3.9 mm apart would cut into each other, 4.1 mm apart they fit.
+    p.spline = false;
+    REQUIRE(validate_tube(corner, p).empty());
+    const std::vector<PathPoint> tight = {{Vec3d(0, 0, 0), 2.}, {Vec3d(10, 0, 0), 2.}, {Vec3d(10, 3.9, 0), 2.}, {Vec3d(20, 3.9, 0), 2.}};
+    REQUIRE(!validate_tube(tight, p).empty());
+    const std::vector<PathPoint> fits = {{Vec3d(0, 0, 0), 2.}, {Vec3d(10, 0, 0), 2.}, {Vec3d(10, 4.1, 0), 2.}, {Vec3d(20, 4.1, 0), 2.}};
+    REQUIRE(validate_tube(fits, p).empty());
+}
+
+TEST_CASE("Mitre joints keep the volume of the centreline", "[Vessel]")
+{
+    // A mitre joint adds as much volume outside the corner as it removes inside it: the volume is pi r^2 times the
+    // length of the centreline, whatever the turn angle.
+    const double radius = 2.;
+    const int    sides  = 64;
+    for (double turn_deg : {10., 45., 90., 135.}) {
+        const double turn = turn_deg * PI / 180.;
+        const std::vector<PathPoint> path = {{Vec3d(0, 0, 0), radius}, {Vec3d(15, 0, 0), radius},
+                                             {Vec3d(15 + 15 * std::cos(turn), 15 * std::sin(turn), 0), radius}};
+        TubeParams p = straight_params(sides, CapStyle::Flat);
+        REQUIRE(validate_tube(path, p).empty());
+        const auto its = make_tube(path, p);
+        const auto chk = check_mesh(its);
+        INFO("turn " << turn_deg << " degrees");
+        REQUIRE(chk.watertight());
+        REQUIRE(chk.degenerate_faces == 0);
+        REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(TriangleMesh(its)));
+        REQUIRE(chk.volume == Approx(PI * radius * radius * 30. * polygon_area_factor(sides)).epsilon(1e-4));
+    }
 }
 
 TEST_CASE("Murray's law for child radii and angles", "[Vessel]")
@@ -292,6 +318,34 @@ TEST_CASE("Murray's law for child radii and angles", "[Vessel]")
     REQUIRE(1.5 * 1.5 == Approx(h.radius_a * h.radius_a * std::cos(h.angle_a) + h.radius_b * h.radius_b * std::cos(h.angle_b)).epsilon(1e-9));
     REQUIRE(h.radius_a < h.radius_b);
     REQUIRE(h.angle_a > h.angle_b); // the thinner child turns further
+
+    SECTION("trifurcations")
+    {
+        // Three equal children: each has 3^(-1/3) of the parent radius and leaves at acos(3^(-1/3)) = 46.10 degrees.
+        rule.flow_split = 1. / 3.;
+        const JunctionGeometry t = compute_junction(2., 3, rule);
+        REQUIRE(t.radii.size() == 3);
+        for (int i = 0; i < 3; ++i) {
+            REQUIRE(t.radii[i] == Approx(2. * std::pow(3., -1. / 3.)).epsilon(1e-12));
+            REQUIRE(Geometry::rad2deg(t.angles[i]) == Approx(Geometry::rad2deg(std::acos(std::pow(3., -1. / 3.)))).epsilon(1e-9));
+            REQUIRE(Geometry::rad2deg(t.azimuths[i]) == Approx(120. * i).margin(1e-9));
+        }
+        REQUIRE(Geometry::rad2deg(t.angles[0]) == Approx(46.10).margin(0.005));
+
+        // Uneven: the sideways pulls r^2 sin(a) are equal (they cancel at 120 degrees apart), and the pulls along the
+        // axis add up to the parent's: sum of r^2 cos(a) = rp^2. Murray's law holds for the radii.
+        rule.flow_split = 0.6;
+        const JunctionGeometry u = compute_junction(1.5, 3, rule);
+        double axial = 0., cubes = 0.;
+        for (int i = 0; i < 3; ++i) {
+            axial += u.radii[i] * u.radii[i] * std::cos(u.angles[i]);
+            cubes += std::pow(u.radii[i], 3);
+            REQUIRE(u.radii[i] * u.radii[i] * std::sin(u.angles[i]) == Approx(u.radii[0] * u.radii[0] * std::sin(u.angles[0])).epsilon(1e-9));
+        }
+        REQUIRE(axial == Approx(1.5 * 1.5).epsilon(1e-9));
+        REQUIRE(cubes == Approx(std::pow(1.5, 3)).epsilon(1e-12));
+        REQUIRE(u.angles[0] < u.angles[1]); // the wide child turns less
+    }
 
     SECTION("other exponents")
     {
@@ -364,8 +418,7 @@ TEST_CASE("Bifurcations are watertight, manifold and correctly oriented", "[Vess
             bp.parent_radius  = c.parent_radius;
             bp.rule           = c.rule;
             bp.parent_length  = 12.;
-            bp.child_length_a = 14.;
-            bp.child_length_b = 10.;
+            bp.child_lengths  = {14., 10.};
             bp.junction       = Vec3d(3., -2., 5.);
             bp.parent_direction = Vec3d(0.3, 0.2, 1.).normalized();
             bp.plane_normal   = Vec3d(0, 1, 0);
@@ -378,7 +431,7 @@ TEST_CASE("Bifurcations are watertight, manifold and correctly oriented", "[Vess
             const MeshCheck            chk = check_mesh(its);
             INFO("open edges " << chk.open_edges << " non-manifold " << chk.nonmanifold_edges);
             REQUIRE(chk.watertight());
-            REQUIRE(chk.degenerate_faces <= its.indices.size() / SLIVER_LIMIT);
+            REQUIRE(chk.degenerate_faces == 0);
             REQUIRE(chk.volume > 0.); // outward facing
             REQUIRE(its_number_of_patches(its) == 1);
 
@@ -386,11 +439,11 @@ TEST_CASE("Bifurcations are watertight, manifold and correctly oriented", "[Vess
             const Skeleton sk = make_bifurcation_skeleton(bp);
             double sum = 0., largest = 0.;
             for (const Branch &b : sk.branches) {
-                const double v = PI * b.radius * b.radius * b.length();
+                const double v = PI * b.start_radius() * b.start_radius() * b.length();
                 sum += v;
                 largest = std::max(largest, v);
             }
-            const double ball = 4. / 3. * PI * std::pow(mp.joint_scale * c.parent_radius, 3);
+            const double ball = 4. / 3. * PI * std::pow((1. + mp.junction_margin) * c.parent_radius, 3);
             if (c.wall == 0.) {
                 REQUIRE(chk.volume > largest);
                 REQUIRE(chk.volume < sum + ball);
@@ -398,7 +451,7 @@ TEST_CASE("Bifurcations are watertight, manifold and correctly oriented", "[Vess
                 REQUIRE(chk.volume > 0.);
                 REQUIRE(chk.volume < sum + ball);
                 // Shell of thickness w around a lumen: volume of the walls only.
-                REQUIRE(chk.volume < sum * (1. - std::pow(1. - c.wall / sk.branches[2].radius, 2)) + ball);
+                REQUIRE(chk.volume < sum * (1. - std::pow(1. - c.wall / sk.branches[2].start_radius(), 2)) + ball);
             }
         }
     }
@@ -409,7 +462,7 @@ TEST_CASE("Bifurcation geometry matches the radii and angles it was built from",
     BifurcationParams bp;
     bp.parent_radius    = 2.;
     bp.parent_length    = 15.;
-    bp.child_length_a   = bp.child_length_b = 15.;
+    bp.child_lengths    = {15., 15.};
     bp.parent_direction = Vec3d::UnitZ();
     bp.plane_normal     = Vec3d::UnitY();
 
@@ -417,12 +470,12 @@ TEST_CASE("Bifurcation geometry matches the radii and angles it was built from",
     REQUIRE(sk.branches.size() == 3);
     const Branch &parent = sk.branches[0], &a = sk.branches[1], &b = sk.branches[2];
 
-    REQUIRE(parent.radius == Approx(2.));
-    REQUIRE(std::pow(a.radius, 3) + std::pow(b.radius, 3) == Approx(8.).epsilon(1e-12));
+    REQUIRE(parent.start_radius() == Approx(2.));
+    REQUIRE(std::pow(a.start_radius(), 3) + std::pow(b.start_radius(), 3) == Approx(8.).epsilon(1e-12));
     REQUIRE(parent.length() == Approx(15.));
     REQUIRE(a.length() == Approx(15.));
 
-    const Vec3d da = (a.end - a.start).normalized(), db = (b.end - b.start).normalized();
+    const Vec3d da = (a.end() - a.start()).normalized(), db = (b.end() - b.start()).normalized();
     const double angle = std::acos(da.dot(db));
     REQUIRE(Geometry::rad2deg(angle) == Approx(74.935).margin(0.01)); // 2 acos(2^(-1/3))
     // The children lie in the XZ plane, on opposite sides of the parent axis.
@@ -434,14 +487,14 @@ TEST_CASE("Bifurcation geometry matches the radii and angles it was built from",
     mp.sides = 64;
     const auto its = make_bifurcation(bp, mp);
     for (const Branch *c : {&a, &b}) {
-        const Vec3d axis = (c->end - c->start).normalized();
-        const Vec3d mid  = 0.5 * (c->start + c->end);
+        const Vec3d axis = (c->end() - c->start()).normalized();
+        const Vec3d mid  = 0.5 * (c->start() + c->end());
         const Vec3d out  = axis.cross(Vec3d::UnitY()).normalized(); // perpendicular to the axis, in the branching plane
         // Rotate by 0.3 of a side step to stay clear of mesh edges.
         const Vec3d dir = (out * std::cos(0.3 * 2 * PI / 64) + Vec3d::UnitY() * std::sin(0.3 * 2 * PI / 64)).normalized();
         const auto  t = ray_distances(its, mid, dir);
         REQUIRE(!t.empty());
-        REQUIRE(t[0] == Approx(c->radius).epsilon(0.003));
+        REQUIRE(t[0] == Approx(c->start_radius()).epsilon(0.003));
     }
 }
 
@@ -461,25 +514,25 @@ TEST_CASE("Vessel tree structure follows the parameters", "[Vessel]")
     for (const Branch &b : sk.branches) {
         REQUIRE(b.length() == Approx(20. * std::pow(0.75, b.depth)).epsilon(1e-9));
         if (!b.is_leaf()) {
-            const Branch &ca = sk.branches[b.child_a], &cb = sk.branches[b.child_b];
+            const Branch &ca = sk.branches[b.children[0]], &cb = sk.branches[b.children[1]];
             // Murray's law at every junction.
-            REQUIRE(std::pow(ca.radius, 3) + std::pow(cb.radius, 3) == Approx(std::pow(b.radius, 3)).epsilon(1e-12));
-            REQUIRE((ca.start - b.end).norm() < 1e-12);
-            REQUIRE((cb.start - b.end).norm() < 1e-12);
+            REQUIRE(std::pow(ca.start_radius(), 3) + std::pow(cb.start_radius(), 3) == Approx(std::pow(b.start_radius(), 3)).epsilon(1e-12));
+            REQUIRE((ca.start() - b.end()).norm() < 1e-12);
+            REQUIRE((cb.start() - b.end()).norm() < 1e-12);
             REQUIRE(ca.depth == b.depth + 1);
         }
     }
     // The leaves have radius 3 * 2^(-4/3).
     for (const Branch &b : sk.branches)
         if (b.is_leaf())
-            REQUIRE(b.radius == Approx(3. * std::pow(2., -4. / 3.)).epsilon(1e-12));
+            REQUIRE(b.start_radius() == Approx(3. * std::pow(2., -4. / 3.)).epsilon(1e-12));
 
     SECTION("minimum radius stops the growth")
     {
         tp.min_radius = 1.2;
         const Skeleton thin = generate_tree(tp);
         for (const Branch &b : thin.branches)
-            REQUIRE(b.radius >= 1.2);
+            REQUIRE(b.start_radius() >= 1.2);
         REQUIRE(thin.branches.size() < sk.branches.size());
     }
 
@@ -506,8 +559,8 @@ TEST_CASE("Vessel tree generation is deterministic by seed", "[Vessel]")
         if (x.branches.size() != y.branches.size())
             return false;
         for (size_t i = 0; i < x.branches.size(); ++i)
-            if (x.branches[i].start != y.branches[i].start || x.branches[i].end != y.branches[i].end ||
-                x.branches[i].radius != y.branches[i].radius || x.branches[i].parent != y.branches[i].parent)
+            if (x.branches[i].start() != y.branches[i].start() || x.branches[i].end() != y.branches[i].end() ||
+                x.branches[i].start_radius() != y.branches[i].start_radius() || x.branches[i].parent != y.branches[i].parent)
                 return false;
         return true;
     };
@@ -539,6 +592,21 @@ TEST_CASE("Vessel tree generation is deterministic by seed", "[Vessel]")
     REQUIRE(m1.indices == m2.indices);
 }
 
+TEST_CASE("Trees saved by the previous version grow the same", "[Vessel]")
+{
+    // The last rows of the table that the generator before trifurcations and tapering made for these settings.
+    TreeParams tp;
+    tp.seed            = 7;
+    tp.depth           = 3;
+    tp.angle_jitter    = 14.;
+    tp.length_jitter   = 0.2;
+    tp.rule.flow_split = 0.4;
+    const std::string csv = skeleton_to_csv(generate_tree(tp));
+    REQUIRE(csv.find("13,12,3,1,20.22903497776275,2.7788682285259076,51.92629617806146,1.0482965576835586\n"
+                     "14,12,3,0,11.148485718739543,1.5388285622817741,46.50462929948938,1.1999999999999997\n"
+                     "14,12,3,1,9.89510994723722,7.302951634829,56.87510191246608,1.1999999999999997\n") != std::string::npos);
+}
+
 TEST_CASE("Vessel tree meshes are watertight", "[Vessel]")
 {
     TreeParams tp;
@@ -558,12 +626,12 @@ TEST_CASE("Vessel tree meshes are watertight", "[Vessel]")
         const auto its = make_tree_mesh(sk, mp);
         const auto chk = check_mesh(its);
         REQUIRE(chk.watertight());
-        REQUIRE(chk.degenerate_faces <= its.indices.size() / SLIVER_LIMIT);
+        REQUIRE(chk.degenerate_faces == 0);
         REQUIRE(chk.volume > 0.);
         REQUIRE(its_number_of_patches(its) == 1);
         double centreline = 0.;
         for (const Branch &b : sk.branches)
-            centreline += PI * b.radius * b.radius * b.length();
+            centreline += PI * b.start_radius() * b.start_radius() * b.length();
         // Overlap at the junctions is small compared to the volume of the branches.
         REQUIRE(chk.volume == Approx(centreline).epsilon(0.15));
     }
@@ -574,22 +642,22 @@ TEST_CASE("Vessel tree meshes are watertight", "[Vessel]")
         const auto its = make_tree_mesh(sk, mp);
         const auto chk = check_mesh(its);
         REQUIRE(chk.watertight());
-        REQUIRE(chk.degenerate_faces <= its.indices.size() / SLIVER_LIMIT);
+        REQUIRE(chk.degenerate_faces == 0);
         REQUIRE(chk.volume > 0.);
         REQUIRE(its_number_of_patches(its) == 1);
 
         // Wall thickness on the root, measured by a ray from the axis.
         const Branch &root = sk.branches[0];
-        const Vec3d   axis = (root.end - root.start).normalized();
+        const Vec3d   axis = (root.end() - root.start()).normalized();
         const Vec3d   perp = axis.cross(Vec3d::UnitX()).normalized();
         const Vec3d   dir  = (perp * std::cos(0.3) + axis.cross(perp) * std::sin(0.3)).normalized();
-        const auto    t = ray_distances(its, root.start + 0.4 * (root.end - root.start), dir);
+        const auto    t = ray_distances(its, root.start() + 0.4 * (root.end() - root.start()), dir);
         REQUIRE(t.size() >= 2);
         REQUIRE(std::abs((t[1] - t[0]) - 0.4) <= 0.2);
 
         // The lumen runs through the open root: a ray down the axis from just outside the root start meets no wall
         // before the junction, so the root end is open and the lumen is not capped.
-        const auto along = ray_distances(its, root.start - axis * 0.5, axis);
+        const auto along = ray_distances(its, root.start() - axis * 0.5, axis);
         REQUIRE(!along.empty());
         REQUIRE(along[0] > 0.5 + 0.9 * root.length());
     }
@@ -626,10 +694,10 @@ TEST_CASE("Vessel tree stops inside a bounding mesh", "[Vessel]")
     REQUIRE(bounded.clipped_by_bounds > 0);
     REQUIRE(bounded.branches.size() < free_tree.branches.size());
     for (const Branch &b : bounded.branches) {
-        REQUIRE((b.start - centre).norm() < R);
-        REQUIRE((b.end - centre).norm() < R);
+        REQUIRE((b.start() - centre).norm() < R);
+        REQUIRE((b.end() - centre).norm() < R);
         // The round end of the branch reaches the wall at most.
-        const Vec3d tip = b.end + (b.end - b.start).normalized() * b.radius;
+        const Vec3d tip = b.end() + (b.end() - b.start()).normalized() * b.start_radius();
         REQUIRE((tip - centre).norm() <= R + 1e-3);
     }
 
@@ -670,7 +738,7 @@ TEST_CASE("Vessel parameters survive a text round trip", "[Vessel]")
     in.mesh.sides          = 40;
     in.mesh.wall_thickness = 0.35;
     in.mesh.caps           = CapStyle::Flat;
-    in.mesh.joint_scale    = 1.2;
+    in.mesh.junction_margin = 0.05;
     in.bounds_object       = "Heart wall";
 
     VesselSpec out;
@@ -690,14 +758,14 @@ TEST_CASE("Vessel parameters survive a text round trip", "[Vessel]")
     REQUIRE(out.mesh.sides == 40);
     REQUIRE(out.mesh.wall_thickness == Approx(0.35));
     REQUIRE(out.mesh.caps == CapStyle::Flat);
-    REQUIRE(out.mesh.joint_scale == Approx(1.2));
+    REQUIRE(out.mesh.junction_margin == Approx(0.05));
     REQUIRE(out.bounds_object == "Heart wall");
 
     // Regenerating from the saved text gives the same tree.
     const Skeleton a = generate_tree(in.tree), b = generate_tree(out.tree);
     REQUIRE(a.branches.size() == b.branches.size());
     for (size_t i = 0; i < a.branches.size(); ++i)
-        REQUIRE((a.branches[i].end - b.branches[i].end).norm() < 1e-6);
+        REQUIRE((a.branches[i].end() - b.branches[i].end()).norm() < 1e-6);
 
     VesselSpec junk;
     REQUIRE_FALSE(spec_from_text("hello = world\n", junk));
@@ -829,20 +897,20 @@ TEST_CASE("Branch radii measured on the mesh follow Murray's law", "[Vessel]")
         // Distance from the middle of each branch to the surface, perpendicular to the branch.
         std::vector<double> measured;
         for (const Branch &b : sk.branches) {
-            const Vec3d axis = (b.end - b.start).normalized();
+            const Vec3d axis = (b.end() - b.start()).normalized();
             const Vec3d u    = axis.cross(std::abs(axis.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY()).normalized();
             const Vec3d v    = axis.cross(u);
             const double a   = 0.3 * 2. * PI / 48.;
-            const auto   t   = ray_distances(its, 0.5 * (b.start + b.end), u * std::cos(a) + v * std::sin(a));
+            const auto   t   = ray_distances(its, 0.5 * (b.start() + b.end()), u * std::cos(a) + v * std::sin(a));
             REQUIRE(!t.empty());
             // The polygon lies inside the circle by at most 1 - cos(pi / 48) = 0.2 percent.
-            REQUIRE(t[0] <= b.radius * (1. + 1e-3));
-            REQUIRE(t[0] >= b.radius * 0.99);
+            REQUIRE(t[0] <= b.start_radius() * (1. + 1e-3));
+            REQUIRE(t[0] >= b.start_radius() * 0.99);
             measured.push_back(t[0]);
         }
         for (size_t i = 0; i < sk.branches.size(); ++i)
             if (!sk.branches[i].is_leaf()) {
-                const double rp = measured[i], ra = measured[sk.branches[i].child_a], rb = measured[sk.branches[i].child_b];
+                const double rp = measured[i], ra = measured[sk.branches[i].children[0]], rb = measured[sk.branches[i].children[1]];
                 REQUIRE(ra * ra * ra + rb * rb * rb == Approx(rp * rp * rp).epsilon(0.02));
             }
     }
@@ -875,8 +943,8 @@ TEST_CASE("Many seeds give watertight, manifold, deterministic trees", "[Vessel]
         if (tp.rule.radius_rule == RadiusRule::Murray)
             for (const Branch &b : sk.branches)
                 if (!b.is_leaf())
-                    REQUIRE(std::pow(sk.branches[b.child_a].radius, 3) + std::pow(sk.branches[b.child_b].radius, 3) ==
-                            Approx(std::pow(b.radius, 3)).epsilon(1e-12));
+                    REQUIRE(std::pow(sk.branches[b.children[0]].start_radius(), 3) + std::pow(sk.branches[b.children[1]].start_radius(), 3) ==
+                            Approx(std::pow(b.start_radius(), 3)).epsilon(1e-12));
 
         VesselMeshParams mp;
         mp.sides = 12;
@@ -926,12 +994,12 @@ TEST_CASE("Centreline CSV lists every branch end with its radius", "[Vessel]")
         const Branch &b = sk.branches[std::stoul(f[0])];
         REQUIRE(std::stoi(f[1]) == b.parent);
         REQUIRE(std::stoi(f[2]) == b.depth);
-        const Vec3d &p = f[3] == "0" ? b.start : b.end;
+        const Vec3d &p = f[3] == "0" ? b.start() : b.end();
         // Exactly the same numbers, not just close.
         REQUIRE(std::stod(f[4]) == p.x());
         REQUIRE(std::stod(f[5]) == p.y());
         REQUIRE(std::stod(f[6]) == p.z());
-        REQUIRE(std::stod(f[7]) == b.radius);
+        REQUIRE(std::stod(f[7]) == b.start_radius());
         ++rows;
     }
     REQUIRE(rows == 2 * sk.branches.size());
