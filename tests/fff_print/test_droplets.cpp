@@ -356,3 +356,149 @@ TEST_CASE("A well array has a wall around every well and a droplet set in each",
             CHECK((Vec2d(p.pos.x(), p.pos.y()) - centre).norm() < 3.);
     }
 }
+
+namespace {
+
+// Area of the regular n-gon of circumradius r, which is what a round well is made of.
+double polygon_area(int n, double r) { return 0.5 * n * r * r * std::sin(2. * 3.14159265358979323846 / n); }
+
+} // namespace
+
+TEST_CASE("A round well wall has the volume of its ring times its height", "[Droplet]")
+{
+    WellArrayParams params;
+    params.shape = WellShape::Round;
+    params.cols = 1;
+    params.rows = 1;
+    params.inner_x = 6.;
+    params.wall_thickness = 1.;
+    params.wall_height = 3.;
+    params.floor_thickness = 0.;
+    const WellArray array = make_well_array(params);
+
+    // Inner radius 3 mm, outer radius 4 mm, both 96-gons.
+    const double ring = polygon_area(96, 4.) - polygon_area(96, 3.);
+    CHECK(double(its_volume(array.mesh)) == Catch::Approx(ring * 3.).epsilon(2e-3));
+    const BoundingBoxf3 bb = TriangleMesh(array.mesh).bounding_box();
+    CHECK(bb.min.z() == Catch::Approx(0.).margin(1e-4));
+    CHECK(bb.max.z() == Catch::Approx(3.).margin(1e-4));
+    CHECK(bb.size().x() == Catch::Approx(8.).margin(0.02));
+    CHECK(bb.size().y() == Catch::Approx(8.).margin(0.02));
+
+    // With no floor the droplet lands on the bed, in the centre of the well.
+    REQUIRE(array.droplets.size() == 1);
+    REQUIRE(array.droplets.front().points.size() == 1);
+    CHECK(array.droplets.front().points.front().pos.isApprox(Vec3d(0., 0., 0.), 1e-9));
+}
+
+TEST_CASE("A rectangular well wall has the volume of its ring times its height", "[Droplet]")
+{
+    WellArrayParams params;
+    params.shape = WellShape::Rectangular;
+    params.cols = 1;
+    params.rows = 1;
+    params.inner_x = 6.;
+    params.inner_y = 4.;
+    params.wall_thickness = 1.;
+    params.wall_height = 5.;
+    params.floor_thickness = 0.;
+    const WellArray array = make_well_array(params);
+
+    // Outer 8 x 6 mm minus inner 6 x 4 mm.
+    CHECK(double(its_volume(array.mesh)) == Catch::Approx((8. * 6. - 6. * 4.) * 5.).epsilon(1e-3));
+    const BoundingBoxf3 bb = TriangleMesh(array.mesh).bounding_box();
+    CHECK(bb.size().x() == Catch::Approx(8.).margin(1e-3));
+    CHECK(bb.size().y() == Catch::Approx(6.).margin(1e-3));
+}
+
+TEST_CASE("Neighbouring wells share the wall where their walls overlap", "[Droplet]")
+{
+    WellArrayParams params;
+    params.shape = WellShape::Rectangular;
+    params.cols = 2;
+    params.rows = 1;
+    params.inner_x = 6.;
+    params.inner_y = 6.;
+    params.wall_thickness = 1.;
+    params.wall_height = 4.;
+    params.floor_thickness = 0.;
+
+    // Centres 8 mm apart: the walls (outer 8 mm) touch and share one 1 mm thick wall.
+    params.pitch_x = 8.;
+    const WellArray shared = make_well_array(params);
+    // Union outline 16 x 8 minus two 6 x 6 wells.
+    CHECK(double(its_volume(shared.mesh)) == Catch::Approx((16. * 8. - 2. * 36.) * 4.).epsilon(1e-3));
+
+    // Centres 10 mm apart: separate walls, each 8 x 8 minus 6 x 6.
+    params.pitch_x = 10.;
+    const WellArray apart = make_well_array(params);
+    CHECK(double(its_volume(apart.mesh)) == Catch::Approx(2. * (64. - 36.) * 4.).epsilon(1e-3));
+}
+
+TEST_CASE("Wells are named like a plate, past row Z as well", "[Droplet]")
+{
+    WellArrayParams params;
+    params.cols = 1;
+    params.rows = 28;
+    const WellArray array = make_well_array(params);
+    REQUIRE(array.droplets.size() == 28);
+    CHECK(array.droplets[0].name == "A1");
+    CHECK(array.droplets[25].name == "Z1");
+    CHECK(array.droplets[26].name == "AA1");
+    CHECK(array.droplets[27].name == "AB1");
+}
+
+TEST_CASE("Droplet grids and lines clamp their parameters", "[Droplet]")
+{
+    SECTION("A negative volume step stops at zero") {
+        DropletGridParams params;
+        params.cols = 3;
+        params.rows = 1;
+        params.volume_nl = 10.;
+        params.volume_step_col = -8.;
+        const DropletSet set = make_droplet_grid(params);
+        REQUIRE(set.points.size() == 3);
+        CHECK(set.points[0].volume_nl == Catch::Approx(10.));
+        CHECK(set.points[1].volume_nl == Catch::Approx(2.));
+        CHECK(set.points[2].volume_nl == Catch::Approx(0.));
+    }
+    SECTION("Fewer than one row or column still gives one droplet") {
+        DropletGridParams params;
+        params.cols = 0;
+        params.rows = -3;
+        params.origin = Vec3d(1., 2., 3.);
+        const DropletSet set = make_droplet_grid(params);
+        REQUIRE(set.points.size() == 1);
+        CHECK(set.points.front().pos.isApprox(Vec3d(1., 2., 3.)));
+    }
+    SECTION("A line of one droplet sits at its start") {
+        const DropletSet set = make_droplet_line(Vec3d(1., 2., 3.), Vec3d(9., 9., 9.), 1, 20., 1);
+        REQUIRE(set.points.size() == 1);
+        CHECK(set.points.front().pos.isApprox(Vec3d(1., 2., 3.)));
+    }
+    SECTION("The pitch of a grid is the distance between neighbours") {
+        DropletGridParams params;
+        params.cols = 4;
+        params.rows = 3;
+        params.pitch_x = 1.5;
+        params.pitch_y = 2.5;
+        const DropletSet set = make_droplet_grid(params);
+        REQUIRE(set.points.size() == 12);
+        CHECK((set.points[1].pos - set.points[0].pos).norm() == Catch::Approx(1.5));
+        CHECK((set.points[4].pos - set.points[0].pos).norm() == Catch::Approx(2.5));
+        CHECK(set.points.back().pos.isApprox(Vec3d(4.5, 5., 0.)));
+    }
+}
+
+TEST_CASE("Walls that have no length, thickness or height are empty", "[Droplet]")
+{
+    const Points one_point { scaled<coord_t>(Vec2d(0., 0.)) };
+    CHECK(wall_footprint(one_point, false, 1.).empty());
+    const Points line { scaled<coord_t>(Vec2d(0., 0.)), scaled<coord_t>(Vec2d(5., 0.)) };
+    CHECK(wall_footprint(line, false, 0.).empty());
+    const ExPolygons wall = wall_footprint(line, false, 1.);
+    REQUIRE_FALSE(wall.empty());
+    CHECK(make_wall_mesh(wall, 2., 2.).indices.empty());
+    CHECK(make_wall_mesh(wall, 3., 2.).indices.empty());
+    CHECK(make_wall_mesh({}, 0., 2.).indices.empty());
+}
