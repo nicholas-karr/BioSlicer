@@ -36,3 +36,14 @@ TEST_CASE("Wall thickness of an empty mesh is invalid", "[MeshThickness]")
 {
     CHECK_FALSE(analyze_wall_thickness(indexed_triangle_set{}).valid);
 }
+
+TEST_CASE("Tube wall thickness equals outer minus inner radius", "[MeshThickness]")
+{
+    // The faceted inner and outer walls are parallel, so the ray distance is the exact radius difference
+    // measured along facet normals: R cos(pi/n) - r cos(pi/n).
+    for (double n : {32., 128.}) {
+        const indexed_triangle_set tube = make_primitive(PrimitiveType::Tube, {10., 7., 20., n});
+        const double expected = (10. - 7.) * std::cos(PI / n);
+        CHECK(analyze_wall_thickness(tube).min_thickness_mm == Catch::Approx(expected).margin(1e-3));
+    }
+}

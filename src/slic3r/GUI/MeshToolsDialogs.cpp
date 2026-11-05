@@ -79,6 +79,15 @@ bool show_primitive_dialog(wxWindow *parent, PrimitiveType type, std::vector<dou
         ctrls.push_back(ctrl);
         add_row(dlg, grid, label, ctrl);
     }
+    // Trade mesh size for accuracy: raise the segment counts until the volume loss is below the given limit.
+    auto *loss_spin = make_mm_spin(dlg, 0.1, 0.0001, 50.);
+    auto *raise_btn = new wxButton(dlg, wxID_ANY, _L("Raise segments"));
+    auto *loss_row  = new wxBoxSizer(wxHORIZONTAL);
+    loss_row->Add(new wxStaticText(dlg, wxID_ANY, _L("Largest volume loss (%)")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+    loss_row->Add(loss_spin, 1, wxRIGHT, 6);
+    loss_row->Add(raise_btn, 0);
+    grid->AddSpacer(0);
+    grid->Add(loss_row, 1, wxEXPAND | wxALL, 4);
     auto *note = new wxStaticText(dlg, wxID_ANY, wxEmptyString);
 
     auto read = [&]() {
@@ -101,6 +110,14 @@ bool show_primitive_dialog(wxWindow *parent, PrimitiveType type, std::vector<dou
                                             primitive_volume(type, v), 100. * primitive_volume_tolerance(type, v)));
         dlg->Layout();
     };
+    raise_btn->Bind(wxEVT_BUTTON, [&](wxCommandEvent &) {
+        const std::vector<double> v = primitive_params_for_tolerance(type, read(), loss_spin->GetValue() / 100.);
+        for (size_t i = 0; i < info.size() && i < v.size(); ++i) {
+            if (info[i].integer)
+                static_cast<wxSpinCtrl *>(ctrls[i])->SetValue(int(v[i]));
+        }
+        refresh();
+    });
     for (wxControl *c : ctrls) {
         c->Bind(wxEVT_SPINCTRLDOUBLE, [&](wxSpinDoubleEvent &) { refresh(); });
         c->Bind(wxEVT_SPINCTRL, [&](wxCommandEvent &) { refresh(); });

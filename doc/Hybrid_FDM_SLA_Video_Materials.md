@@ -717,6 +717,10 @@ rounded shapes add the same loss for the pole-to-pole rings. Examples: 180 segme
 about 0.16 %, 16 segments about 2.6 %. Wedge volume is exact. Cone, frustum and tube loss depends only on the
 segment count.
 
+To trade file size for accuracy, type the largest acceptable volume loss (%) in the dialog and press **Raise segments**.
+Segment counts are raised to multiples of four, which also makes the bounding box exactly the typed size. The triangle
+count grows with the product of the segment counts.
+
 | Shape | Parameters (mm unless noted) | Ideal volume |
 | --- | --- | --- |
 | Torus | ring radius R, tube radius r, segments around ring, segments around tube | 2 pi^2 R r^2 |

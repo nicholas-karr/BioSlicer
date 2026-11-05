@@ -1,9 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/MeshPrimitives.hpp"
 #include "libslic3r/NumericTransform.hpp"
+#include "mesh_test_utils.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem/operations.hpp>
@@ -789,4 +792,34 @@ TEST_CASE("Numeric transform rejects values that would break the object", "[Nume
     const NumericTransform after = get_numeric_transform(obj, 0);
     CHECK(after.size_mm.isApprox(before.size_mm, 1e-12));
     CHECK(after.position_mm.isApprox(before.position_mm, 1e-12));
+}
+
+TEST_CASE("A primitive keeps its volume and bounding box through a 3mf file cycle", "[3mf][MeshPrimitives]") {
+    const std::vector<double> params = {15., 4., 64., 32.};
+    Model src_model;
+    ModelObject *obj = src_model.add_object();
+    obj->add_volume(TriangleMesh(make_primitive(PrimitiveType::Torus, params)));
+    obj->add_instance();
+
+    const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/primitive.3mf";
+    REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
+    Model dst_model;
+    DynamicPrintConfig dst_config;
+    {
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        boost::optional<Semver> version;
+        REQUIRE(load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false, version));
+    }
+    boost::filesystem::remove(test_file);
+    REQUIRE(dst_model.objects.size() == 1);
+
+    const TriangleMesh loaded = dst_model.mesh();
+    const TriangleMesh saved  = src_model.mesh();
+    const double ideal = primitive_volume(PrimitiveType::Torus, params);
+    CHECK(double(loaded.its.vertices.size()) == double(saved.its.vertices.size()));
+    const double loaded_volume = test::volume_mm3(loaded.its);
+    CHECK(std::abs(loaded_volume - test::volume_mm3(saved.its)) < 1e-6 * ideal);
+    CHECK((ideal - loaded_volume) / ideal <= primitive_volume_tolerance(PrimitiveType::Torus, params));
+    CHECK(loaded.bounding_box().size().x() == Catch::Approx(38.).margin(1e-3));
+    CHECK(loaded.bounding_box().size().z() == Catch::Approx(8.).margin(1e-3));
 }

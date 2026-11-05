@@ -102,3 +102,28 @@ TEST_CASE("Shell reports a wall that is too thick", "[MeshShell]")
     p.wall_thickness_mm = 0.;
     CHECK(make_shell(fine_sphere(), p, &err).indices.empty());
 }
+
+TEST_CASE("Shell wall thickness agrees with an independent vertex radius measurement", "[MeshShell][MeshThickness]")
+{
+    const double t = 2.;
+    ShellParams  p;
+    p.wall_thickness_mm = t;
+    p.voxel_size_mm     = 0.1;
+    const indexed_triangle_set shell = make_shell(fine_sphere(), p);
+    REQUIRE_FALSE(shell.indices.empty());
+
+    // Vertices of the original sphere sit at R; cavity vertices are the ones well inside.
+    double outer_min = 1e9, cavity_max = 0.;
+    for (const Vec3f &v : shell.vertices) {
+        const double r = v.cast<double>().norm();
+        if (r > R - 0.5)
+            outer_min = std::min(outer_min, r);
+        else
+            cavity_max = std::max(cavity_max, r);
+    }
+    const double independent = outer_min - cavity_max;
+    const double raycast     = analyze_wall_thickness(shell).min_thickness_mm;
+    INFO("independent " << independent << " raycast " << raycast);
+    CHECK(independent == Catch::Approx(t).margin(0.1));
+    CHECK(raycast == Catch::Approx(independent).margin(0.05));
+}
