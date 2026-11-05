@@ -526,3 +526,163 @@ TEST_CASE("Channel input validation", "[SolidEdit]")
     CHECK(! make_channel_tool({ Vec3d(0, 0, 0), Vec3d(1, 0, 0) }, negative).ok);
     CHECK(make_channel_tool({ Vec3d(0, 0, 0), Vec3d(1, 0, 0) }, p).ok);
 }
+
+namespace {
+
+// Volume of all solid parts of the object in bed coordinates.
+double world_volume(const ModelObject &object, size_t instance_idx = 0)
+{
+    double total = 0.;
+    for (const ModelVolume *v : object.volumes)
+        if (v->is_model_part()) {
+            TriangleMesh m = v->mesh();
+            m.transform(object.instances[instance_idx]->get_matrix() * v->get_matrix(), true);
+            total += volume_of(m);
+        }
+    return total;
+}
+
+} // namespace
+
+TEST_CASE("Channel stays round and exact in a scaled or rotated instance", "[SolidEdit]")
+{
+    ChannelParams p;
+    p.diameter = 2.;
+    const double expected_removed = circle_area(2.) * 6.;
+
+    SECTION("regression: non-uniform instance scale must not stretch the channel")
+    {
+        Model model;
+        ModelObject *obj = make_object(model, cube(10, 10, 10));
+        obj->instances.front()->set_scaling_factor(Vec3d(2., 1., 1.));
+        REQUIRE(world_volume(*obj) == Approx(2000.).epsilon(rel_tol));
+        // A closed channel along Y in the middle of the stretched box (bed x 0..20, y 0..10, z 0..10).
+        Result r = subtract_channel(*obj, 0, { Vec3d(10, 2, 5), Vec3d(10, 8, 5) }, p);
+        REQUIRE(r.ok);
+        CHECK(world_volume(*obj) == Approx(2000. - expected_removed).epsilon(rel_tol));
+    }
+    SECTION("rotated instance")
+    {
+        Model model;
+        ModelObject *obj = make_object(model, cube(10, 10, 10));
+        obj->instances.front()->set_rotation(Z, PI / 2.);
+        // Rotating 90 degrees about Z maps the box to bed x -10..0, y 0..10.
+        Result r = subtract_channel(*obj, 0, { Vec3d(-8, 5, 5), Vec3d(-2, 5, 5) }, p);
+        REQUIRE(r.ok);
+        CHECK(world_volume(*obj) == Approx(1000. - expected_removed).epsilon(rel_tol));
+    }
+}
+
+TEST_CASE("Boolean on a mirrored part", "[SolidEdit]")
+{
+    Model model;
+    ModelObject *obj = make_object(model, cube(10, 10, 10));
+    obj->volumes.front()->set_mirror(X, -1.);
+    ModelVolume *tool = obj->add_volume(cube(10, 10, 10, Vec3d(0, 0, 5)));
+    // Mirroring must not turn the part inside out.
+    TriangleMesh mirrored = obj->volumes.front()->mesh();
+    mirrored.transform(obj->volumes.front()->get_matrix(), true);
+    REQUIRE(volume_of(mirrored) == Approx(1000.).epsilon(rel_tol));
+    (void)tool;
+
+    Result r = boolean_volumes(*obj, BooleanOp::Intersect, { 0, 1 });
+    REQUIRE(r.ok);
+    CHECK(is_watertight(r.mesh));
+    CHECK(volume_of(r.mesh) > 0.);
+}
+
+TEST_CASE("Boolean with tiny features", "[SolidEdit]")
+{
+    SECTION("a 0.1 mm wall is kept to 0.1 percent")
+    {
+        // 10 mm box with a 9.8 mm cubic cavity: walls of 0.1 mm.
+        Result r = boolean(BooleanOp::Subtract, cube(10, 10, 10), { cube(9.8, 9.8, 9.8, Vec3d(0.1, 0.1, 0.1)) });
+        REQUIRE(r.ok);
+        CHECK(is_watertight(r.mesh));
+        CHECK(volume_of(r.mesh) == Approx(1000. - 9.8 * 9.8 * 9.8).epsilon(rel_tol));
+        CHECK(r.mesh.bounding_box().size().x() == Approx(10.).margin(1e-4));
+    }
+    SECTION("a 0.01 mm deep notch removes exactly its volume")
+    {
+        // 2 x 2 mm notch, 0.01 mm deep, cut into the top face.
+        Result r = boolean(BooleanOp::Subtract, cube(10, 10, 10), { cube(2, 2, 1, Vec3d(4, 4, 9.99)) });
+        REQUIRE(r.ok);
+        CHECK(is_watertight(r.mesh));
+        CHECK(volume_of(r.mesh) == Approx(1000. - 2. * 2. * 0.01).margin(2e-3));
+        CHECK(r.mesh.bounding_box().size().z() == Approx(10.).margin(1e-4));
+    }
+    SECTION("a 0.05 mm slit through the whole box")
+    {
+        Result r = boolean(BooleanOp::Subtract, cube(10, 10, 10), { cube(0.05, 20, 20, Vec3d(5, -5, -5)) });
+        REQUIRE(r.ok);
+        CHECK(is_watertight(r.mesh));
+        CHECK(volume_of(r.mesh) == Approx(1000. - 0.05 * 10. * 10.).margin(2e-3));
+        CHECK(its_split(r.mesh.its).size() == 2);
+    }
+}
+
+TEST_CASE("Boolean with partly coplanar faces", "[SolidEdit]")
+{
+    TriangleMesh base = cube(10, 10, 10);
+
+    SECTION("a smaller block standing on the top face")
+    {
+        Result r = boolean(BooleanOp::Union, base, { cube(5, 5, 5, Vec3d(2, 2, 10)) });
+        REQUIRE(r.ok);
+        CHECK(is_watertight(r.mesh));
+        CHECK(volume_of(r.mesh) == Approx(1125.).epsilon(rel_tol));
+        CHECK(r.mesh.bounding_box().size().z() == Approx(15.).margin(1e-4));
+    }
+    SECTION("a block flush with the top face removes nothing from the top")
+    {
+        Result r = boolean(BooleanOp::Subtract, base, { cube(5, 5, 5, Vec3d(2, 2, 5)) });
+        REQUIRE(r.ok);
+        CHECK(is_watertight(r.mesh));
+        CHECK(volume_of(r.mesh) == Approx(875.).epsilon(rel_tol));
+        CHECK(r.mesh.bounding_box().size().z() == Approx(10.).margin(1e-4));
+    }
+    SECTION("identical solids")
+    {
+        Result uni = boolean(BooleanOp::Union, base, { cube(10, 10, 10) });
+        REQUIRE(uni.ok);
+        CHECK(volume_of(uni.mesh) == Approx(1000.).epsilon(rel_tol));
+        Result isect = boolean(BooleanOp::Intersect, base, { cube(10, 10, 10) });
+        REQUIRE(isect.ok);
+        CHECK(volume_of(isect.mesh) == Approx(1000.).epsilon(rel_tol));
+        Result sub = boolean(BooleanOp::Subtract, base, { cube(10, 10, 10) });
+        CHECK(! sub.ok);
+        CHECK(! sub.error.empty());
+    }
+}
+
+TEST_CASE("Non-manifold and inverted input is rejected with a plain message", "[SolidEdit]")
+{
+    SECTION("an edge shared by three faces")
+    {
+        indexed_triangle_set its = cube(10, 10, 10).its;
+        its.indices.emplace_back(its.indices.front());
+        TriangleMesh bad(its);
+        Result r = boolean(BooleanOp::Union, bad, { cube(1, 1, 1) });
+        CHECK(! r.ok);
+        CHECK(! r.error.empty());
+        CHECK(r.error.find("Repair") != std::string::npos);
+    }
+    SECTION("a turned inside out solid")
+    {
+        indexed_triangle_set its = cube(10, 10, 10).its;
+        for (Vec3i &f : its.indices)
+            std::swap(f[1], f[2]);
+        TriangleMesh bad(its);
+        Result r = boolean(BooleanOp::Subtract, cube(20, 20, 20), { bad });
+        CHECK(! r.ok);
+        CHECK(r.error.find("inside out") != std::string::npos);
+    }
+    SECTION("the tool is named in the message")
+    {
+        indexed_triangle_set its = cube(10, 10, 10).its;
+        its.indices.pop_back();
+        Result r = boolean(BooleanOp::Subtract, cube(20, 20, 20), { cube(1, 1, 1), TriangleMesh(its) });
+        CHECK(! r.ok);
+        CHECK(r.error.find("Shape 3") != std::string::npos);
+    }
+}

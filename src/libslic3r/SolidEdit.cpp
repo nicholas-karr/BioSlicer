@@ -379,12 +379,13 @@ Result subtract_channel(ModelObject &object, size_t instance_idx, const std::vec
 {
     if (instance_idx >= object.instances.size())
         return Result::failure("The object has no such instance.");
-    const Transform3d to_object = object.instances[instance_idx]->get_matrix().inverse();
-    std::vector<Vec3d> local;
-    for (const Vec3d &p : path)
-        local.emplace_back(to_object * p);
 
-    Result tool = make_channel_tool(local, params);
+    // The tube is built and cut in bed coordinates, so its diameter stays round and exact even when the
+    // instance is scaled or rotated. The cut parts are mapped back to object coordinates afterwards.
+    const Transform3d instance_trafo = object.instances[instance_idx]->get_matrix();
+    const Transform3d to_object      = instance_trafo.inverse();
+
+    Result tool = make_channel_tool(path, params);
     if (! tool.ok)
         return tool;
     const BoundingBoxf3 tool_box = tool.mesh.bounding_box();
@@ -396,12 +397,14 @@ Result subtract_channel(ModelObject &object, size_t instance_idx, const std::vec
         if (! object.volumes[i]->is_model_part())
             continue;
         any_part = true;
-        TriangleMesh part = volume_mesh_in_object(*object.volumes[i]);
+        TriangleMesh part = object.volumes[i]->mesh();
+        part.transform(instance_trafo * object.volumes[i]->get_matrix(), true);
         if (! part.bounding_box().intersects(tool_box))
             continue;
         Result r = boolean_impl(BooleanOp::Subtract, part, { tool.mesh }, true);
         if (! r.ok)
             return Result::failure("Part " + quote_name(object.volumes[i]->name) + ": " + r.error);
+        r.mesh.transform(to_object, true);
         changes.push_back({ i, r.mesh.its.indices.empty(), std::move(r.mesh) });
     }
     if (! any_part)
