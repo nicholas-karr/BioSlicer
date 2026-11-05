@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stl.cpp
 	test_meshboolean.cpp
 	test_mesh_primitives.cpp
+	test_mesh_thickness.cpp
 	test_marchingsquares.cpp
     test_multiple_beds.cpp
 	test_region_expansion.cpp
