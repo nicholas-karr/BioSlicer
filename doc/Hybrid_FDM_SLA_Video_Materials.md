@@ -755,3 +755,24 @@ a decimal point and `\n` line ends, and these columns:
 The positions are those the copies are placed at; they change if the objects are moved afterwards. The
 generator is in `src/libslic3r/ParameterSweep.hpp`. Stepping a print setting of an arbitrary object is not
 part of the sweep.
+
+## Lattices
+
+**File > Generate Lattice** makes a block of a triply periodic lattice, the repeating porous structures used for
+tissue scaffolds. Lengths are in millimetres.
+
+- **Schwarz P**: the solid is where `cos x + cos y + cos z` is at most a threshold. It has straight channels in
+  the three axis directions.
+- **Diamond**: the solid is where `sin x sin y sin z + sin x cos y cos z + cos x sin y cos z + cos x cos y sin z`
+  is at most a threshold. Its channels branch.
+
+*Length of one repeat* is the period of the lattice in every direction. *Solid share of the volume* (2 % to
+98 %) is converted into the threshold from the distribution of the function over one repeat, so the share holds
+for the block and not only near the surface. The block is closed by flat faces on all six sides.
+
+With *Change the density along an axis* the solid share goes linearly from the first value at the start of the
+axis to *Solid share at the far end*, for a scaffold that gets denser in one direction.
+
+The share of a block is reached within 2 % when each side is a whole number of repeats; other sizes are
+approximate. The surface is sampled at a twentieth of the repeat, so a block of 100 mm with a repeat of 2 mm is
+refused because it needs too many samples. The generator is in `src/libslic3r/TPMS.hpp`.

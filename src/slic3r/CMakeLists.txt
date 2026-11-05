@@ -170,6 +170,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DropletMarkers.cpp
     GUI/DropletMarkers.hpp
     GUI/DropletGenDialog.hpp
+    GUI/LatticeDialog.cpp
+    GUI/LatticeDialog.hpp
     GUI/ParamDialog.cpp
     GUI/ParameterSweepDialog.cpp
     GUI/ParameterSweepDialog.hpp

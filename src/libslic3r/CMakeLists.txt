@@ -348,6 +348,8 @@ set(SLIC3R_SOURCES
     ShapeGen.hpp
     TestCoupon.cpp
     TestCoupon.hpp
+    TPMS.cpp
+    TPMS.hpp
     ShortEdgeCollapse.cpp
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
