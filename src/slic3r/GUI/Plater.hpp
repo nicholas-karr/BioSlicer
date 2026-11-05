@@ -27,6 +27,7 @@
 #include "Selection.hpp"
 
 #include "libslic3r/Droplet.hpp"
+#include "libslic3r/SolidEdit.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "Jobs/Job.hpp"
 #include "Jobs/Worker.hpp"
@@ -327,6 +328,12 @@ public:
     void mirror(Axis axis);
     void split_object();
     void split_volume();
+    void boolean_operation(SolidEdit::BooleanOp op);
+    void apply_negative_volumes();
+    void subtract_channel();
+    bool can_boolean_operation() const;
+    bool can_apply_negative_volumes() const;
+    bool can_subtract_channel() const;
 
     bool can_delete() const;
     bool can_delete_all() const;

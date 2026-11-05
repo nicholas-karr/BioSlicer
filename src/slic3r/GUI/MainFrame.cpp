@@ -1665,6 +1665,23 @@ void MainFrame::init_menubar_as_editor()
             "paste_menu", nullptr, [this](){return m_plater->can_paste_from_clipboard(); }, this);
         
         editMenu->AppendSeparator();
+        append_menu_item(editMenu, wxID_ANY, _L("Solids: &Union"),
+            _L("Join the selected solids into one solid"), [this](wxCommandEvent&) { m_plater->boolean_operation(SolidEdit::BooleanOp::Union); },
+            "", nullptr, [this](){ return m_plater->can_boolean_operation(); }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Solids: &Subtract"),
+            _L("Cut the other selected solids out of the first selected solid"), [this](wxCommandEvent&) { m_plater->boolean_operation(SolidEdit::BooleanOp::Subtract); },
+            "", nullptr, [this](){ return m_plater->can_boolean_operation(); }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Solids: &Intersect"),
+            _L("Keep only the volume that all selected solids share"), [this](wxCommandEvent&) { m_plater->boolean_operation(SolidEdit::BooleanOp::Intersect); },
+            "", nullptr, [this](){ return m_plater->can_boolean_operation(); }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Apply &negative volumes"),
+            _L("Cut all negative volumes out of the solid parts and remove them"), [this](wxCommandEvent&) { m_plater->apply_negative_volumes(); },
+            "", nullptr, [this](){ return m_plater->can_apply_negative_volumes(); }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Subtract &channel") + dots,
+            _L("Cut a round channel of a given diameter (mm) along a path of points"), [this](wxCommandEvent&) { m_plater->subtract_channel(); },
+            "", nullptr, [this](){ return m_plater->can_subtract_channel(); }, this);
+
+        editMenu->AppendSeparator();
 #ifdef __APPLE__
         append_menu_item(editMenu, wxID_ANY, _L("Re&load from Disk") + dots + "\tCtrl+Shift+R",
             _L("Reload the plater from disk"), [this](wxCommandEvent&) { m_plater->reload_all_from_disk(); },

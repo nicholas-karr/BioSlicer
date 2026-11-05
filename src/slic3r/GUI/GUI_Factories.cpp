@@ -1098,6 +1098,30 @@ void MenuFactory::append_menu_item_merge_to_multipart_object(wxMenu* menu)
         [](wxCommandEvent&) { obj_list()->merge(true); }, "", menu,
         []() { return obj_list()->can_merge_to_multipart_object(); }, m_parent);
 }
+void MenuFactory::append_menu_items_solid_editing(wxMenu* menu, bool booleans, bool negative_volumes, bool channel)
+{
+    menu->AppendSeparator();
+    if (booleans) {
+        append_menu_item(menu, wxID_ANY, _L("Union"), _L("Join the selected solids into one solid"),
+            [](wxCommandEvent&) { plater()->boolean_operation(SolidEdit::BooleanOp::Union); }, "", menu,
+            []() { return plater()->can_boolean_operation(); }, m_parent);
+        append_menu_item(menu, wxID_ANY, _L("Subtract"), _L("Cut the other selected solids out of the first selected solid"),
+            [](wxCommandEvent&) { plater()->boolean_operation(SolidEdit::BooleanOp::Subtract); }, "", menu,
+            []() { return plater()->can_boolean_operation(); }, m_parent);
+        append_menu_item(menu, wxID_ANY, _L("Intersect"), _L("Keep only the volume that all selected solids share"),
+            [](wxCommandEvent&) { plater()->boolean_operation(SolidEdit::BooleanOp::Intersect); }, "", menu,
+            []() { return plater()->can_boolean_operation(); }, m_parent);
+    }
+    if (negative_volumes)
+        append_menu_item(menu, wxID_ANY, _L("Apply negative volumes"), _L("Cut all negative volumes out of the solid parts and remove them"),
+            [](wxCommandEvent&) { plater()->apply_negative_volumes(); }, "", menu,
+            []() { return plater()->can_apply_negative_volumes(); }, m_parent);
+    if (channel)
+        append_menu_item(menu, wxID_ANY, _L("Subtract channel") + dots, _L("Cut a round channel of a given diameter (mm) along a path of points"),
+            [](wxCommandEvent&) { plater()->subtract_channel(); }, "", menu,
+            []() { return plater()->can_subtract_channel(); }, m_parent);
+}
+
 /*
 void MenuFactory::append_menu_item_merge_to_single_object(wxMenu* menu)
 {
@@ -1240,6 +1264,7 @@ void MenuFactory::create_common_object_menu(wxMenu* menu)
     append_menu_items_mirror(menu);
 
     append_menu_items_split(menu);
+    append_menu_items_solid_editing(menu, false, true, true);
     menu->AppendSeparator();
 }
 
@@ -1291,6 +1316,7 @@ void MenuFactory::create_part_menu()
         [](wxCommandEvent&) { plater()->split_volume(); }, "split_parts_SMALL", nullptr,
         []() { return plater()->can_split(false); }, m_parent);
 
+    append_menu_items_solid_editing(menu, false, true, false);
     append_immutable_part_menu_items(menu);
 }
 
@@ -1430,6 +1456,7 @@ wxMenu* MenuFactory::multi_selection_menu()
     append_menu_items_convert_unit(menu);
     if (obj_list()->can_merge_to_multipart_object())
         append_menu_item_merge_to_multipart_object(menu);
+    append_menu_items_solid_editing(menu, true, true, false);
     if (extruders_count() > 1)
         append_menu_item_change_extruder(menu);
     if (list_model()->GetItemType(sels[0]) != itVolume) {
