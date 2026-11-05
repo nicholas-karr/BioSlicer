@@ -497,6 +497,8 @@ set(SLIC3R_SOURCES
     BranchingTree/BranchingTree.hpp
     BranchingTree/PointCloud.cpp
     BranchingTree/PointCloud.hpp
+    Vessel/VesselIO.cpp
+    Vessel/VesselIO.hpp
     Vessel/VesselTree.cpp
     Vessel/VesselTree.hpp
     Vessel/VesselTube.cpp

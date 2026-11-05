@@ -161,7 +161,16 @@ struct VesselSpec
     VesselMeshParams mesh;
     // Name of the object whose volume the tree must stay inside, empty for none.
     std::string      bounds_object;
+    // Smallest feature in mm the printer can make, used to warn about thin channels and walls.
+    double           min_feature_size = 0.4;
+    // Text of a table of vessels (see skeleton_from_csv()). When it is not empty the tree is this table and the
+    // growth settings and the bounding object are not used.
+    std::string      imported_csv;
 };
+
+// The skeleton a spec describes: the imported table if there is one, else the grown tree.
+// Throws InvalidArgument with a plain message if it cannot be made.
+Skeleton build_skeleton(const VesselSpec &spec, const indexed_triangle_set *bounds = nullptr);
 
 // Plain text, one "key = value" per line, numbers with a decimal point.
 std::string spec_to_text(const VesselSpec &spec);
