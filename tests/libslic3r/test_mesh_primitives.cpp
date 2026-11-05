@@ -130,3 +130,58 @@ TEST_CASE("Primitive parameter validation", "[MeshPrimitives]")
     for (int i = 0; i < int(PrimitiveType::Count); ++i)
         CHECK(primitive_validate(PrimitiveType(i), primitive_default_params(PrimitiveType(i))).empty());
 }
+
+TEST_CASE("Predicted volume loss matches the measured loss", "[MeshPrimitives]")
+{
+    // For shapes made of regular polygons the tolerance is the exact loss, not only an upper bound.
+    for (double seg : {8., 12., 36., 100.}) {
+        const std::vector<std::pair<PrimitiveType, std::vector<double>>> cases = {
+            {PrimitiveType::Frustum, {10., 4., 17., seg}},
+            {PrimitiveType::Tube, {10., 6., 9., seg}},
+            {PrimitiveType::Ellipsoid, {7., 5., 3., seg, 2. * std::floor(seg / 2.)}},
+            {PrimitiveType::Capsule, {4., 11., seg, 8.}}};
+        for (const auto &c : cases) {
+            const double ideal    = primitive_volume(c.first, c.second);
+            const double measured = (ideal - test::volume_mm3(make_primitive(c.first, c.second))) / ideal;
+            const double predicted = primitive_volume_tolerance(c.first, c.second) - 1e-5;
+            INFO(primitive_name(c.first) << " segments " << seg << " measured " << measured << " predicted " << predicted);
+            CHECK(measured == Catch::Approx(predicted).margin(2e-5));
+        }
+    }
+}
+
+TEST_CASE("Raising the segment count meets a requested volume accuracy", "[MeshPrimitives]")
+{
+    for (int i = 0; i < int(PrimitiveType::Count); ++i) {
+        const PrimitiveType type = PrimitiveType(i);
+        std::vector<double> p    = primitive_default_params(type);
+        if (type != PrimitiveType::Wedge)
+            p[p.size() - 1] = (type == PrimitiveType::Ellipsoid || type == PrimitiveType::Capsule || type == PrimitiveType::Torus) ? p.back() : 8.;
+        const std::vector<double> fine = primitive_params_for_tolerance(type, p, 0.001);
+        CHECK(primitive_validate(type, fine).empty());
+        if (type == PrimitiveType::Wedge)
+            continue;
+        CHECK(primitive_volume_tolerance(type, fine) <= 0.001);
+        const double ideal = primitive_volume(type, fine);
+        const double loss  = (ideal - test::volume_mm3(make_primitive(type, fine))) / ideal;
+        CHECK(loss <= 0.001);
+        // Lengths are untouched.
+        const auto &info = primitive_param_info(type);
+        for (size_t k = 0; k < p.size(); ++k)
+            if (!info[k].integer)
+                CHECK(fine[k] == p[k]);
+    }
+}
+
+TEST_CASE("Bounding boxes are exact when segment counts are multiples of four", "[MeshPrimitives]")
+{
+    for (double seg : {8., 12., 36., 100.}) {
+        const BoundingBoxf3 e = bounding_box(make(PrimitiveType::Ellipsoid, {7., 5., 3., seg, seg}));
+        CHECK(e.size().x() == Catch::Approx(14.).margin(1e-5));
+        CHECK(e.size().y() == Catch::Approx(10.).margin(1e-5));
+        CHECK(e.size().z() == Catch::Approx(6.).margin(1e-5));
+        const BoundingBoxf3 t = bounding_box(make(PrimitiveType::Torus, {12., 3., seg, seg}));
+        CHECK(t.size().x() == Catch::Approx(30.).margin(1e-5));
+        CHECK(t.size().z() == Catch::Approx(6.).margin(1e-5));
+    }
+}

@@ -52,6 +52,12 @@ double primitive_volume(PrimitiveType type, const std::vector<double> &params);
 // It contains a 1e-5 allowance for single precision vertex storage.
 double primitive_volume_tolerance(PrimitiveType type, const std::vector<double> &params);
 
+// Raises the segment and ring counts of params (rounded up to multiples of 4, so the extreme points lie
+// on the axes and bounding boxes are exact) until primitive_volume_tolerance() is at most
+// max_relative_loss, or the limits of the parameters are reached. Lengths are not changed.
+// More segments mean a larger mesh: triangle count grows with the product of the counts.
+std::vector<double> primitive_params_for_tolerance(PrimitiveType type, std::vector<double> params, double max_relative_loss);
+
 } // namespace Slic3r
 
 #endif // slic3r_MeshPrimitives_hpp_

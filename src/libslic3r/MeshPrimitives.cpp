@@ -396,4 +396,34 @@ double primitive_volume_tolerance(PrimitiveType type, const std::vector<double> 
     }
 }
 
+std::vector<double> primitive_params_for_tolerance(PrimitiveType type, std::vector<double> params, double max_relative_loss)
+{
+    if (!primitive_validate(type, params).empty())
+        return params;
+    std::vector<size_t> count_idx;
+    switch (type) {
+    case PrimitiveType::Torus:     count_idx = {2, 3}; break;
+    case PrimitiveType::Ellipsoid: count_idx = {3, 4}; break;
+    case PrimitiveType::Capsule:   count_idx = {2, 3}; break;
+    case PrimitiveType::Frustum:
+    case PrimitiveType::Tube:      count_idx = {3}; break;
+    default: return params;
+    }
+    const auto &info = primitive_param_info(type);
+    auto round4 = [](double v) { return 4. * std::ceil(v / 4.); };
+    for (int guard = 0; guard < 64 && primitive_volume_tolerance(type, params) > max_relative_loss; ++guard) {
+        bool grew = false;
+        for (size_t i : count_idx) {
+            const double next = std::min(round4(params[i] * 1.25), 4. * std::floor(info[i].max / 4.));
+            if (next > params[i]) {
+                params[i] = next;
+                grew = true;
+            }
+        }
+        if (!grew)
+            break;
+    }
+    return params;
+}
+
 } // namespace Slic3r
