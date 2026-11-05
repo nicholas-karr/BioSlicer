@@ -3226,6 +3226,75 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats{ 0.0 });
 
+    def = this->add("sla_material_transition_depth", coFloats);
+    def->label = L("SLA layer transition depth");
+    def->tooltip = L("Distance in millimetres the object is moved away from the cure height and back before every exposure of this material, "
+                     "letting resin redistribute evenly before the cure. A positive value moves to a lower Z coordinate, a negative value to a higher one: "
+                     "choose the sign that submerges the object on your machine. The move is made after the material is in place and with the projector dark. "
+                     "Set per SLA extruder. Set to 0 to disable the transition move. "
+                     "A positive value larger than the layer's height moves below Z = 0: make sure your machine can travel there safely. "
+                     "G-code export fails if the move would go above the maximum print height.");
+    def->sidetext = L("mm");
+    def->min = -50;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 0.0 });
+
+    def = this->add("sla_material_transition_time", coFloats);
+    def->label = L("SLA layer transition time");
+    def->tooltip = L("Time in seconds to hold the object away from the cure height during a layer transition before returning to it. Set per SLA extruder.");
+    def->sidetext = L("s");
+    def->min = 0;
+    def->max = 60;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 0.0 });
+
+    def = this->add("filament_droplet_nl_per_us", coFloats);
+    def->label = L("Droplet volume per pulse");
+    def->tooltip = L("Calibration constant of a droplet material: the volume dispensed per microsecond of valve pulse. "
+                     "The pulse time of a droplet is its volume divided by this constant. The printer can override it before a print.");
+    def->sidetext = L("nL/\u00b5s");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 0.05 });
+
+    def = this->add("filament_droplet_frequency", coFloats);
+    def->label = L("Droplet frequency");
+    def->tooltip = L("Rate at which several drops are fired at one point of this droplet material.");
+    def->sidetext = L("Hz");
+    def->min = 0.01;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 2.0 });
+
+    def = this->add("droplet_standoff", coFloats);
+    def->label = L("Droplet standoff");
+    def->tooltip = L("Height of the nozzle above the landing height of a droplet. Set per droplet extruder.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 2.0 });
+
+    def = this->add("droplet_settle_time", coFloats);
+    def->label = L("Droplet settle time");
+    def->tooltip = L("Time to wait after moving to a droplet point before the pulse, so vibration can die down. Set per droplet extruder.");
+    def->sidetext = L("s");
+    def->min = 0;
+    def->max = 30;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 0.2 });
+
+    def = this->add("droplet_gcode", coString);
+    def->label = L("Droplet G-code");
+    def->tooltip = L("G-code emitted for every droplet on flavors other than Klipper. Placeholders: [droplet_x], [droplet_y], [droplet_z], "
+                     "[droplet_volume_nl], [droplet_pulse_us], [droplet_count], [droplet_extruder].");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 5;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("sla_material_video_synthesize", coBools);
     def->label = L("Synthesize SLA videos natively");
     def->tooltip = L("When enabled for an SLA extruder, BioSlicer generates the SLA MKV natively during G-code export instead of requiring a pre-existing file.");
@@ -3235,6 +3304,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("sla_material_video_names", coStrings);
     def->label = L("SLA material video names");
     def->tooltip = L("Short aliases used by macros to reference SLA videos, one per extruder. Leave empty to auto-generate names.");
+    def->gui_flags = "serialized";
     def->multiline = true;
     def->full_width = true;
     def->height = 3;
@@ -3244,6 +3314,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("sla_material_video_paths", coStrings);
     def->label = L("SLA material video paths");
     def->tooltip = L("Paths to H.265 MKV files, one per extruder. Files may be embedded into G-code comments or referenced externally.");
+    def->gui_flags = "serialized";
     def->multiline = true;
     def->full_width = true;
     def->height = 3;
@@ -3253,6 +3324,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("channel_type", coStrings);
     def->label = L("Channel type");
     def->tooltip = L("Per-channel type tags used by BioSlicer UI labels (for example: fff, liquid, sla).");
+    def->gui_flags = "serialized";
     def->multiline = true;
     def->full_width = true;
     def->height = 3;
@@ -3262,6 +3334,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("channel_label", coStrings);
     def->label = L("Channel label");
     def->tooltip = L("Per-channel display labels shown in channel selectors. Leave empty to use automatic labels.");
+    def->gui_flags = "serialized";
     def->multiline = true;
     def->full_width = true;
     def->height = 3;
@@ -3783,6 +3856,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionString(""));
 
+    def = this->add("toolchange_omit_tool_command", coBool);
+    def->label = L("Omit the tool change command");
+    def->tooltip = L("When enabled and the Tool change G-code is not empty, no bare tool change command (such as T1) is emitted. "
+                     "The Tool change G-code has to select the tool by itself, for example with a command that names {next_material}. "
+                     "A comment line carrying the extruder number is emitted instead, so that the G-code preview, statistics, "
+                     "cooling and pressure equalizing still know which extruder is active. "
+                     "The same applies to an SLA material: its BIOSLICER_MATERIAL_SWAP command is left out as well. "
+                     "As the printer then does not know the tool numbers, temperatures are only set for the active tool, "
+                     "and two used extruders must not carry the same material.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("top_infill_extrusion_width", coFloatOrPercent);
     def->label = L("Top solid infill");
     def->category = L("Extrusion Width");
@@ -4184,8 +4269,11 @@ void PrintConfigDef::init_extruder_option_keys()
         "travel_slope", "travel_max_lift", "travel_ramping_lift", "travel_lift_before_obstacle",
         "retract_layer_change", "retract_length_toolchange", "retract_restart_extra_toolchange", "extruder_colour",
         "default_filament_profile", "nozzle_high_flow",
-        "channel_type", "sla_material_extruder", "sla_material_exposure_time",
-        "sla_material_delay_before_exposure", "sla_material_delay_after_exposure"
+        "channel_type", "channel_label", "sla_material_extruder", "sla_material_exposure_time",
+        "droplet_standoff", "droplet_settle_time",
+        "sla_material_delay_before_exposure", "sla_material_delay_after_exposure",
+        "sla_material_transition_depth", "sla_material_transition_time",
+        "sla_material_video_names", "sla_material_video_paths"
     };
 
     m_extruder_retract_keys = {
@@ -6448,7 +6536,7 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"end_gcode",               {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
     {"before_layer_gcode",      {"layer_num", "layer_z", "max_layer_z"}},
     {"layer_gcode",             {"layer_num", "layer_z", "max_layer_z"}},
-    {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z", "sla_material_id", "sla_video_name", "sla_video_path", "sla_video_embedded"}},
+    {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z", "sla_material_id", "sla_video_name", "sla_video_path", "sla_video_embedded", "next_material"}},
     {"color_change_gcode",      {"color_change_extruder"}},
     {"pause_print_gcode",       {"color_change_extruder"}},
 };
@@ -6505,6 +6593,13 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     def = this->add("sla_video_embedded", coInt);
     def->label = L("SLA video embedded");
     def->tooltip = L("1 if the SLA video is embedded into G-code comments, 0 if it is externally referenced.");
+
+    def = this->add("next_material", coString);
+    def->label = L("Next material");
+    def->tooltip = L("Name of the material of the next tool, as used in the MATERIALS list of the start G-code "
+                     "(channel type and filament name in upper case, for example FFF_BASIC_PLA). Empty when the tool has neither. "
+                     "The Tool change G-code also runs when an SLA material is selected before its exposure; "
+                     "this is then the name of that material.");
 
     def = this->add("color_change_extruder", coInt);
     // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.

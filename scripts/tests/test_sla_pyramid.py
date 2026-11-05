@@ -10,9 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hybrid_3mf_utils import MeshObject, write_3mf, write_sla_override_ini, run_slice
 import sla_video_runtime
+from scripts.tests._test_support import require_slicer_binary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SLICER_BIN = REPO_ROOT / "build" / "src" / "prusa-slicer"
+SLICER_BIN: Path
 
 
 def make_pyramid(cx, cy, base_size, height):
@@ -58,8 +59,8 @@ def count_white_pixels(png_path, threshold=128):
 class SlaPyramidTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not SLICER_BIN.exists():
-            raise unittest.SkipTest(f"Missing slicer binary: {SLICER_BIN}")
+        global SLICER_BIN
+        SLICER_BIN = require_slicer_binary()
         try:
             from PIL import Image  # noqa: F401
         except ImportError:

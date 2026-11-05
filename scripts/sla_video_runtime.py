@@ -1,435 +1,226 @@
 #!/usr/bin/env python3
-"""Utilities for loading and streaming SLA video payloads for Kalico macros."""
+"""Parse BioSlicer SLA-video metadata and extract embedded payloads.
+
+This module intentionally contains no video playback or display runtime.  It is
+the small, dependency-free boundary needed by extraction tools and automated
+tests for the G-code format emitted by BioSlicer.
+"""
 
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
-import json
-import logging
 import os
 import re
-import subprocess
-from dataclasses import dataclass
+import tempfile
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, TextIO
 
 
-logger = logging.getLogger(__name__)
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_BEGIN_RE = re.compile(
+    r"^;\s*bioslicer_sla_video begin "
+    r"name=(\S+) extruder=(\d+) bytes=(\d+) sha256=([0-9a-fA-F]{64})\s*$"
+)
+_DATA_RE = re.compile(r"^;\s*bioslicer_sla_video ([A-Za-z0-9+/=]+)\s*$")
+_END_RE = re.compile(r"^;\s*bioslicer_sla_video end name=(\S+)\s*$")
+_REF_RE = re.compile(
+    r"^;\s*bioslicer_sla_video ref "
+    r"name=(\S+) extruder=(\d+) (path|path_b64)=(.*)\s*$"
+)
 
 
-def _decode_b64_ascii(value: str) -> str:
-    data = base64.b64decode(value.encode("ascii"), validate=True)
-    return data.decode("utf-8")
+def safe_video_name(name: str) -> str:
+    """Validate and return a video identifier safe for use as one path segment."""
+    if not _SAFE_NAME_RE.fullmatch(name) or name in {".", ".."}:
+        raise RuntimeError(f"Unsafe SLA video name: {name!r}")
+    return name
 
 
-def _safe_name_for_file(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
-
-
-def extract_videos_from_gcode(gcode_path: str, output_dir: str) -> Dict[str, str]:
-    """Extract embedded videos and references from G-code comments.
-
-    Supported comment protocol:
-    - ; bioslicer_sla_video begin name=<name> ...
-    - ; bioslicer_sla_video <base64>
-    - ; bioslicer_sla_video end name=<name>
-    - ; bioslicer_sla_video ref name=<name> path=<utf8 path>
-    """
-    begin_re = re.compile(
-        r"^;\s*bioslicer_sla_video[_ ]begin\s+name=(\S+)\s+extruder=(\d+)\s+bytes=(\d+)(?:\s+sha256=([0-9a-fA-F]{64}))?\s*$"
-    )
-    data_re = re.compile(r"^;\s*bioslicer_sla_video\s+(?:data\s+)?([A-Za-z0-9+/=]+)\s*$")
-    # Old binary format: bare "; <base64>" data lines with no keyword prefix
-    bare_data_re = re.compile(r"^;\s*([A-Za-z0-9+/=]{4,})\s*$")
-    end_re = re.compile(r"^;\s*bioslicer_sla_video\s+end\s+name=(\S+)\s*$")
-    ref_path_re = re.compile(r"^;\s*bioslicer_sla_video\s+ref\s+name=(\S+)\s+extruder=(\d+)\s+path=(.+)$")
-    ref_path_b64_re = re.compile(
-        r"^;\s*bioslicer_sla_video\s+ref\s+name=(\S+)\s+extruder=(\d+)\s+path_b64=(\S+)\s*$"
-    )
-
-    extracted: Dict[str, str] = {}
-    active_name: Optional[str] = None
-    active_expected_bytes = 0
-    active_expected_sha256 = ""
-    active_chunks: list[str] = []
-
-    output_base = Path(output_dir)
-    output_base.mkdir(parents=True, exist_ok=True)
-
-    with open(gcode_path, "r", encoding="utf-8", errors="replace") as handle:
-        for raw_line in handle:
-            line = raw_line.rstrip("\n")
-
-            ref_match = ref_path_re.match(line)
-            if ref_match:
-                name = ref_match.group(1)
-                extracted[name] = ref_match.group(3).strip()
-                continue
-
-            ref_b64_match = ref_path_b64_re.match(line)
-            if ref_b64_match:
-                name = ref_b64_match.group(1)
-                path_b64 = ref_b64_match.group(3)
-                extracted[name] = _decode_b64_ascii(path_b64)
-                continue
-
-            begin_match = begin_re.match(line)
-            if begin_match:
-                if active_name is not None:
-                    raise RuntimeError(
-                        f"Found nested embedded video block while parsing {gcode_path}."
-                    )
-                active_name = begin_match.group(1)
-                active_expected_bytes = int(begin_match.group(3))
-                active_expected_sha256 = (begin_match.group(4) or "").lower()
-                active_chunks = []
-                continue
-
-            if active_name is None:
-                continue
-
-            data_match = data_re.match(line) or bare_data_re.match(line)
-            if data_match:
-                active_chunks.append(data_match.group(1))
-                continue
-
-            end_match = end_re.match(line)
-            if end_match:
-                end_name = end_match.group(1)
-                if end_name != active_name:
-                    raise RuntimeError(
-                        f"Mismatched embedded video terminator: expected {active_name}, got {end_name}."
-                    )
-
-                payload = base64.b64decode("".join(active_chunks).encode("ascii"), validate=True)
-                if len(payload) != active_expected_bytes:
-                    raise RuntimeError(
-                        f"Embedded payload length mismatch for {active_name}: "
-                        f"expected {active_expected_bytes}, got {len(payload)}."
-                    )
-
-                if active_expected_sha256:
-                    digest = hashlib.sha256(payload).hexdigest()
-                    if digest != active_expected_sha256:
-                        raise RuntimeError(
-                            f"Embedded payload digest mismatch for {active_name}: "
-                            f"expected {active_expected_sha256}, got {digest}."
-                        )
-
-                output_path = output_base / f"{_safe_name_for_file(active_name)}.mkv"
-                with open(output_path, "wb") as video_handle:
-                    video_handle.write(payload)
-
-                extracted[active_name] = str(output_path)
-                active_name = None
-                active_expected_bytes = 0
-                active_expected_sha256 = ""
-                active_chunks = []
-
-    if active_name is not None:
-        raise RuntimeError(
-            f"Unterminated embedded video block for {active_name} in {gcode_path}."
-        )
-
-    return extracted
-
-
-@dataclass
-class VideoMetadata:
-    name: str
-    path: str
-    width: int
-    height: int
-    fps: float
-    frame_count: int
-    codec: str
-
-
-class FFmpegVideoStream:
-    """Persistent ffmpeg raw RGBA stream with frame-index state."""
-
+class _EmbeddedPayload:
     def __init__(
         self,
+        output_dir: Path,
         name: str,
-        path: str,
-        hwaccel: str = "auto",
-        hw_decoder: Optional[str] = None,
+        expected_bytes: int,
+        expected_sha256: str,
+        max_embedded_bytes: Optional[int],
     ) -> None:
-        self.name = name
-        self.path = os.path.abspath(os.path.expanduser(path))
-        self.hwaccel = hwaccel
-        self.hw_decoder = hw_decoder
-        self.process: Optional[subprocess.Popen[bytes]] = None
-        self.current_frame = 0
-
-        self.metadata = self._probe_video(self.path)
-        self.frame_size_bytes = self.metadata.width * self.metadata.height * 4
-
-    def _probe_video(self, path: str) -> VideoMetadata:
-        cmd = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,avg_frame_rate,nb_frames,codec_name:format=duration",
-            "-of",
-            "json",
-            path,
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffprobe failed for {path}: {proc.stderr.strip()}")
-
-        payload = json.loads(proc.stdout)
-        streams = payload.get("streams", [])
-        if not streams:
-            raise RuntimeError(f"No video stream found in {path}")
-
-        stream = streams[0]
-        width = int(stream.get("width", 0))
-        height = int(stream.get("height", 0))
-        if width <= 0 or height <= 0:
-            raise RuntimeError(f"Invalid video dimensions in {path}: {width}x{height}")
-
-        fps = 0.0
-        avg_frame_rate = stream.get("avg_frame_rate", "0/1")
-        try:
-            num_str, den_str = avg_frame_rate.split("/", 1)
-            num = float(num_str)
-            den = float(den_str)
-            if den > 0:
-                fps = num / den
-        except Exception:
-            fps = 0.0
-
-        frame_count = 0
-        nb_frames = stream.get("nb_frames")
-        if nb_frames is not None and str(nb_frames).isdigit():
-            frame_count = int(nb_frames)
-        else:
-            duration_s = 0.0
-            fmt = payload.get("format", {})
-            try:
-                duration_s = float(fmt.get("duration", 0.0))
-            except Exception:
-                duration_s = 0.0
-            if fps > 0 and duration_s > 0:
-                frame_count = int(round(duration_s * fps))
-
-        return VideoMetadata(
-            name=self.name,
-            path=path,
-            width=width,
-            height=height,
-            fps=fps,
-            frame_count=frame_count,
-            codec=str(stream.get("codec_name", "unknown")),
-        )
-
-    def close(self) -> None:
-        if self.process is None:
-            return
-
-        proc = self.process
-        self.process = None
-
-        try:
-            proc.terminate()
-            proc.wait(timeout=1.0)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-    def _spawn(self, start_frame: int) -> None:
-        self.close()
-
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-        ]
-
-        if self.hwaccel:
-            cmd.extend(["-hwaccel", self.hwaccel])
-        if self.hw_decoder:
-            cmd.extend(["-c:v", self.hw_decoder])
-
-        cmd.extend(["-i", self.path])
-
-        if start_frame > 0:
-            cmd.extend(["-vf", f"select='gte(n,{start_frame})'"])
-
-        cmd.extend([
-            "-an",
-            "-sn",
-            "-dn",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-vsync",
-            "0",
-            "-",
-        ])
-
-        logger.info("Starting ffmpeg stream for %s at frame %d", self.name, start_frame)
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.current_frame = start_frame
-
-    def _read_exact_frame(self) -> Optional[bytes]:
-        if self.process is None or self.process.stdout is None:
-            return None
-
-        out = bytearray()
-        while len(out) < self.frame_size_bytes:
-            chunk = self.process.stdout.read(self.frame_size_bytes - len(out))
-            if not chunk:
-                break
-            out.extend(chunk)
-
-        if len(out) == 0:
-            return None
-
-        if len(out) != self.frame_size_bytes:
-            stderr_tail = ""
-            if self.process.stderr is not None:
-                try:
-                    stderr_tail = self.process.stderr.read().decode("utf-8", errors="replace")
-                except Exception:
-                    stderr_tail = ""
+        self.name = safe_video_name(name)
+        self.expected_bytes = expected_bytes
+        self.expected_sha256 = expected_sha256.lower()
+        if max_embedded_bytes is not None and expected_bytes > max_embedded_bytes:
             raise RuntimeError(
-                f"Incomplete frame read for {self.name}: expected {self.frame_size_bytes}, "
-                f"got {len(out)}. ffmpeg stderr: {stderr_tail.strip()}"
+                f"Embedded SLA video {name!r} declares {expected_bytes} bytes, "
+                f"exceeding the configured limit of {max_embedded_bytes}"
             )
 
-        return bytes(out)
-
-    def get_frame(self, frame_index: int) -> bytes:
-        if frame_index < 0:
-            raise ValueError("frame index must be >= 0")
-
-        if self.process is None or frame_index < self.current_frame:
-            self._spawn(frame_index)
-
-        while self.current_frame < frame_index:
-            skipped = self._read_exact_frame()
-            if skipped is None:
-                raise IndexError(
-                    f"Requested frame {frame_index}, but stream ended at frame {self.current_frame}."
-                )
-            self.current_frame += 1
-
-        frame = self._read_exact_frame()
-        if frame is None:
-            raise IndexError(
-                f"Requested frame {frame_index}, but stream ended at frame {self.current_frame}."
-            )
-        self.current_frame += 1
-        return frame
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.metadata.name,
-            "path": self.metadata.path,
-            "width": self.metadata.width,
-            "height": self.metadata.height,
-            "fps": self.metadata.fps,
-            "frame_count": self.metadata.frame_count,
-            "codec": self.metadata.codec,
-            "current_frame": self.current_frame,
-            "hwaccel": self.hwaccel,
-            "hw_decoder": self.hw_decoder,
-        }
-
-
-class VideoRegistry:
-    """Named video collection with persistent ffmpeg decode state."""
-
-    def __init__(
-        self,
-        cache_dir: str,
-        hwaccel: str = "auto",
-        hw_decoder: Optional[str] = None,
-    ) -> None:
-        self.cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
-        self.hwaccel = hwaccel
-        self.hw_decoder = hw_decoder
-        self.videos: Dict[str, FFmpegVideoStream] = {}
-
-        Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
-
-    def close(self) -> None:
-        for stream in self.videos.values():
-            stream.close()
-        self.videos.clear()
-
-    def load_video(
-        self,
-        name: str,
-        path: str,
-        hwaccel: Optional[str] = None,
-        hw_decoder: Optional[str] = None,
-    ) -> dict:
-        if not name:
-            raise ValueError("name is required")
-        if not path:
-            raise ValueError("path is required")
-
-        resolved_path = os.path.abspath(os.path.expanduser(path))
-        if not os.path.isfile(resolved_path):
-            raise FileNotFoundError(f"Video file not found: {resolved_path}")
-
-        if name in self.videos:
-            self.videos[name].close()
-
-        stream = FFmpegVideoStream(
-            name=name,
-            path=resolved_path,
-            hwaccel=hwaccel or self.hwaccel,
-            hw_decoder=hw_decoder or self.hw_decoder,
+        temporary = tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix=f".{self.name}.",
+            suffix=".part",
+            dir=output_dir,
+            delete=False,
         )
-        self.videos[name] = stream
-        return stream.to_dict()
+        self.stream = temporary
+        self.temporary_path = Path(temporary.name)
+        self.hasher = hashlib.sha256()
+        self.bytes_written = 0
+        self.base64_carry = ""
 
-    def unload_video(self, name: str) -> bool:
-        stream = self.videos.pop(name, None)
-        if stream is None:
-            return False
-        stream.close()
-        return True
+    def append_base64(self, encoded: str) -> None:
+        self.base64_carry += encoded
+        decode_length = len(self.base64_carry) - (len(self.base64_carry) % 4)
+        if decode_length == 0:
+            return
+        self._decode_and_write(self.base64_carry[:decode_length])
+        self.base64_carry = self.base64_carry[decode_length:]
 
-    def list_videos(self) -> dict:
-        return {name: stream.to_dict() for name, stream in self.videos.items()}
+    def _decode_and_write(self, encoded: str) -> None:
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except binascii.Error as exc:
+            raise RuntimeError(
+                f"Invalid base64 in embedded SLA video {self.name!r}"
+            ) from exc
+        self.bytes_written += len(decoded)
+        if self.bytes_written > self.expected_bytes:
+            raise RuntimeError(
+                f"Embedded SLA video {self.name!r} exceeds its declared length"
+            )
+        self.stream.write(decoded)
+        self.hasher.update(decoded)
 
-    def get_frame(self, name: str, frame_index: int) -> Tuple[int, int, bytes]:
-        if name not in self.videos:
-            raise KeyError(f"Video not loaded: {name}")
+    def finish(self, output_dir: Path) -> Path:
+        if self.base64_carry:
+            if len(self.base64_carry) % 4:
+                raise RuntimeError(
+                    f"Truncated base64 in embedded SLA video {self.name!r}"
+                )
+            self._decode_and_write(self.base64_carry)
+            self.base64_carry = ""
 
-        stream = self.videos[name]
-        frame = stream.get_frame(frame_index)
-        return stream.metadata.width, stream.metadata.height, frame
+        self.stream.flush()
+        os.fsync(self.stream.fileno())
+        self.stream.close()
 
-    def load_videos_from_gcode(self, gcode_path: str) -> dict:
-        if not gcode_path:
-            raise ValueError("gcode_path is required")
+        if self.bytes_written != self.expected_bytes:
+            raise RuntimeError(
+                f"Embedded SLA video {self.name!r} has {self.bytes_written} bytes; "
+                f"expected {self.expected_bytes}"
+            )
+        actual_sha256 = self.hasher.hexdigest()
+        if actual_sha256 != self.expected_sha256:
+            raise RuntimeError(
+                f"Embedded SLA video {self.name!r} has SHA-256 {actual_sha256}; "
+                f"expected {self.expected_sha256}"
+            )
 
-        resolved = os.path.abspath(os.path.expanduser(gcode_path))
-        if not os.path.isfile(resolved):
-            raise FileNotFoundError(f"G-code file not found: {resolved}")
+        destination = output_dir / f"{self.name}-{actual_sha256[:12]}.mkv"
+        os.replace(self.temporary_path, destination)
+        return destination
 
-        extracted = extract_videos_from_gcode(resolved, self.cache_dir)
-        loaded = {}
-        for name, path in extracted.items():
-            loaded[name] = self.load_video(name, path)
-        return loaded
+    def discard(self) -> None:
+        try:
+            self.stream.close()
+        finally:
+            self.temporary_path.unlink(missing_ok=True)
+
+
+def _decode_reference_path(kind: str, value: str, name: str) -> str:
+    if kind == "path":
+        if "\x00" in value:
+            raise RuntimeError(f"NUL byte in SLA video reference {name!r}")
+        return value
+    try:
+        raw = base64.b64decode(value, validate=True)
+        path = raw.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise RuntimeError(
+            f"Invalid path_b64 in SLA video reference {name!r}"
+        ) from exc
+    if "\x00" in path:
+        raise RuntimeError(f"NUL byte in SLA video reference {name!r}")
+    return path
+
+
+def extract_videos_from_gcode(
+    gcode_path: str,
+    output_dir: str,
+    *,
+    max_embedded_bytes: Optional[int] = None,
+) -> Dict[str, str]:
+    """Extract embedded videos and return all video names mapped to paths.
+
+    Embedded data is decoded incrementally, verified, fsynced, and atomically
+    published. References support both the legacy plain ``path=`` form and the
+    injection-safe ``path_b64=`` form.
+    """
+    source = Path(gcode_path)
+    destination_dir = Path(output_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    result: Dict[str, str] = {}
+    current: Optional[_EmbeddedPayload] = None
+
+    try:
+        with source.open("r", encoding="utf-8", errors="strict") as gcode:
+            for line_number, line in enumerate(gcode, 1):
+                line = line.rstrip("\r\n")
+
+                if current is not None:
+                    end_match = _END_RE.match(line)
+                    if end_match:
+                        end_name = safe_video_name(end_match.group(1))
+                        if end_name != current.name:
+                            raise RuntimeError(
+                                f"SLA video end name {end_name!r} does not match "
+                                f"{current.name!r} at line {line_number}"
+                            )
+                        result[current.name] = str(current.finish(destination_dir))
+                        current = None
+                        continue
+
+                    data_match = _DATA_RE.match(line)
+                    if not data_match:
+                        raise RuntimeError(
+                            f"Unexpected line inside embedded SLA video "
+                            f"{current.name!r} at line {line_number}"
+                        )
+                    current.append_base64(data_match.group(1))
+                    continue
+
+                begin_match = _BEGIN_RE.match(line)
+                if begin_match:
+                    name = safe_video_name(begin_match.group(1))
+                    if name in result:
+                        raise RuntimeError(f"Duplicate SLA video name: {name!r}")
+                    current = _EmbeddedPayload(
+                        destination_dir,
+                        name,
+                        int(begin_match.group(3)),
+                        begin_match.group(4),
+                        max_embedded_bytes,
+                    )
+                    continue
+
+                reference_match = _REF_RE.match(line)
+                if reference_match:
+                    name = safe_video_name(reference_match.group(1))
+                    if name in result:
+                        raise RuntimeError(f"Duplicate SLA video name: {name!r}")
+                    result[name] = _decode_reference_path(
+                        reference_match.group(3),
+                        reference_match.group(4),
+                        name,
+                    )
+
+        if current is not None:
+            raise RuntimeError(f"Unterminated embedded SLA video {current.name!r}")
+    except Exception:
+        if current is not None:
+            current.discard()
+        raise
+
+    return result

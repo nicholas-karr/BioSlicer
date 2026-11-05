@@ -6,6 +6,7 @@
 #include <boost/dll/runtime_symbol_info.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include <boost/log/trivial.hpp>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Platform.hpp"
@@ -251,6 +252,8 @@ static bool setup_common()
                 boost::nowide::cerr << "Invalid SLIC3R_LOGLEVEL environment variable: " << loglevel << std::endl;
         }
     }
+
+    BOOST_LOG_TRIVIAL(info) << SLIC3R_BUILD_ID << " built " << __DATE__ << " " << __TIME__;
 
     // Detect the operating system flavor after SLIC3R_LOGLEVEL is set.
     detect_platform();

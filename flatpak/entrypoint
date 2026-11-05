@@ -60,6 +60,30 @@ for _bs_inst in "/run/user/$(id -u)/.flatpak"/*/; do
 done
 unset _bs_inst _bs_mnt _bs_pid_ns
 
+# Keep installed vendor profiles in step with the ones shipped in this build. The app only
+# offers a bundled profile update through a dialog (and not at all with preset_update = 0),
+# so after a flatpak update the profiles in the config directory could stay on an old version.
+# Only vendors the user already has installed are refreshed, and only when the bundled
+# config_version is newer. User presets are not touched.
+_bs_rsrc=/app/share/PrusaSlicer/profiles
+_bs_vendor="${XDG_CONFIG_HOME:-$HOME/.config}/BioSlicer/vendor"
+if [ -d "$_bs_vendor" ] && [ -d "$_bs_rsrc" ]; then
+    for _bs_installed in "$_bs_vendor"/*.ini; do
+        [ -f "$_bs_installed" ] || continue
+        _bs_name=$(basename "$_bs_installed")
+        _bs_bundled="$_bs_rsrc/$_bs_name"
+        [ -f "$_bs_bundled" ] || continue
+        _bs_new=$(sed -n 's/^config_version[[:space:]]*=[[:space:]]*//p' "$_bs_bundled" | head -n 1)
+        _bs_old=$(sed -n 's/^config_version[[:space:]]*=[[:space:]]*//p' "$_bs_installed" | head -n 1)
+        [ -n "$_bs_new" ] || continue
+        if [ "$_bs_new" != "$_bs_old" ] && [ "$(printf '%s\n%s\n' "$_bs_old" "$_bs_new" | sort -V | tail -n 1)" = "$_bs_new" ]; then
+            cp "$_bs_bundled" "$_bs_installed" \
+                && echo "Message: $(date +%T): INFO: updated vendor profile $_bs_name ${_bs_old:-none} -> $_bs_new"
+        fi
+    done
+fi
+unset _bs_rsrc _bs_vendor _bs_installed _bs_name _bs_bundled _bs_new _bs_old
+
 /app/bin/set-dark-theme-variant.py &
 /app/bin/prusa-slicer "$@"
 _rc=$?

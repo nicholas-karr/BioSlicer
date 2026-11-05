@@ -63,7 +63,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     "_GP_FIRST_LINE_M73_PLACEHOLDER",
     "_GP_LAST_LINE_M73_PLACEHOLDER",
     "_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER",
-    "SLA_SHOW_FRAME"
+    "SLA_SHOW_FRAME",
+    "TOOL_CHANGE:"
 };
 
 const float GCodeProcessor::Wipe_Width = 0.05f;
@@ -2056,6 +2057,49 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
                     machine.time += total_s;
             }
         }
+        return;
+    }
+
+    // bioslicer_droplet — one droplet point. Format:
+    //   "bioslicer_droplet extruder=N x=X y=Y z=Z volume_nl=V count=C pulse_us=P frequency=F settle_ms=S"
+    // The printer moves to the point by itself (BIOSLICER_DROPLET), so the move is simulated here, followed by the
+    // settle time and the drops. The point is stored as a step of the moves slider like an SLA frame.
+    if (boost::starts_with(comment, "bioslicer_droplet ")) {
+        auto value = [&comment](std::string_view key) -> std::optional<double> {
+            const auto p = comment.find(key);
+            if (p == std::string_view::npos)
+                return std::nullopt;
+            const auto start = p + key.size();
+            const auto end   = comment.find(' ', start);
+            double out = 0.;
+            if (!parse_number(comment.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start), out))
+                return std::nullopt;
+            return out;
+        };
+        const std::optional<double> x = value(" x="), y = value(" y="), z = value(" z=");
+        if (x && y && z)
+            process_G1({ *x, *y, *z, std::nullopt }, 6000.0);
+        const double count     = value(" count=").value_or(1.);
+        const double pulse_s   = value(" pulse_us=").value_or(0.) * 1e-6;
+        const double frequency = value(" frequency=").value_or(0.);
+        const double settle_s  = value(" settle_ms=").value_or(0.) * 1e-3;
+        const double drops_s   = count * pulse_s + (count > 1. && frequency > 0. ? (count - 1.) / frequency : 0.);
+        const float  total_s   = float(settle_s + drops_s);
+        simulate_st_synchronize();
+        if (total_s > 0.f)
+            for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
+                TimeMachine& machine = m_time_processor.machines[i];
+                if (machine.enabled)
+                    machine.time += total_s;
+            }
+        store_move_vertex(EMoveType::Custom_GCode);
+        return;
+    }
+
+    // tool change tag: a tool change whose G-code has no T command (toolchange_omit_tool_command)
+    if (boost::starts_with(comment, reserved_tag(ETags::Tool_Change))) {
+        const std::string command = "T" + std::string(comment.substr(reserved_tag(ETags::Tool_Change).size()));
+        process_T(command);
         return;
     }
 

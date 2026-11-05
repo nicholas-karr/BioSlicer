@@ -188,7 +188,8 @@ namespace Slic3r {
             First_Line_M73_Placeholder,
             Last_Line_M73_Placeholder,
             Estimated_Printing_Time_Placeholder,
-            SLA_Frame
+            SLA_Frame,
+            Tool_Change
         };
 
         static const std::string& reserved_tag(ETags tag) { return Reserved_Tags[static_cast<unsigned char>(tag)]; }

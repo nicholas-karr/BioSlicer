@@ -21,6 +21,7 @@ from hybrid_3mf_utils import (
     objects_from_grouped,
     run_slice,
     write_3mf,
+    single_sla_channel,
     write_sla_override_ini,
 )
 
@@ -135,12 +136,11 @@ def main() -> int:
     write_3mf(path_3mf, objects, model_name=args.name)
     write_sla_override_ini(
         path_override_ini,
-        sla_extruder=4,
+        **single_sla_channel(4, 4, "resin_moire_markers"),
         synth_width=synth_width,
         synth_height=synth_height,
         synth_fps=synth_fps,
         synth_lossless=synth_lossless,
-        video_name="resin_moire_markers",
     )
 
     run_slice(
@@ -149,7 +149,7 @@ def main() -> int:
         path_gcode,
         path_override_ini,
         extruder_count=4,
-        layer_height=2.0,
+        layer_height=1.0,  # two layers per 2 mm voxel; must stay <= the 1.2 mm nozzle
         start_note="Material map: T0/T1/T2 FFF moire voxels, T3 SLA marker lattice",
     )
 

@@ -26,6 +26,7 @@
 
 #include "../GCode.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Extruder.hpp"
 #include "libslic3r/GCode/GCodeWriter.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
@@ -43,6 +44,18 @@
 namespace Slic3r {
 
 const constexpr float SEGMENT_SPLIT_EPSILON = 10. * GCodeFormatter::XYZ_EPSILON;
+
+// Offset of the extruder number in a tool change line, or npos if the line is not one. A tool change is either
+// the flavor's command (T<n>) or the comment tag emitted when toolchange_omit_tool_command is set.
+static size_t toolchange_number_pos(std::string_view line, const std::string &toolchange_prefix)
+{
+    static const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Tool_Change);
+    if (boost::starts_with(line, toolchange_prefix))
+        return toolchange_prefix.size();
+    if (boost::starts_with(line, tag))
+        return tag.size();
+    return std::string_view::npos;
+}
 
 CoolingBuffer::CoolingBuffer(GCodeGenerator &gcodegen) : m_config(gcodegen.config()), m_toolchange_prefix(gcodegen.writer().toolchange_prefix()), m_current_extruder(0)
 {
@@ -814,9 +827,9 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 }
             }
             active_speed_modifier = size_t(-1);
-        } else if (boost::starts_with(sline, m_toolchange_prefix)) {
+        } else if (const size_t number_pos = toolchange_number_pos(sline, m_toolchange_prefix); number_pos != std::string_view::npos) {
             unsigned int new_extruder = 0;
-            auto res = std::from_chars(sline.data() + m_toolchange_prefix.size(), sline.data() + sline.size(), new_extruder);
+            auto res = std::from_chars(sline.data() + number_pos, sline.data() + sline.size(), new_extruder);
             if (res.ec != std::errc::invalid_argument) {
                 // Only change extruder in case the number is meaningful. User could provide an out-of-range index through custom gcodes - those shall be ignored.
                 if (new_extruder < map_extruder_to_per_extruder_adjustment.size()) {
@@ -1264,7 +1277,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
 
         if (line->type & CoolingLine::TYPE_SET_TOOL) {
             unsigned int new_extruder = 0;
-            auto res = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
+            auto res = std::from_chars(line_start + toolchange_number_pos(std::string_view(line_start, line_end - line_start), m_toolchange_prefix), line_end, new_extruder);
             if (res.ec != std::errc::invalid_argument && new_extruder != m_current_extruder) {
                 m_current_extruder = new_extruder;
                 change_extruder_set_fan();

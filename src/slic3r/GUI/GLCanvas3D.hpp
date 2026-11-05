@@ -21,6 +21,7 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GCodeViewer.hpp"
 #include "Camera.hpp"
+#include "DropletMarkers.hpp"
 #include "SceneRaycaster.hpp"
 #include "GUI_Utils.hpp"
 
@@ -371,13 +372,12 @@ class GLCanvas3D
 
     struct FffSlaCap
     {
-        double z { DBL_MAX };
+        bool built { false };
         std::vector<GLModel> models;
         std::vector<GLModel> outlines;
         // (layer_z, ext_id) key for each model/outline entry, enabling per-step filtering.
         std::vector<std::pair<double, unsigned int>> step_keys;
-        bool matches(double z) const { return this->z == z; }
-        void reset() { z = DBL_MAX; models.clear(); outlines.clear(); step_keys.clear(); }
+        void reset() { built = false; models.clear(); outlines.clear(); step_keys.clear(); }
     };
 
     enum class EWarning {
@@ -688,6 +688,9 @@ private:
     GLModel m_target_validation_box;
 #endif // ENABLE_SHOW_CAMERA_TARGET
     GLModel m_background;
+    DropletMarkers m_droplet_markers;
+    // The droplet the droplets gizmo has selected, shown in a different colour.
+    std::optional<ResolvedDroplet> m_selected_droplet;
 
 public:
     GLCanvas3D(wxGLCanvas* canvas, Bed3D& bed);
@@ -764,6 +767,9 @@ public:
     void set_process(BackgroundSlicingProcess* process) { m_process = process; }
     void set_model(Model* model);
     const Model* get_model() const { return m_model; }
+    const DropletMarkers& droplet_markers() const { return m_droplet_markers; }
+    void render_droplet_ghost(const Vec3d &position, double volume_nl) { m_droplet_markers.render_ghost(position, volume_nl); }
+    void set_selected_droplet(const std::optional<ResolvedDroplet> &droplet) { m_selected_droplet = droplet; set_as_dirty(); }
 
     const arr2::ArrangeSettingsView * get_arrange_settings_view() const { return &m_arrange_settings_dialog; }
 
@@ -791,7 +797,6 @@ public:
         if (id < 2) {
             m_clipping_planes[id] = plane;
             m_sla_caps[id].reset();
-            m_fff_sla_cap.reset();
         }
     }
     void reset_clipping_planes_cache() { m_sla_caps[0].triangles.clear(); m_sla_caps[1].triangles.clear(); m_fff_sla_cap.reset(); m_fff_preview_high_z = -DBL_MAX; m_fff_sla_step_z = DBL_MAX; m_fff_sla_step_ext = UINT_MAX; }
@@ -859,10 +864,7 @@ public:
     void reset_gcode_layers_times_cache() { m_gcode_layers_times_cache.clear(); }
     void set_volumes_z_range(const std::array<double, 2>& range) {
         m_volumes.set_range(range[0] - 1e-6, range[1] + 1e-6);
-        if (m_fff_preview_high_z != range[1]) {
-            m_fff_preview_high_z = range[1];
-            m_fff_sla_cap.reset();
-        }
+        m_fff_preview_high_z = range[1];
     }
     void set_toolpaths_z_range(const std::array<unsigned int, 2>& range);
     size_t get_gcode_extruders_count() { return m_gcode_viewer.get_extruders_count(); }

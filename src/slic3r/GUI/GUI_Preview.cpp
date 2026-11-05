@@ -40,6 +40,7 @@
 // this include must follow the wxWidgets ones or it won't compile on Windows -> see http://trac.wxwidgets.org/ticket/2421
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
+#include "libslic3r/SLAMaterial.hpp"
 #include "NotificationManager.hpp"
 #include "libslic3r/MultipleBeds.hpp"
 
@@ -902,25 +903,25 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
     // m_sla_steps_by_pos maps those new slider positions to the info needed to drive
     // the canvas renderer and the gcode sequential view.
     const Print* fff_print = m_process->fff_print();
-    if (fff_print != nullptr && !fff_print->config().sla_material_extruder.values.empty()) {
-        const auto& sla_flags = fff_print->config().sla_material_extruder.values;
-        if (std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b){ return b; })) {
-            // Build sorted, deduped SLA extruder list per layer Z from the print objects.
-            std::map<double, std::vector<unsigned int>> sla_exts_by_z;
-            for (const PrintObject* obj : fff_print->objects()) {
-                for (const Layer* layer : obj->layers()) {
-                    auto& exts = sla_exts_by_z[layer->print_z];
-                    for (const LayerRegion* lr : layer->regions()) {
-                        const unsigned int ext = lr->region().extruder(frPerimeter);
-                        if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1])
-                            continue;
-                        if (!lr->slices().empty())
-                            exts.push_back(ext);
-                    }
-                    std::sort(exts.begin(), exts.end());
-                    exts.erase(std::unique(exts.begin(), exts.end()), exts.end());
+    if (fff_print != nullptr && print_has_sla_regions(*fff_print)) {
+        // Build sorted, deduped SLA extruder list per layer Z from the print objects.
+        std::map<double, std::vector<unsigned int>> sla_exts_by_z;
+        for (const PrintObject* obj : fff_print->objects()) {
+            for (const Layer* layer : obj->layers()) {
+                auto& exts = sla_exts_by_z[layer->print_z];
+                for (const LayerRegion* lr : layer->regions()) {
+                    const RegionTechnologyAssignment assignment =
+                        classify_region_technology(fff_print->config(), lr->region());
+                    if (assignment.technology != RegionTechnology::SLA)
+                        continue;
+                    const unsigned int ext = assignment.sla_extruder;
+                    if (!lr->slices().empty())
+                        exts.push_back(ext);
                 }
+                std::sort(exts.begin(), exts.end());
+                exts.erase(std::unique(exts.begin(), exts.end()), exts.end());
             }
+        }
 
             // Two-pass rebuild: copy FFF positions in order; after each layer's last FFF
             // position, append SLA sentinel entries and record their info.
@@ -975,7 +976,6 @@ void Preview::update_moves_slider(std::optional<int> visible_range_min, std::opt
             alternate_values = std::move(new_alt);
             if (visible_range_min_id.has_value()) visible_range_min_id = new_span_min;
             if (visible_range_max_id.has_value()) visible_range_max_id = new_span_max;
-        }
     }
 
     const int span_min_id = visible_range_min_id.has_value() ? (int)*visible_range_min_id : 0;
@@ -1097,8 +1097,7 @@ void Preview::load_print_as_fff(bool keep_z_range)
             // Pregcode preview: if any SLA channels are configured, set up the moves
             // slider with one sentinel step per (layer_z, SLA extruder) pair so the
             // user can scrub through SLA exposure geometry before G-code is generated.
-            const auto& sla_flags = print->config().sla_material_extruder.values;
-            const bool has_sla = std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b){ return b; });
+            const bool has_sla = print_has_sla_regions(*print);
             if (has_sla && !zs.empty()) {
                 m_sla_steps_by_pos.clear();
                 std::map<double, std::vector<unsigned int>> sla_exts_by_z;
@@ -1106,10 +1105,12 @@ void Preview::load_print_as_fff(bool keep_z_range)
                     for (const Layer* layer : obj->layers()) {
                         auto& exts = sla_exts_by_z[layer->print_z];
                         for (const LayerRegion* lr : layer->regions()) {
-                            const unsigned int ext = lr->region().extruder(frPerimeter);
-                            if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1] || lr->slices().empty())
+                            const RegionTechnologyAssignment assignment =
+                                classify_region_technology(print->config(), lr->region());
+                            if (assignment.technology != RegionTechnology::SLA
+                                || lr->slices().empty())
                                 continue;
-                            exts.push_back(ext);
+                            exts.push_back(assignment.sla_extruder);
                         }
                         std::sort(exts.begin(), exts.end());
                         exts.erase(std::unique(exts.begin(), exts.end()), exts.end());
@@ -1173,8 +1174,7 @@ void Preview::load_print_as_fff(bool keep_z_range)
         // appear twice, causing the gcode viewer to receive doubled position indices
         // and show one extra FFF layer relative to the SLA cap.
         if (print->is_step_done(posSlice)) {
-            const auto& sla_flags = print->config().sla_material_extruder.values;
-            if (std::any_of(sla_flags.begin(), sla_flags.end(), [](bool b) { return b; })) {
+            if (print_has_sla_regions(*print)) {
                 // zs is sorted at this point.
                 for (const PrintObject* obj : print->objects()) {
                     for (const Layer* layer : obj->layers()) {

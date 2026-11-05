@@ -5,52 +5,8 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 import scripts.sla_video_runtime as runtime
-
-
-class DummyStream:
-    instances = []
-
-    def __init__(self, name, path, hwaccel="auto", hw_decoder=None):
-        self.name = name
-        self.path = path
-        self.hwaccel = hwaccel
-        self.hw_decoder = hw_decoder
-        self.closed = False
-        self.current_frame = 0
-        self.metadata = runtime.VideoMetadata(
-            name=name,
-            path=path,
-            width=64,
-            height=32,
-            fps=24.0,
-            frame_count=100,
-            codec="hevc",
-        )
-        DummyStream.instances.append(self)
-
-    def close(self):
-        self.closed = True
-
-    def get_frame(self, frame_index):
-        self.current_frame = frame_index + 1
-        return b"\x00" * (self.metadata.width * self.metadata.height * 4)
-
-    def to_dict(self):
-        return {
-            "name": self.metadata.name,
-            "path": self.metadata.path,
-            "width": self.metadata.width,
-            "height": self.metadata.height,
-            "fps": self.metadata.fps,
-            "frame_count": self.metadata.frame_count,
-            "codec": self.metadata.codec,
-            "current_frame": self.current_frame,
-            "hwaccel": self.hwaccel,
-            "hw_decoder": self.hw_decoder,
-        }
 
 
 class ExtractVideosFromGcodeTests(unittest.TestCase):
@@ -58,7 +14,8 @@ class ExtractVideosFromGcodeTests(unittest.TestCase):
         payload = b"fake_mkv_payload"
         payload_sha256 = hashlib.sha256(payload).hexdigest()
         payload_b64 = base64.b64encode(payload).decode("ascii")
-        ref_path = "/mnt/videos/external.mkv"
+        ref_path = "/mnt/videos/external file\nwith-newline.mkv"
+        ref_path_b64 = base64.b64encode(ref_path.encode()).decode("ascii")
 
         gcode = "\n".join(
             [
@@ -66,7 +23,7 @@ class ExtractVideosFromGcodeTests(unittest.TestCase):
                 f"; bioslicer_sla_video begin name=resin_emb extruder=1 bytes={len(payload)} sha256={payload_sha256}",
                 f"; bioslicer_sla_video {payload_b64}",
                 "; bioslicer_sla_video end name=resin_emb",
-                f"; bioslicer_sla_video ref name=resin_ref extruder=2 path={ref_path}",
+                f"; bioslicer_sla_video ref name=resin_ref extruder=2 path_b64={ref_path_b64}",
             ]
         )
 
@@ -81,6 +38,7 @@ class ExtractVideosFromGcodeTests(unittest.TestCase):
             emb_path = Path(extracted["resin_emb"])
             self.assertTrue(emb_path.exists())
             self.assertEqual(emb_path.read_bytes(), payload)
+            self.assertIn(payload_sha256[:12], emb_path.name)
 
     def test_raises_on_length_mismatch(self):
         payload = b"fake_mkv_payload"
@@ -104,56 +62,56 @@ class ExtractVideosFromGcodeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 runtime.extract_videos_from_gcode(str(gcode_path), str(out_dir))
 
+    def test_rejects_path_traversal_and_cleans_partial_file(self):
+        payload = base64.b64encode(b"payload").decode("ascii")
+        gcode = "\n".join(
+            [
+                "; bioslicer_sla_video begin name=../escape extruder=1 "
+                "bytes=7 sha256=239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+                f"; bioslicer_sla_video {payload}",
+                "; bioslicer_sla_video end name=../escape",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "job.gcode"
+            output = Path(td) / "output"
+            source.write_text(gcode, encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                runtime.extract_videos_from_gcode(str(source), str(output))
+            self.assertFalse((Path(td) / "escape.mkv").exists())
 
-class VideoRegistryTests(unittest.TestCase):
-    def setUp(self):
-        DummyStream.instances = []
+    def test_rejects_duplicate_names(self):
+        gcode = "\n".join(
+            [
+                "; bioslicer_sla_video ref name=resin extruder=1 path=/one.mkv",
+                "; bioslicer_sla_video ref name=resin extruder=2 path=/two.mkv",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "job.gcode"
+            source.write_text(gcode, encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+                runtime.extract_videos_from_gcode(str(source), str(Path(td) / "out"))
 
-    def test_load_list_get_and_unload_video(self):
-        with tempfile.TemporaryDirectory() as td, \
-            mock.patch.object(runtime, "FFmpegVideoStream", DummyStream), \
-            mock.patch.object(runtime.os.path, "isfile", return_value=True):
-            registry = runtime.VideoRegistry(cache_dir=td, hwaccel="cuda", hw_decoder="hevc_cuvid")
-
-            meta = registry.load_video("resin_a", "/tmp/resin_a.mkv")
-            self.assertEqual(meta["name"], "resin_a")
-            self.assertEqual(meta["hwaccel"], "cuda")
-
-            videos = registry.list_videos()
-            self.assertIn("resin_a", videos)
-
-            width, height, frame = registry.get_frame("resin_a", 3)
-            self.assertEqual((width, height), (64, 32))
-            self.assertEqual(len(frame), 64 * 32 * 4)
-
-            self.assertTrue(registry.unload_video("resin_a"))
-            self.assertFalse(registry.unload_video("resin_a"))
-
-    def test_overwriting_video_closes_previous_stream(self):
-        with tempfile.TemporaryDirectory() as td, \
-            mock.patch.object(runtime, "FFmpegVideoStream", DummyStream), \
-            mock.patch.object(runtime.os.path, "isfile", return_value=True):
-            registry = runtime.VideoRegistry(cache_dir=td)
-            registry.load_video("resin", "/tmp/a.mkv")
-            first = DummyStream.instances[0]
-
-            registry.load_video("resin", "/tmp/b.mkv")
-            self.assertTrue(first.closed)
-            self.assertEqual(registry.videos["resin"].path, "/tmp/b.mkv")
-
-    def test_load_videos_from_gcode_delegates_to_load_video(self):
-        extracted = {"a": "/tmp/a.mkv", "b": "/tmp/b.mkv"}
-
-        with tempfile.TemporaryDirectory() as td, \
-            mock.patch.object(runtime.os.path, "isfile", return_value=True), \
-            mock.patch.object(runtime, "extract_videos_from_gcode", return_value=extracted), \
-            mock.patch.object(runtime.VideoRegistry, "load_video", side_effect=lambda name, path: {"name": name, "path": path}) as load_video_mock:
-            registry = runtime.VideoRegistry(cache_dir=td)
-            loaded = registry.load_videos_from_gcode("/tmp/job.gcode")
-
-            self.assertEqual(loaded["a"]["path"], "/tmp/a.mkv")
-            self.assertEqual(loaded["b"]["path"], "/tmp/b.mkv")
-            self.assertEqual(load_video_mock.call_count, 2)
+    def test_streams_payload_split_at_non_base64_boundaries(self):
+        payload = bytes(range(256)) * 1024
+        digest = hashlib.sha256(payload).hexdigest()
+        encoded = base64.b64encode(payload).decode("ascii")
+        rows = [encoded[index : index + 77] for index in range(0, len(encoded), 77)]
+        gcode = "\n".join(
+            [
+                f"; bioslicer_sla_video begin name=large extruder=1 bytes={len(payload)} sha256={digest}",
+                *(f"; bioslicer_sla_video {row}" for row in rows),
+                "; bioslicer_sla_video end name=large",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "job.gcode"
+            source.write_text(gcode, encoding="utf-8")
+            result = runtime.extract_videos_from_gcode(
+                str(source), str(Path(td) / "out")
+            )
+            self.assertEqual(Path(result["large"]).read_bytes(), payload)
 
 
 if __name__ == "__main__":

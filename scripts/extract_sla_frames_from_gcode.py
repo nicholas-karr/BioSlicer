@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from sla_video_runtime import extract_videos_from_gcode
+from sla_video_runtime import extract_videos_from_gcode, safe_video_name
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,10 +39,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Delete existing frame directories before decoding",
     )
+    parser.add_argument(
+        "--max-embedded-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Reject an embedded SLA video whose declared size exceeds this many "
+            "bytes, before any data is decoded. Unset by default (no limit); set "
+            "this when decoding G-code from an untrusted source, since the "
+            "declared size is otherwise attacker-controlled and bounds only how "
+            "much is written to disk, not memory (decoding is already streamed)."
+        ),
+    )
     return parser.parse_args()
 
 
 def decode_video_to_pngs(video_path: Path, frames_dir: Path, frame_pattern: str) -> None:
+    if (
+        Path(frame_pattern).name != frame_pattern
+        or "%" not in frame_pattern
+        or "\x00" in frame_pattern
+    ):
+        raise ValueError(
+            "frame pattern must be a filename containing an ffmpeg sequence placeholder"
+        )
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_pattern = frames_dir / frame_pattern
 
@@ -82,7 +102,11 @@ def main() -> int:
     extracted_video_dir.mkdir(parents=True, exist_ok=True)
     frames_root.mkdir(parents=True, exist_ok=True)
 
-    extracted = extract_videos_from_gcode(str(gcode_path), str(extracted_video_dir))
+    extracted = extract_videos_from_gcode(
+        str(gcode_path),
+        str(extracted_video_dir),
+        max_embedded_bytes=args.max_embedded_bytes,
+    )
     if not extracted:
         print("No SLA videos found in G-code comments.")
         return 0
@@ -94,7 +118,7 @@ def main() -> int:
         if not video_path.exists():
             raise RuntimeError(f"Video path does not exist for '{name}': {video_path}")
 
-        frame_dir_name = name.replace("/", "_")
+        frame_dir_name = safe_video_name(name)
         frames_dir = frames_root / frame_dir_name
         if args.clean and frames_dir.exists():
             shutil.rmtree(frames_dir)

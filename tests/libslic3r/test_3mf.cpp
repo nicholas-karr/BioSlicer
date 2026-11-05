@@ -298,6 +298,95 @@ ArchiveWriteResult write_test_3mf_archive(const std::string &path)
         return { true, "" };
     }
 
+std::string make_malformed_object_id_model_xml()
+{
+        return R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+    <resources>
+        <object id="1x" type="model">
+            <mesh>
+                <vertices>
+                    <vertex x="0" y="0" z="0"/>
+                    <vertex x="10" y="0" z="0"/>
+                    <vertex x="0" y="10" z="0"/>
+                </vertices>
+                <triangles>
+                    <triangle v1="0" v2="1" v3="2"/>
+                </triangles>
+            </mesh>
+        </object>
+    </resources>
+    <build>
+        <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+    </build>
+</model>
+)";
+}
+
+std::string make_missing_object_id_model_xml()
+{
+        return R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+    <resources>
+        <object type="model">
+            <mesh>
+                <vertices>
+                    <vertex x="0" y="0" z="0"/>
+                    <vertex x="10" y="0" z="0"/>
+                    <vertex x="0" y="10" z="0"/>
+                </vertices>
+                <triangles>
+                    <triangle v1="0" v2="1" v3="2"/>
+                </triangles>
+            </mesh>
+        </object>
+    </resources>
+    <build>
+        <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+    </build>
+</model>
+)";
+}
+
+    ArchiveWriteResult write_test_3mf_archive_with_model_xml(const std::string &path, const std::string &model)
+    {
+        mz_zip_archive archive{};
+        if (!mz_zip_writer_init_file(&archive, path.c_str(), 0))
+            return { false, std::string("init_file failed: ") + mz_zip_get_error_string(archive.m_last_error) };
+
+        const std::string content_types = make_minimal_content_types_xml();
+        const std::string rels = make_minimal_relationships_xml();
+
+        if (!mz_zip_writer_add_mem(&archive, "[Content_Types].xml", content_types.data(), content_types.size(), MZ_DEFAULT_COMPRESSION)) {
+            const std::string error = std::string("add [Content_Types].xml failed: ") + mz_zip_get_error_string(archive.m_last_error);
+            mz_zip_writer_end(&archive);
+            return { false, error };
+        }
+
+        if (!mz_zip_writer_add_mem(&archive, "_rels/.rels", rels.data(), rels.size(), MZ_DEFAULT_COMPRESSION)) {
+            const std::string error = std::string("add _rels/.rels failed: ") + mz_zip_get_error_string(archive.m_last_error);
+            mz_zip_writer_end(&archive);
+            return { false, error };
+        }
+
+        if (!mz_zip_writer_add_mem(&archive, "3D/3dmodel.model", model.data(), model.size(), MZ_DEFAULT_COMPRESSION)) {
+            const std::string error = std::string("add 3D/3dmodel.model failed: ") + mz_zip_get_error_string(archive.m_last_error);
+            mz_zip_writer_end(&archive);
+            return { false, error };
+        }
+
+        if (!mz_zip_writer_finalize_archive(&archive)) {
+            const std::string error = std::string("finalize failed: ") + mz_zip_get_error_string(archive.m_last_error);
+            mz_zip_writer_end(&archive);
+            return { false, error };
+        }
+
+        if (!mz_zip_writer_end(&archive))
+            return { false, std::string("writer_end failed: ") + mz_zip_get_error_string(archive.m_last_error) };
+
+        return { true, "" };
+    }
+
 } // namespace
 
 SCENARIO("Reading 3mf file", "[3mf]") {
@@ -374,6 +463,55 @@ SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
     }
 }
 
+SCENARIO("Droplets of the model and of its objects survive a 3mf file cycle", "[3mf]") {
+    GIVEN("a model with an object holding droplets and droplets of its own") {
+        Model src_model;
+        load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &src_model);
+        src_model.add_default_instances();
+        // A second object without droplets, to see the droplets stay with the right one.
+        src_model.add_object(*src_model.objects.front())->droplet_sets.clear();
+        src_model.objects.front()->droplet_sets.clear();
+        src_model.objects.back()->droplet_sets.clear();
+
+        DropletSet on_object;
+        on_object.name = "well A1";
+        on_object.extruder = 9;
+        on_object.dip = true;
+        on_object.keep_order = true;
+        DropletPoint p1; p1.pos = Vec3d(1.25, -2.5, 0.4); p1.volume_nl = 12.5; p1.count = 3;
+        DropletPoint p2; p2.pos = Vec3d(4., 5., 6.); p2.volume_nl = 50.; p2.count = 1;
+        on_object.points = { p1, p2 };
+        src_model.objects.back()->droplet_sets.push_back(on_object);
+
+        DropletSet on_bed;
+        on_bed.name = "spots";
+        on_bed.extruder = 9;
+        DropletPoint p3; p3.pos = Vec3d(100., 90., 0.); p3.volume_nl = 20.; p3.count = 2;
+        on_bed.points = { p3 };
+        src_model.droplet_sets.push_back(on_bed);
+
+        WHEN("it is saved and loaded") {
+            const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/droplets.3mf";
+            REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
+            Model dst_model;
+            DynamicPrintConfig dst_config;
+            {
+                ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+                boost::optional<Semver> version;
+                load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false, version);
+            }
+            boost::filesystem::remove(test_file);
+
+            THEN("every droplet is where it was") {
+                REQUIRE(dst_model.objects.size() == 2);
+                CHECK(dst_model.objects.front()->droplet_sets.empty());
+                CHECK(dst_model.objects.back()->droplet_sets == src_model.objects.back()->droplet_sets);
+                CHECK(dst_model.droplet_sets == src_model.droplet_sets);
+            }
+        }
+    }
+}
+
 SCENARIO("2D convex hull of sinking object", "[3mf]") {
     GIVEN("model") {
         // load a model
@@ -443,18 +581,16 @@ SCENARIO("Import namespaced volumetric 3mf", "[3mf]") {
             const bool ret = load_3mf(test_file.string().c_str(), config, ctxt, &model, false, version);
             boost::filesystem::remove(test_file);
 
-            THEN("import succeeds and synthesized extruder assignment is present") {
+            THEN("import succeeds without inventing an extruder assignment") {
                 REQUIRE(ret);
                 REQUIRE(model.objects.size() == 1);
                 REQUIRE(model.objects.front()->volumes.size() == 1);
 
                 const ConfigOption* object_extruder_opt = model.objects.front()->config.option("extruder");
-                REQUIRE(object_extruder_opt != nullptr);
-                REQUIRE(object_extruder_opt->getInt() == 1);
+                REQUIRE(object_extruder_opt == nullptr);
 
                 const ConfigOption* volume_extruder_opt = model.objects.front()->volumes.front()->config.option("extruder");
-                REQUIRE(volume_extruder_opt != nullptr);
-                REQUIRE(volume_extruder_opt->getInt() == 1);
+                REQUIRE(volume_extruder_opt == nullptr);
             }
         }
     }
@@ -478,21 +614,18 @@ SCENARIO("Import namespaced volumetric 3mf with duplicate channel labels", "[3mf
             const bool ret = load_3mf(test_file.string().c_str(), config, ctxt, &model, false, version);
             boost::filesystem::remove(test_file);
 
-            THEN("duplicate channel labels collapse to one synthesized logical channel") {
+            THEN("volumetric labels do not invent mesh-volume channel assignments") {
                 REQUIRE(ret);
                 REQUIRE(model.objects.size() == 1);
                 REQUIRE(model.objects.front()->volumes.size() == 2);
 
                 const ConfigOption* object_extruder_opt = model.objects.front()->config.option("extruder");
-                REQUIRE(object_extruder_opt != nullptr);
-                REQUIRE(object_extruder_opt->getInt() == 1);
+                REQUIRE(object_extruder_opt == nullptr);
 
                 const ConfigOption* volume0_extruder_opt = model.objects.front()->volumes[0]->config.option("extruder");
                 const ConfigOption* volume1_extruder_opt = model.objects.front()->volumes[1]->config.option("extruder");
-                REQUIRE(volume0_extruder_opt != nullptr);
-                REQUIRE(volume1_extruder_opt != nullptr);
-                REQUIRE(volume0_extruder_opt->getInt() == 1);
-                REQUIRE(volume1_extruder_opt->getInt() == 1);
+                REQUIRE(volume0_extruder_opt == nullptr);
+                REQUIRE(volume1_extruder_opt == nullptr);
             }
         }
     }
@@ -516,23 +649,77 @@ SCENARIO("Import namespaced volumetric 3mf with distinct channel labels", "[3mf]
             const bool ret = load_3mf(test_file.string().c_str(), config, ctxt, &model, false, version);
             boost::filesystem::remove(test_file);
 
-            THEN("distinct channel labels synthesize two logical channels across two volumes") {
+            THEN("distinct labels remain metadata until spatial evaluation is supported") {
                 REQUIRE(ret);
                 REQUIRE(model.objects.size() == 1);
                 REQUIRE(model.objects.front()->volumes.size() == 2);
 
                 const ConfigOption* object_extruder_opt = model.objects.front()->config.option("extruder");
-                REQUIRE(object_extruder_opt != nullptr);
-                REQUIRE(object_extruder_opt->getInt() == 1);
+                REQUIRE(object_extruder_opt == nullptr);
 
                 const ConfigOption* volume0_extruder_opt = model.objects.front()->volumes[0]->config.option("extruder");
                 const ConfigOption* volume1_extruder_opt = model.objects.front()->volumes[1]->config.option("extruder");
-                REQUIRE(volume0_extruder_opt != nullptr);
-                REQUIRE(volume1_extruder_opt != nullptr);
-                REQUIRE(volume0_extruder_opt->getInt() == 1);
-                REQUIRE(volume1_extruder_opt->getInt() == 2);
+                REQUIRE(volume0_extruder_opt == nullptr);
+                REQUIRE(volume1_extruder_opt == nullptr);
             }
         }
     }
 }
 
+// Regression coverage for C6-2: get_attribute_value_int() (used for the
+// primary, non-namespaced <object id="..."> resource attribute) must not
+// silently default a malformed or missing id to zero. Manually reproduced
+// against the built CLI (build-default/src/prusa-slicer --info) before
+// adding this test: both files below were previously imported successfully
+// with a silent id=0, and are now cleanly rejected.
+SCENARIO("Importing a 3mf with a malformed object id fails cleanly", "[3mf]") {
+    GIVEN("a minimal 3mf archive whose <object id=\"...\"> is not a valid integer") {
+        const boost::filesystem::path test_file =
+            boost::filesystem::current_path() /
+            boost::filesystem::unique_path("bioslicer-malformed-object-id-%%%%-%%%%-%%%%.3mf");
+        const ArchiveWriteResult write_result =
+            write_test_3mf_archive_with_model_xml(test_file.string(), make_malformed_object_id_model_xml());
+        INFO(write_result.error);
+        REQUIRE(write_result.ok);
+
+        Model model;
+        DynamicPrintConfig config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        boost::optional<Semver> version;
+
+        WHEN("the archive is loaded") {
+            const bool ret = load_3mf(test_file.string().c_str(), config, ctxt, &model, false, version);
+            boost::filesystem::remove(test_file);
+
+            THEN("import fails instead of silently treating the object as id zero") {
+                REQUIRE_FALSE(ret);
+            }
+        }
+    }
+}
+
+SCENARIO("Importing a 3mf with a missing object id fails cleanly", "[3mf]") {
+    GIVEN("a minimal 3mf archive whose <object> has no id attribute at all") {
+        const boost::filesystem::path test_file =
+            boost::filesystem::current_path() /
+            boost::filesystem::unique_path("bioslicer-missing-object-id-%%%%-%%%%-%%%%.3mf");
+        const ArchiveWriteResult write_result =
+            write_test_3mf_archive_with_model_xml(test_file.string(), make_missing_object_id_model_xml());
+        INFO(write_result.error);
+        REQUIRE(write_result.ok);
+
+        Model model;
+        DynamicPrintConfig config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        boost::optional<Semver> version;
+
+        WHEN("the archive is loaded") {
+            const bool ret = load_3mf(test_file.string().c_str(), config, ctxt, &model, false, version);
+            boost::filesystem::remove(test_file);
+
+            THEN("import fails instead of silently treating the object as id zero") {
+                REQUIRE_FALSE(ret);
+            }
+        }
+    }
+}

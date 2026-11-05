@@ -81,6 +81,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoSlaSupports.hpp
     GUI/Gizmos/GLGizmoFdmSupports.cpp
     GUI/Gizmos/GLGizmoFdmSupports.hpp
+    GUI/Gizmos/GLGizmoDroplets.cpp
+    GUI/Gizmos/GLGizmoDroplets.hpp
     GUI/Gizmos/GLGizmoFuzzySkin.cpp
     GUI/Gizmos/GLGizmoFuzzySkin.hpp
     GUI/Gizmos/GLGizmoFlatten.cpp
@@ -164,6 +166,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/GalleryDialog.cpp
     GUI/GalleryDialog.hpp
 
+    GUI/DropletGenDialog.cpp
+    GUI/DropletMarkers.cpp
+    GUI/DropletMarkers.hpp
+    GUI/DropletGenDialog.hpp
     GUI/ShapeGenDialog.cpp
     GUI/ShapeGenDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
@@ -431,7 +437,19 @@ else() # Linux
     )
 endif ()
 
+# Build timestamp shown in the title bar. The custom target has no OUTPUT, so it
+# runs on every build (incremental included) and rewrites BuildStamp.cpp.
+set(BUILD_STAMP_CPP "${CMAKE_CURRENT_BINARY_DIR}/BuildStamp.cpp")
+execute_process(COMMAND ${CMAKE_COMMAND} -DOUT=${BUILD_STAMP_CPP} -P ${CMAKE_CURRENT_SOURCE_DIR}/BuildStamp.cmake)
+add_custom_target(bioslicer_build_stamp ALL
+    COMMAND ${CMAKE_COMMAND} -DOUT=${BUILD_STAMP_CPP} -P ${CMAKE_CURRENT_SOURCE_DIR}/BuildStamp.cmake
+    BYPRODUCTS ${BUILD_STAMP_CPP}
+    COMMENT "Updating build timestamp")
+set_source_files_properties(${BUILD_STAMP_CPP} PROPERTIES GENERATED TRUE)
+list(APPEND SLIC3R_GUI_SOURCES ${BUILD_STAMP_CPP})
+
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
+add_dependencies(libslic3r_gui bioslicer_build_stamp)
 
 foreach(_source IN ITEMS ${SLIC3R_GUI_SOURCES})
     get_filename_component(_source_path "${_source}" PATH)

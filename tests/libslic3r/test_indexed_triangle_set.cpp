@@ -1,7 +1,14 @@
 #include <iostream>
 #include <fstream>
 #include <random>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/expressions.hpp>
+#include <boost/log/sinks/basic_sink_backend.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/make_shared.hpp>
 
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -239,3 +246,73 @@ TEST_CASE("Simplify mesh by Quadric edge collapse to 5%", "[its]")
     CHECK(is_similar(its, mesh.its, cfg));
 }
 
+
+namespace {
+// Counts records logged at error severity or above while alive.
+struct ErrorLogCounter : boost::log::sinks::basic_sink_backend<boost::log::sinks::synchronized_feeding>
+{
+    using Sink = boost::log::sinks::synchronous_sink<ErrorLogCounter>;
+    void consume(boost::log::record_view const &) { ++count; }
+    std::atomic<int> count{0};
+};
+
+struct ScopedErrorCounter
+{
+    ScopedErrorCounter()
+    {
+        backend = boost::make_shared<ErrorLogCounter>();
+        sink    = boost::make_shared<ErrorLogCounter::Sink>(backend);
+        sink->set_filter(boost::log::trivial::severity >= boost::log::trivial::error);
+        boost::log::core::get()->add_sink(sink);
+    }
+    ~ScopedErrorCounter() { boost::log::core::get()->remove_sink(sink); }
+    int count() const { return backend->count; }
+
+    boost::shared_ptr<ErrorLogCounter>        backend;
+    boost::shared_ptr<ErrorLogCounter::Sink>  sink;
+};
+} // namespace
+
+TEST_CASE("Convex hull of a solid point set", "[its_convex_hull][its]") {
+    ScopedErrorCounter errors;
+    const indexed_triangle_set hull = its_convex_hull(its_make_cube(10., 10., 10.).vertices);
+    REQUIRE(hull.vertices.size() == 8);
+    REQUIRE(hull.indices.size() == 12);
+    REQUIRE(errors.count() == 0);
+}
+
+TEST_CASE("Convex hull of degenerate point sets is empty and not an error", "[its_convex_hull][its]") {
+    ScopedErrorCounter errors;
+
+    std::vector<std::vector<Vec3f>> cases;
+    cases.push_back({});                                                                    // no points
+    cases.push_back({ {1.f, 2.f, 3.f} });                                                   // one point
+    cases.push_back({ {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f}, {2.f, 2.f, 2.f}, {3.f, 3.f, 3.f} }); // collinear
+    cases.push_back({ {0.f, 0.f, 0.f}, {5.f, 5.f, 5.f}, {5.f, 5.f, 5.f}, {0.f, 0.f, 0.f} }); // duplicates
+
+    // Flat sheet in the XY plane, like a printbed model: 47 x 24.5 mm, z == 0.
+    std::vector<Vec3f> sheet;
+    for (int x = -47; x <= 47; x += 4)
+        for (int y = -24; y <= 24; y += 4)
+            sheet.emplace_back(float(x), float(y), 0.f);
+    cases.push_back(sheet);
+
+    // The same sheet, tilted so no axis-aligned bounding box check would catch it.
+    const Transform3f tilt = Transform3f(Eigen::AngleAxisf(0.7f, Vec3f(1.f, 2.f, 3.f).normalized()));
+    std::vector<Vec3f> tilted;
+    for (const Vec3f &p : sheet)
+        tilted.push_back(tilt * p + Vec3f(10.f, -20.f, 30.f));
+    cases.push_back(tilted);
+
+    for (const auto &pts : cases)
+        REQUIRE(its_convex_hull(pts).empty());
+    REQUIRE(errors.count() == 0);
+}
+
+TEST_CASE("Convex hull of a thin but solid point set is still computed", "[its_convex_hull][its]") {
+    ScopedErrorCounter errors;
+    indexed_triangle_set thin = its_make_cube(100., 100., 0.1);
+    const indexed_triangle_set hull = its_convex_hull(thin.vertices);
+    REQUIRE(hull.vertices.size() == 8);
+    REQUIRE(errors.count() == 0);
+}

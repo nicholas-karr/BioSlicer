@@ -30,6 +30,7 @@
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
 #include "ShortestPath.hpp"
+#include "SLAMaterial.hpp"
 #include "Thread.hpp"
 #include "GCode.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
@@ -172,11 +173,34 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "slowdown_below_layer_time",
         "solid_infill_acceleration",
         "standby_temperature_delta",
+        "channel_label",
+        "channel_type",
+        "sla_material_delay_after_exposure",
+        "sla_material_delay_before_exposure",
+        "sla_material_exposure_time",
+        "sla_material_transition_depth",
+        "sla_material_transition_time",
+        "droplet_standoff",
+        "droplet_settle_time",
+        "droplet_gcode",
+        "filament_droplet_nl_per_us",
+        "filament_droplet_frequency",
+        "sla_material_video_embed",
+        "sla_material_video_names",
+        "sla_material_video_paths",
+        "sla_material_video_synth_fps",
+        "sla_material_video_synth_height",
+        "sla_material_video_synth_lossless",
+        "sla_material_video_synth_proj_height",
+        "sla_material_video_synth_proj_width",
+        "sla_material_video_synth_width",
+        "sla_material_video_synthesize",
         "start_gcode",
         "start_filament_gcode",
         "custom_parameters_filament",
         "custom_parameters_printer",
         "toolchange_gcode",
+        "toolchange_omit_tool_command",
         "top_solid_infill_acceleration",
         "travel_acceleration",
         "travel_short_distance_acceleration",
@@ -289,6 +313,15 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posInfill);
             osteps.emplace_back(posSupportMaterial);
             steps.emplace_back(psSkirtBrim);
+        } else if (opt_key == "sla_material_extruder") {
+            // An extruder changing between FFF and SLA changes which regions get perimeters and
+            // infill at all (see Layer::make_perimeters() and Layer::make_fills()), so the toolpaths
+            // of every object are stale, not just the G-code.
+            osteps.emplace_back(posPerimeters);
+            osteps.emplace_back(posInfill);
+            osteps.emplace_back(posSupportMaterial);
+            steps.emplace_back(psSkirtBrim);
+            steps.emplace_back(psWipeTower);
         } else if (opt_key == "avoid_crossing_curled_overhangs") {
             osteps.emplace_back(posEstimateCurledExtrusions);
         } else if (opt_key == "automatic_extrusion_widths") {
@@ -473,11 +506,88 @@ std::string Print::validate(std::vector<std::string>* warnings) const
             warnings->emplace_back("_FILAMENT_SHRINKAGE_DIFFER");
     }
 
-    if (m_objects.empty())
+    // A print of droplets alone has neither objects nor extruders.
+    const bool has_droplets = ! m_droplets.empty();
+
+    if (m_droplets_skipped > 0)
+        return _u8L("Droplets need a droplet channel: an extruder with the channel type 'droplet'. "
+                    "The printer has none, or a set of droplets uses an extruder that is not one.");
+
+    if (m_objects.empty() && ! has_droplets)
         return _u8L("All objects are outside of the print volume.");
 
-    if (extruders.empty())
+    if (extruders.empty() && ! has_droplets)
         return _u8L("The supplied settings will cause an empty print.");
+
+    for (const unsigned int extruder : extruders)
+        if (is_droplet_extruder(m_config, extruder + 1))
+            return format(_u8L("Extruder %1% is a droplet channel and cannot print an object: it has no toolpaths. "
+                               "Assign the object to another extruder."), extruder + 1);
+
+    {
+        // Pulse limits of the valve (see the pulse_pin module of the printer): at least 100 us, at most 10% duty.
+        for (const ResolvedDroplet &d : m_droplets) {
+            const size_t i = d.extruder - 1;
+            const double nl_per_us = m_config.filament_droplet_nl_per_us.get_at(i);
+            if (nl_per_us <= 0.)
+                return format(_u8L("The material of droplet extruder %1% has no volume per pulse. Set it on the filament page."), d.extruder);
+            const double pulse_us = droplet_pulse_us(d.volume_nl, nl_per_us);
+            if (pulse_us < 100.)
+                return format(_u8L("A droplet of %1% nL at (%2%, %3%) needs a pulse of %4% us with extruder %5%, below the 100 us the valve can pulse. "
+                                   "Increase the volume."), d.volume_nl, d.pos.x(), d.pos.y(), pulse_us, d.extruder);
+            const double frequency = m_config.filament_droplet_frequency.get_at(i);
+            if (d.count > 1 && frequency > 0. && pulse_us * 1e-6 * frequency > 0.1)
+                return format(_u8L("A droplet of %1% nL at (%2%, %3%) is fired %4% times at %5% Hz, which exceeds the valve's duty cycle of 10%%. "
+                                   "Lower the frequency or the volume."), d.volume_nl, d.pos.x(), d.pos.y(), d.count, frequency);
+            const BoundingBoxf bed(m_config.bed_shape.values);
+            if (bed.defined && (d.pos.x() < bed.min.x() - EPSILON || d.pos.x() > bed.max.x() + EPSILON
+                             || d.pos.y() < bed.min.y() - EPSILON || d.pos.y() > bed.max.y() + EPSILON))
+                return format(_u8L("A droplet at (%1%, %2%) is outside of the bed."), d.pos.x(), d.pos.y());
+            if (d.pos.z() < - EPSILON || (m_config.max_print_height.value > 0. && d.pos.z() > m_config.max_print_height.value + EPSILON))
+                return format(_u8L("A droplet at (%1%, %2%) has the height %3% mm, outside of the printer's Z range."), d.pos.x(), d.pos.y(), d.pos.z());
+        }
+    }
+
+    bool has_sla_regions = false;
+    for (const PrintObject *object : m_objects) {
+        for (const PrintRegion &region : object->all_regions()) {
+            const RegionTechnologyAssignment assignment =
+                classify_region_technology(m_config, region);
+            if (assignment.technology == RegionTechnology::Mixed)
+                return _u8L(
+                    "A region cannot mix FFF and SLA extruders, or multiple SLA "
+                    "extruders, across perimeter and infill roles.");
+            has_sla_regions |= assignment.technology == RegionTechnology::SLA;
+        }
+    }
+    if (has_sla_regions && m_config.complete_objects.value)
+        return _u8L(
+            "Sequential printing is not yet supported when an SLA material "
+            "channel is used.");
+
+    if (m_config.toolchange_omit_tool_command.value && ! m_config.toolchange_gcode.value.empty()) {
+        // The printer is told which material to select, not which tool number, so it neither knows the
+        // slicer's tool numbers nor can it tell two tools with the same material apart.
+        if (m_config.ooze_prevention.value && extruders.size() > 1)
+            return _u8L(
+                "Ooze prevention sets the temperature of tools that are not active. That is not "
+                "possible with 'Omit the tool change command', where the printer does not know the "
+                "tool numbers. Disable one of the two options.");
+        const std::vector<std::string> materials = extruder_material_tokens(*this);
+        for (size_t a = 0; a < extruders.size(); ++a)
+            for (size_t b = a + 1; b < extruders.size(); ++b) {
+                if (extruders[a] >= materials.size() || extruders[b] >= materials.size())
+                    continue;
+                const std::string &material = materials[extruders[a]];
+                if (! material.empty() && material == materials[extruders[b]])
+                    return format(_u8L(
+                        "Extruders %1% and %2% are both used and carry the same material (%3%). "
+                        "With 'Omit the tool change command' the printer selects a tool by the name "
+                        "of its material, so it cannot tell these two apart. Give them different "
+                        "materials or print with only one of them."),
+                        extruders[a] + 1, extruders[b] + 1, material);
+            }
+    }
 
     if (m_config.avoid_crossing_perimeters && m_config.avoid_crossing_curled_overhangs) {
         return _u8L("Avoid crossing perimeters option and avoid crossing curled overhangs option cannot be both enabled together.");
@@ -942,25 +1052,8 @@ void Print::process()
         	m_tool_ordering = ToolOrdering(*this, -1, false);
             if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1)) {
                 // Allow SLA-only prints: if any layer region uses an SLA extruder the print
-                // is non-empty even though no FFF toolpaths exist.
-                bool has_sla_regions = false;
-                const auto &sla_flags = this->config().sla_material_extruder.values;
-                if (!sla_flags.empty()) {
-                    for (const PrintObject *pobj : m_objects) {
-                        for (const Layer *layer : pobj->layers()) {
-                            for (const LayerRegion *lr : layer->regions()) {
-                                const unsigned int ext1 = lr->region().extruder(frPerimeter);
-                                if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1]) {
-                                    has_sla_regions = true;
-                                    break;
-                                }
-                            }
-                            if (has_sla_regions) break;
-                        }
-                        if (has_sla_regions) break;
-                    }
-                }
-                if (!has_sla_regions)
+                // is non-empty even though no FFF toolpaths exist. The same goes for droplets.
+                if (!print_has_sla_regions(*this) && m_droplets.empty())
                     throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
             }
         }
@@ -1053,27 +1146,8 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
 void Print::_make_skirt()
 {
     // Skip skirt for SLA-only prints — no FFF toolpaths means nothing to prime.
-    {
-        const auto &sla_flags = m_config.sla_material_extruder.values;
-        if (!sla_flags.empty()) {
-            bool any_fff = false;
-            for (const PrintObject *obj : m_objects) {
-                for (const Layer *layer : obj->layers()) {
-                    for (const LayerRegion *lr : layer->regions()) {
-                        const unsigned int ext = lr->region().extruder(frPerimeter);
-                        if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1]) {
-                            any_fff = true;
-                            break;
-                        }
-                    }
-                    if (any_fff) break;
-                }
-                if (any_fff) break;
-            }
-            if (!any_fff)
-                return;
-        }
-    }
+    if (!print_has_fff_regions(*this))
+        return;
 
     // First off we need to decide how tall the skirt must be.
     // The skirt_height option from config is expressed in layers, but our
@@ -1637,8 +1711,9 @@ std::string Print::output_filename(const std::string &filename_base) const
 // Returns if all used filaments have same shrinkage compensations.
 bool Print::has_same_shrinkage_compensations() const {
     const std::vector<unsigned int> extruders = this->extruders();
+    // Nothing printed with filament (droplets only) has nothing to differ.
     if (extruders.empty())
-        return false;
+        return true;
 
     const double filament_shrinkage_compensation_xy = m_config.filament_shrinkage_compensation_xy.get_at(extruders.front());
     const double filament_shrinkage_compensation_z  = m_config.filament_shrinkage_compensation_z.get_at(extruders.front());
@@ -1656,10 +1731,11 @@ bool Print::has_same_shrinkage_compensations() const {
 // Returns scaling for each axis representing shrinkage compensations in each axis.
 Vec3d Print::shrinkage_compensation() const
 {
-    if (!this->has_same_shrinkage_compensations())
+    const std::vector<unsigned int> used = this->extruders();
+    if (used.empty() || !this->has_same_shrinkage_compensations())
         return Vec3d::Ones();
 
-    const unsigned int first_extruder          = this->extruders().front();
+    const unsigned int first_extruder          = used.front();
     const double       xy_compensation_percent = std::clamp(m_config.filament_shrinkage_compensation_xy.get_at(first_extruder), -99., 99.);
     const double       z_compensation_percent  = std::clamp(m_config.filament_shrinkage_compensation_z.get_at(first_extruder), -99., 99.);
     const double       xy_compensation         = 100. / (100. - xy_compensation_percent);

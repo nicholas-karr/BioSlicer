@@ -27,6 +27,7 @@
 
 #include "BoundingBox.hpp"
 #include "ExtrusionEntityCollection.hpp"
+#include "Droplet.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
 #include "Slicing.hpp"
@@ -604,7 +605,7 @@ public:
     // In case the following methods need to modify data processed by process() or export_gcode(),
     // a cancellation callback is executed to stop the background processing before the operation.
     void                clear() override;
-    bool                empty() const override { return m_objects.empty(); }
+    bool                empty() const override { return m_objects.empty() && m_droplets.empty(); }
     // List of existing PrintObject IDs, to remove notifications for non-existent IDs.
     std::vector<ObjectID> print_object_ids() const override;
 
@@ -687,6 +688,8 @@ public:
     size_t                      num_print_regions() const throw() { return m_print_regions.size(); }
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
     const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
+    // Droplets of the model in bed coordinates, see collect_droplets().
+    const std::vector<ResolvedDroplet>& droplets() const { return m_droplets; }
 
     // Returns if all used filaments have same shrinkage compensations.
     bool has_same_shrinkage_compensations() const;
@@ -737,6 +740,9 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    std::vector<ResolvedDroplet>            m_droplets;
+    // Droplet points dropped because their set has no droplet channel to dispense with.
+    size_t                                  m_droplets_skipped { 0 };
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

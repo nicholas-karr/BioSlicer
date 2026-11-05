@@ -27,11 +27,12 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SLICER_BIN = REPO_ROOT / "build" / "src" / "prusa-slicer"
+SLICER_BIN: Path
 UTDHBL_INI = REPO_ROOT / "resources" / "profiles" / "UTDHBL.ini"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import sla_video_runtime as runtime
+from scripts.tests._test_support import require_slicer_binary
 from hybrid_3mf_utils import (
     MeshObject,
     bed_shape_bbox,
@@ -96,8 +97,8 @@ class BioTridentSLAFrameGeometryTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not SLICER_BIN.exists():
-            raise AssertionError(f"Slicer binary not found: {SLICER_BIN} — build first")
+        global SLICER_BIN
+        SLICER_BIN = require_slicer_binary()
         if not UTDHBL_INI.exists():
             raise AssertionError(f"UTDHBL.ini not found: {UTDHBL_INI}")
 

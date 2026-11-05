@@ -53,6 +53,9 @@
 #include <wx/filedlg.h>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/exception/diagnostic_information.hpp>
@@ -2295,6 +2298,10 @@ void TabFilament::build()
         optgroup = page->new_optgroup(L("Print speed override"));
         optgroup->append_single_option_line("filament_max_volumetric_speed", "max-volumetric-speed_127176");
 
+        optgroup = page->new_optgroup(L("Droplet"));
+        optgroup->append_single_option_line("filament_droplet_nl_per_us");
+        optgroup->append_single_option_line("filament_droplet_frequency");
+
         line = { "", "" };
         line.full_width = 1;
         line.widget = [this](wxWindow* parent) {
@@ -2672,6 +2679,7 @@ static wxString get_info_klipper_string()
 
 void TabPrinter::build_fff()
 {
+    m_plate_front_ctrl = m_plate_side_ctrl = nullptr; // destroyed with the old pages
     if (!m_pages.empty())
         m_pages.resize(0);
     // to avoid redundant memory allocation / deallocation during extruders count changing
@@ -2689,9 +2697,7 @@ void TabPrinter::build_fff()
     auto page = add_options_page(L("General"), "printer");
         auto optgroup = page->new_optgroup(L("Size and coordinates"));
 
-        create_line_with_widget(optgroup.get(), "bed_shape", "custom-svg-and-png-bed-textures_124612", [this](wxWindow* parent) {
-            return 	create_bed_shape_widget(parent);
-        });
+        create_build_plate_line(optgroup.get());
 
         optgroup->append_single_option_line("max_print_height");
         optgroup->append_single_option_line("z_offset");
@@ -2940,6 +2946,17 @@ void TabPrinter::build_fff()
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
 
+        optgroup = page->new_optgroup(L("Tool change command"));
+        optgroup->append_single_option_line("toolchange_omit_tool_command");
+
+        optgroup = page->new_optgroup(L("Droplet G-code (flavors other than Klipper)"), 0);
+        optgroup->edit_custom_gcode = [this](const t_config_option_key& opt_key) { edit_custom_gcode(opt_key); };
+        option = optgroup->get_option("droplet_gcode");
+        option.opt.full_width = true;
+        option.opt.is_code = true;
+        option.opt.height = gcode_field_height;
+        optgroup->append_single_option_line(option);
+
         optgroup = page->new_optgroup(L("Between objects G-code (for sequential printing)"), 0);
         optgroup->on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
@@ -2982,7 +2999,11 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("SLA material video streaming"));
-        optgroup->append_single_option_line("sla_material_extruder");
+        // sla_material_extruder and the per-material timing options (exposure/delay/transition)
+        // are per-extruder values; editing them here would silently bind to extruder index 0
+        // only (see build_extruder_pages()'s "SLA material" optgroup, where they belong instead).
+        // Only options meant to be edited as one delimited list across all extruders (gui_flags
+        // == "serialized") stay on this shared page.
 
         option = optgroup->get_option("sla_material_video_names");
         option.opt.full_width = true;
@@ -3036,14 +3057,13 @@ void TabPrinter::build_fff()
 
 void TabPrinter::build_sla()
 {
+    m_plate_front_ctrl = m_plate_side_ctrl = nullptr; // destroyed with the old pages
     if (!m_pages.empty())
         m_pages.resize(0);
     auto page = add_options_page(L("General"), "printer");
     auto optgroup = page->new_optgroup(L("Size and coordinates"));
 
-    create_line_with_widget(optgroup.get(), "bed_shape", "custom-svg-and-png-bed-textures_124612", [this](wxWindow* parent) {
-        return 	create_bed_shape_widget(parent);
-    });
+    create_build_plate_line(optgroup.get());
     optgroup->append_single_option_line("max_print_height");
 
     optgroup = page->new_optgroup(L("Display"));
@@ -3466,6 +3486,18 @@ void TabPrinter::build_extruder_pages(size_t n_before_extruders)
         optgroup = page->new_optgroup(L("Retraction when tool is disabled (advanced settings for multi-extruder setups)"));
         optgroup->append_single_option_line("retract_length_toolchange", "", extruder_idx);
         optgroup->append_single_option_line("retract_restart_extra_toolchange", "", extruder_idx);
+
+        optgroup = page->new_optgroup(L("SLA material"));
+        optgroup->append_single_option_line("sla_material_extruder", "", extruder_idx);
+        optgroup->append_single_option_line("sla_material_exposure_time", "", extruder_idx);
+        optgroup->append_single_option_line("sla_material_delay_before_exposure", "", extruder_idx);
+        optgroup->append_single_option_line("sla_material_delay_after_exposure", "", extruder_idx);
+        optgroup->append_single_option_line("sla_material_transition_depth", "", extruder_idx);
+        optgroup->append_single_option_line("sla_material_transition_time", "", extruder_idx);
+
+        optgroup = page->new_optgroup(L("Droplet"));
+        optgroup->append_single_option_line("droplet_standoff", "", extruder_idx);
+        optgroup->append_single_option_line("droplet_settle_time", "", extruder_idx);
     }
 
     // # remove extra pages
@@ -3646,8 +3678,10 @@ void TabPrinter::toggle_options()
 
     const GCodeFlavor flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
     bool have_multiple_extruders = m_extruders_count > 1;
-    if (m_active_page->title() == "Custom G-code")
+    if (m_active_page->title() == "Custom G-code") {
         toggle_option("toolchange_gcode", have_multiple_extruders);
+        toggle_option("toolchange_omit_tool_command", have_multiple_extruders);
+    }
     if (m_active_page->title() == "General") {
         toggle_option("single_extruder_multi_material", have_multiple_extruders);
 
@@ -3750,6 +3784,7 @@ void TabPrinter::toggle_options()
 
 void TabPrinter::update()
 {
+    update_build_plate_fields();
     m_update_cnt++;
     m_presets->get_edited_preset().printer_technology() == ptFFF ? update_fff() : update_sla();
     m_update_cnt--;
@@ -5090,47 +5125,96 @@ wxSizer* TabPrint::create_substitutions_widget(wxWindow* parent)
     return grid_sizer;
 }
 
-// Return a callback to create a TabPrinter widget to edit bed shape
-wxSizer* TabPrinter::create_bed_shape_widget(wxWindow* parent)
+// The build plate is a rectangle with its front left corner at (0,0). Front is the length along
+// the front edge (X), Side is the length along the left side (Y). Both are derived from "bed_shape".
+static wxString format_plate_length(double v) { return wxString::Format("%.6g", v); }
+
+static bool parse_plate_length(const wxString& text, double& value)
 {
-    ScalableButton* btn = new ScalableButton(parent, wxID_ANY, "printer", " " + _(L("Set")) + " " + dots,
-        wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT);
-    btn->SetFont(wxGetApp().normal_font());
-    btn->SetSize(btn->GetBestSize());
+    wxString t = text;
+    t.Trim(true).Trim(false);
+    t.Replace(",", ".");
+    return t.ToDouble(&value) && value > 0.;
+}
 
-    auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+void TabPrinter::create_build_plate_line(ConfigOptionsGroup* optgroup)
+{
+    Line line = optgroup->create_single_option_line("bed_shape");
+    line.label = _L("Build plate");
+    line.widget = [this](wxWindow* parent) { return create_build_plate_widget(parent); };
+    line.set_undo_bitmap(&m_bmp_white_bullet);
+    line.set_undo_to_sys_bitmap(&m_bmp_white_bullet);
+    line.set_undo_tooltip(&m_tt_white_bullet);
+    line.set_undo_to_sys_tooltip(&m_tt_white_bullet);
+    line.set_label_colour(&m_default_text_clr);
+    optgroup->append_line(line);
+}
 
-    btn->Bind(wxEVT_BUTTON, ([this](wxCommandEvent e)
-        {
-            BedShapeDialog dlg(this);
-            dlg.build_dialog(*m_config->option<ConfigOptionPoints>("bed_shape"),
-                *m_config->option<ConfigOptionString>("bed_custom_texture"),
-                *m_config->option<ConfigOptionString>("bed_custom_model"));
-            if (dlg.ShowModal() == wxID_OK) {
-                const std::vector<Vec2d>& shape = dlg.get_shape();
-                const std::string& custom_texture = dlg.get_custom_texture();
-                const std::string& custom_model = dlg.get_custom_model();
-                if (!shape.empty())
-                {
-                    load_key_value("bed_shape", shape);
-                    load_key_value("bed_custom_texture", custom_texture);
-                    load_key_value("bed_custom_model", custom_model);
-                    update_changed_ui();
-                }
-            }
-        }));
+wxSizer* TabPrinter::create_build_plate_widget(wxWindow* parent)
+{
+    auto make_ctrl = [this, parent]() {
+        auto* ctrl = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                    wxSize(8 * wxGetApp().em_unit(), -1), wxTE_PROCESS_ENTER);
+        ctrl->SetFont(wxGetApp().normal_font());
+        return ctrl;
+    };
+    m_plate_front_ctrl = make_ctrl();
+    m_plate_side_ctrl  = make_ctrl();
 
-    // may be it is not a best place, but 
-    // add information about Category/Grope for "bed_custom_texture" and "bed_custom_model" as a copy from "bed_shape" option
-    {
-        Search::OptionsSearcher& searcher = wxGetApp().searcher();
-        const Search::GroupAndCategory& gc = searcher.get_group_and_category("bed_shape");
-        searcher.add_key("bed_custom_texture", m_type, gc.group, gc.category);
-        searcher.add_key("bed_custom_model", m_type, gc.group, gc.category);
+    auto apply = [this](wxEvent& evt) {
+        evt.Skip();
+        double front, side;
+        if (!parse_plate_length(m_plate_front_ctrl->GetValue(), front) ||
+            !parse_plate_length(m_plate_side_ctrl->GetValue(), side)) {
+            update_build_plate_fields(true);
+            return;
+        }
+        const auto* shape = m_config->option<ConfigOptionPoints>("bed_shape");
+        const BoundingBoxf bb(shape->values);
+        if (bb.min == Vec2d::Zero() && std::abs(bb.size().x() - front) < 1e-6 && std::abs(bb.size().y() - side) < 1e-6)
+            return;
+        // Origin (0,0) is always the front left corner of the plate.
+        load_key_value("bed_shape", std::vector<Vec2d>{ Vec2d(0, 0), Vec2d(front, 0), Vec2d(front, side), Vec2d(0, side) });
+        update_changed_ui();
+    };
+    for (wxTextCtrl* ctrl : { m_plate_front_ctrl, m_plate_side_ctrl }) {
+        ctrl->Bind(wxEVT_TEXT_ENTER, apply);
+        ctrl->Bind(wxEVT_KILL_FOCUS, apply);
     }
 
+    auto sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto add_field = [parent, sizer](const wxString& label, wxTextCtrl* ctrl, int left_margin) {
+        auto* text = new wxStaticText(parent, wxID_ANY, label);
+        text->SetFont(wxGetApp().normal_font());
+        sizer->Add(text, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, left_margin);
+        sizer->Add(ctrl, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+        auto* unit = new wxStaticText(parent, wxID_ANY, _L("mm"));
+        unit->SetFont(wxGetApp().normal_font());
+        sizer->Add(unit, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+    };
+    add_field(_L("Front (X):"), m_plate_front_ctrl, 0);
+    add_field(_L("Side (Y):"), m_plate_side_ctrl, 16);
+
+    update_build_plate_fields(true);
     return sizer;
+}
+
+void TabPrinter::update_build_plate_fields(bool force)
+{
+    if (m_plate_front_ctrl == nullptr || m_plate_side_ctrl == nullptr || m_config == nullptr)
+        return;
+    const auto* shape = m_config->option<ConfigOptionPoints>("bed_shape");
+    if (shape == nullptr || shape->values.empty())
+        return;
+    const Vec2d size = BoundingBoxf(shape->values).size();
+    // Do not overwrite what the user is typing unless it is not a valid number or the shape changed.
+    auto sync = [force](wxTextCtrl* ctrl, double v) {
+        double shown;
+        if (force || !parse_plate_length(ctrl->GetValue(), shown) || std::abs(shown - v) > 1e-6)
+            ctrl->ChangeValue(format_plate_length(v));
+    };
+    sync(m_plate_front_ctrl, size.x());
+    sync(m_plate_side_ctrl,  size.y());
 }
 
 void TabPrinter::cache_extruder_cnt(const DynamicPrintConfig* config/* = nullptr*/)
@@ -5190,7 +5274,7 @@ bool Tab::validate_custom_gcodes()
         if (!opt_group->is_activated())
             break;
         std::string key = opt_group->opt_map().begin()->first;
-        if (key == "autoemit_temperature_commands")
+        if (key == "autoemit_temperature_commands" || key == "toolchange_omit_tool_command")
             continue;
         valid &= validate_custom_gcode(opt_group->title, boost::any_cast<std::string>(opt_group->get_value(key)));
         if (!valid)

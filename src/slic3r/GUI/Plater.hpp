@@ -26,6 +26,7 @@
 #include "Sidebar.hpp"
 #include "Selection.hpp"
 
+#include "libslic3r/Droplet.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "Jobs/Job.hpp"
 #include "Jobs/Worker.hpp"
@@ -205,6 +206,10 @@ public:
     void reset_with_confirm();
     bool delete_object_from_model(size_t obj_idx);
     std::vector<size_t> add_model_objects(const ModelObjectPtrs& model_objects);
+    // Add droplet sets that belong to the project rather than to an object, as one undoable step.
+    void add_droplet_sets(DropletSets &&sets, const wxString &snapshot_name);
+    // Replace the project's droplet sets (the droplets gizmo edits them), without taking a snapshot.
+    void set_droplet_sets(DropletSets &&sets);
     void remove_selected();
     void increase_instances(size_t num = 1, int obj_idx = -1, int inst_idx = -1);
     void decrease_instances(size_t num = 1, int obj_idx = -1);

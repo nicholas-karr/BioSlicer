@@ -516,7 +516,7 @@ static std::vector<std::string> s_Preset_print_options {
 };
 
 static std::vector<std::string> s_Preset_filament_options {
-    "filament_colour", "filament_diameter", "filament_type", "filament_soluble", "filament_abrasive", "filament_notes", "filament_max_volumetric_speed", "filament_infill_max_speed", "filament_infill_max_crossing_speed",
+    "filament_colour", "filament_diameter", "filament_type", "filament_soluble", "filament_abrasive", "filament_notes", "filament_max_volumetric_speed", "filament_droplet_nl_per_us", "filament_droplet_frequency", "filament_infill_max_speed", "filament_infill_max_crossing_speed",
     "extrusion_multiplier", "filament_density", "filament_cost", "filament_spool_weight", "filament_loading_speed", "filament_loading_speed_start", "filament_load_time",
     "filament_unloading_speed", "filament_unloading_speed_start", "filament_unload_time", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
     "filament_cooling_initial_speed", "filament_purge_multiplier", "filament_cooling_final_speed", "filament_ramming_parameters", "filament_minimal_purge_on_wipe_tower",
@@ -553,10 +553,12 @@ static std::vector<std::string> s_Preset_printer_options {
     "use_firmware_retraction", "use_volumetric_e", "variable_layer_height", "prefer_clockwise_movements",
     //FIXME the print host keys are left here just for conversion from the Printer preset to Physical Printer preset.
     "host_type", "print_host", "printhost_apikey", "printhost_cafile",
-    "single_extruder_multi_material", "custom_parameters_printer", "start_gcode", "end_gcode", "before_layer_gcode", "layer_gcode", "toolchange_gcode",
+    "single_extruder_multi_material", "custom_parameters_printer", "start_gcode", "end_gcode", "before_layer_gcode", "layer_gcode", "toolchange_gcode", "toolchange_omit_tool_command",
     "color_change_gcode", "pause_print_gcode", "template_custom_gcode",
     "sla_material_extruder", "sla_material_video_synthesize", "sla_material_video_names", "sla_material_video_paths",
     "sla_material_exposure_time", "sla_material_delay_before_exposure", "sla_material_delay_after_exposure",
+    "sla_material_transition_depth", "sla_material_transition_time",
+    "droplet_standoff", "droplet_settle_time", "droplet_gcode",
     "channel_type", "channel_label",
     "sla_material_video_embed", "sla_material_video_synth_width", "sla_material_video_synth_height",
     "sla_material_video_synth_fps", "sla_material_video_synth_lossless",

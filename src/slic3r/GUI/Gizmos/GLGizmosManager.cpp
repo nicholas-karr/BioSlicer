@@ -21,6 +21,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoFlatten.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSlaSupports.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoFdmSupports.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoDroplets.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoFuzzySkin.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCut.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
@@ -120,6 +121,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent));
+    m_gizmos.emplace_back(new GLGizmoDroplets(m_parent, "cut.svg", -1));
 
     m_common_gizmos_data.reset(new CommonGizmosDataPool(&m_parent));
 
@@ -179,6 +181,12 @@ void GLGizmosManager::reset_all_states()
 {
     if (! m_enabled || m_serializing)
         return;
+
+    // The droplets gizmo works on the project, not on a selection: an empty selection does not close it.
+    if (m_current == Droplets) {
+        m_hover = Undefined;
+        return;
+    }
 
     const EType current = get_current_type();
     if (current != Undefined)
@@ -526,6 +534,8 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
                 if (m_current == Measure && gizmo_event(SLAGizmoEventType::Escape)) {
                     // do nothing
                 }
+                else if (m_current == Droplets)
+                    open_gizmo(Droplets); // reset_all_states() keeps this gizmo open, Esc closes it
                 else if (m_current != SlaSupports || !gizmo_event(SLAGizmoEventType::DiscardChanges))
                     reset_all_states();
 

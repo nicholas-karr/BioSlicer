@@ -1430,12 +1430,46 @@ indexed_triangle_set its_make_snap(double r, double h, float space_proportion, f
     return mesh;
 }
 
+// True if all points lie on a single plane (or line/point), within a tolerance relative to their extent.
+// Such a set has no 3D convex hull, and Qhull rejects it with an "initial simplex is flat" error.
+static bool points_are_planar(const std::vector<Vec3f> &pts)
+{
+    if (pts.size() < 4)
+        return true;
+
+    const Vec3f &p0 = pts.front();
+    auto farthest = [&pts](auto &&dist2) {
+        const Vec3f *best = &pts.front();
+        float        best_d = -1.f;
+        for (const Vec3f &p : pts)
+            if (float d = dist2(p); d > best_d) {
+                best_d = d;
+                best   = &p;
+            }
+        return std::make_pair(best, best_d);
+    };
+
+    const auto [p1, d1] = farthest([&p0](const Vec3f &p) { return (p - p0).squaredNorm(); });
+    if (d1 <= 0.f)
+        return true; // All points coincide.
+    const Vec3f axis = (*p1 - p0).normalized();
+    const auto [p2, d2] = farthest([&](const Vec3f &p) { return (p - p0 - axis * (p - p0).dot(axis)).squaredNorm(); });
+    const float extent = std::sqrt(d1);
+    if (std::sqrt(d2) <= 1e-6f * extent)
+        return true; // Collinear.
+
+    const Vec3f normal = (*p1 - p0).cross(*p2 - p0).normalized();
+    const float tol    = 1e-6f * extent;
+    return std::none_of(pts.begin(), pts.end(), [&](const Vec3f &p) { return std::abs((p - p0).dot(normal)) > tol; });
+}
+
 indexed_triangle_set its_convex_hull(const std::vector<Vec3f> &pts)
 {
     std::vector<Vec3f>  dst_vertices;
     std::vector<Vec3i>  dst_facets;
 
-    if (! pts.empty()) {
+    // A flat point set (e.g. a printbed sheet) has no 3D hull; that is not an error.
+    if (! pts.empty() && ! points_are_planar(pts)) {
         // The qhull call:
         orgQhull::Qhull qhull;
         qhull.disableOutputStream(); // we want qhull to be quiet
@@ -1453,6 +1487,9 @@ indexed_triangle_set its_convex_hull(const std::vector<Vec3f> &pts)
                     src_vertices.emplace_back(v(i));
             qhull.runQhull("", 3, (int)src_vertices.size() / 3, src_vertices.data(), "Qt");
     #endif
+        } catch (const std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "its_convex_hull: Unable to create convex hull: " << ex.what();
+            return {};
         } catch (...) {
             BOOST_LOG_TRIVIAL(error) << "its_convex_hull: Unable to create convex hull";
             return {};

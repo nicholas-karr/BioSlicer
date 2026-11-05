@@ -468,6 +468,7 @@ TEST_CASE("ExtrusionMultiPath simplification", "[ArcWelderMultiPathSimplify][!ma
             if (const double length = (segment_it->point - prev_pt).cast<double>().norm(); length < min_segment_length) {
                 min_segment_length = length;
             }
+            prev_pt = segment_it->point;
         }
     }
 

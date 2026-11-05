@@ -23,6 +23,7 @@ from hybrid_3mf_utils import (
     objects_from_grouped,
     run_slice,
     write_3mf,
+    single_sla_channel,
     write_sla_override_ini,
 )
 
@@ -123,12 +124,11 @@ def main() -> int:
     write_3mf(path_3mf, objects, model_name=args.name)
     write_sla_override_ini(
         path_override_ini,
-        sla_extruder=4,
+        **single_sla_channel(4, 4, "resin_waffle_nodes"),
         synth_width=synth_width,
         synth_height=synth_height,
         synth_fps=synth_fps,
         synth_lossless=synth_lossless,
-        video_name="resin_waffle_nodes",
     )
 
     run_slice(

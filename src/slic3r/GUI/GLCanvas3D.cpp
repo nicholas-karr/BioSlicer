@@ -23,6 +23,7 @@
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/SLAMaterial.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -2171,6 +2172,8 @@ void GLCanvas3D::render()
         _render_objects(GLVolumeCollection::ERenderType::Opaque);
         _render_sla_slices();
         _render_selection();
+        if (current_printer_technology() == ptFFF && m_model != nullptr)
+            m_droplet_markers.render(*m_model, m_selected_droplet ? &*m_selected_droplet : nullptr);
         //_render_bed_axes();
         if (is_looking_downward)
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), false);
@@ -5330,6 +5333,24 @@ bool GLCanvas3D::_init_main_toolbar()
     if (!m_main_toolbar.add_item(item))
         return false;
 
+    item.name = "droplets_generate";
+    item.icon_filename = "droplets.svg";
+    item.tooltip = _u8L("Generate Droplet Series...");
+    item.sprite_id = sprite_id++;
+    item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_DROPLETS_GENERATE)); };
+    item.enabling_callback = GLToolbarItem::Default_Enabling_Callback;
+    if (!m_main_toolbar.add_item(item))
+        return false;
+
+    item.name = "droplets_edit";
+    item.icon_filename = "droplets_edit.svg";
+    item.tooltip = _u8L("Edit Droplets");
+    item.sprite_id = sprite_id++;
+    item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_DROPLETS_EDIT)); };
+    item.enabling_callback = GLToolbarItem::Default_Enabling_Callback;
+    if (!m_main_toolbar.add_item(item))
+        return false;
+
     item.name = "delete";
     item.icon_filename = "remove.svg";
     item.tooltip = _u8L("Delete") + " [Del]";
@@ -7209,8 +7230,7 @@ void GLCanvas3D::_render_fff_sla_slices()
     if (print == nullptr || print->objects().empty())
         return;
 
-    const auto& sla_flags = print->config().sla_material_extruder.values;
-    if (std::none_of(sla_flags.begin(), sla_flags.end(), [](bool b) { return b; }))
+    if (!print_has_sla_regions(*print))
         return;
 
     double clip_max_z;
@@ -7221,9 +7241,9 @@ void GLCanvas3D::_render_fff_sla_slices()
     else
         return;
 
-    if (!m_fff_sla_cap.matches(clip_max_z)) {
+    if (!m_fff_sla_cap.built) {
         m_fff_sla_cap.reset();
-        m_fff_sla_cap.z = clip_max_z;
+        m_fff_sla_cap.built = true;
 
         auto build_outline = [](GLModel& model, const ExPolygons& expolys,
                                 double top_z, const ColorRGBA& color) {
@@ -7285,23 +7305,40 @@ void GLCanvas3D::_render_fff_sla_slices()
                 model.init_from(std::move(geom));
         };
 
-        static const std::array<ColorRGBA, 4> sla_colors = {{
+        // sla_material_extruder allows an arbitrary number of channels; wrapping a
+        // short palette makes distinct SLA materials indistinguishable in preview
+        // once there are more channels than colors. Sixteen visually-separated
+        // entries cover realistic printer configurations; beyond that the palette
+        // still wraps rather than failing, since exact color uniqueness isn't
+        // required for correctness.
+        static const std::array<ColorRGBA, 16> sla_colors = {{
             { 0.0f, 0.80f, 0.80f, 1.0f },
             { 0.0f, 0.60f, 1.00f, 1.0f },
             { 0.4f, 0.90f, 0.70f, 1.0f },
             { 0.2f, 0.70f, 1.00f, 1.0f },
+            { 0.85f, 0.55f, 0.10f, 1.0f },
+            { 0.65f, 0.20f, 0.85f, 1.0f },
+            { 0.90f, 0.30f, 0.30f, 1.0f },
+            { 0.30f, 0.85f, 0.30f, 1.0f },
+            { 0.95f, 0.80f, 0.10f, 1.0f },
+            { 0.55f, 0.35f, 0.20f, 1.0f },
+            { 0.10f, 0.40f, 0.30f, 1.0f },
+            { 0.90f, 0.50f, 0.75f, 1.0f },
+            { 0.45f, 0.45f, 0.90f, 1.0f },
+            { 0.75f, 0.75f, 0.75f, 1.0f },
+            { 0.20f, 0.20f, 0.55f, 1.0f },
+            { 0.65f, 0.85f, 0.15f, 1.0f },
         }};
 
         for (const PrintObject* obj : print->objects()) {
             for (const Layer* layer : obj->layers()) {
-                if (layer->print_z > clip_max_z + 1e-6)
-                    break;
-
                 std::map<unsigned int, ExPolygons> by_ext;
                 for (const LayerRegion* lr : layer->regions()) {
-                    const unsigned int ext = lr->region().extruder(frPerimeter);
-                    if (ext == 0 || ext > (unsigned int)sla_flags.size() || !sla_flags[ext - 1])
+                    const RegionTechnologyAssignment assignment =
+                        classify_region_technology(print->config(), lr->region());
+                    if (assignment.technology != RegionTechnology::SLA)
                         continue;
+                    const unsigned int ext = assignment.sla_extruder;
                     for (const Surface& s : lr->slices())
                         by_ext[ext].push_back(s.expolygon);
                 }
@@ -7349,9 +7386,11 @@ void GLCanvas3D::_render_fff_sla_slices()
     // At an SLA step position, only entries whose layer_z < step_z, or whose layer_z ≈ step_z
     // and ext_id ≤ step_ext, are shown.
     auto step_visible = [&](size_t i) -> bool {
+        const auto& [key_z, key_ext] = m_fff_sla_cap.step_keys[i];
+        if (key_z > clip_max_z + 1e-6)
+            return false;
         if (m_fff_sla_step_z == DBL_MAX)
             return true;
-        const auto& [key_z, key_ext] = m_fff_sla_cap.step_keys[i];
         if (key_z < m_fff_sla_step_z - 1e-4)
             return true;
         if (key_z < m_fff_sla_step_z + 1e-4 && key_ext <= m_fff_sla_step_ext)

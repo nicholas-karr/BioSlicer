@@ -59,6 +59,8 @@ Model& Model::assign_copy(const Model &rhs)
 		this->objects.emplace_back(mo);
     }
 
+    this->droplet_sets = rhs.droplet_sets;
+
     // copy custom code per height
     this->custom_gcode_per_print_z_vector = rhs.custom_gcode_per_print_z_vector;
     this->wipe_tower_vector = rhs.wipe_tower_vector;
@@ -81,6 +83,8 @@ Model& Model::assign_copy(Model &&rhs)
     for (ModelObject *model_object : this->objects)
         model_object->set_model(this);
     rhs.objects.clear();
+
+    this->droplet_sets = std::move(rhs.droplet_sets);
 
     // copy custom code per height
     this->custom_gcode_per_print_z_vector = std::move(rhs.custom_gcode_per_print_z_vector);
@@ -221,6 +225,15 @@ bool Model::delete_object(ObjectID id)
         }
     }
     return false;
+}
+
+bool Model::has_droplets() const
+{
+    auto has_points = [](const DropletSets &sets) {
+        return std::any_of(sets.begin(), sets.end(), [](const DropletSet &set) { return ! set.points.empty(); });
+    };
+    return has_points(this->droplet_sets) ||
+        std::any_of(this->objects.begin(), this->objects.end(), [&](const ModelObject *o) { return has_points(o->droplet_sets); });
 }
 
 void Model::clear_objects()
@@ -445,6 +458,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_support_points          = rhs.sla_support_points;
     this->sla_points_status           = rhs.sla_points_status;
     this->sla_drain_holes             = rhs.sla_drain_holes;
+    this->droplet_sets                = rhs.droplet_sets;
     this->layer_config_ranges         = rhs.layer_config_ranges;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
@@ -482,6 +496,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_support_points          = std::move(rhs.sla_support_points);
     this->sla_points_status           = std::move(rhs.sla_points_status);
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
+    this->droplet_sets                = std::move(rhs.droplet_sets);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
@@ -946,6 +961,10 @@ void ModelObject::translate(double x, double y, double z)
     for (ModelVolume *v : this->volumes) {
         v->translate(x, y, z);
     }
+    // The droplets stay where they are on the object.
+    for (DropletSet &set : this->droplet_sets)
+        for (DropletPoint &point : set.points)
+            point.pos += Vec3d(x, y, z);
 
     if (m_bounding_box_approx_valid)
         m_bounding_box_approx.translate(x, y, z);
@@ -994,6 +1013,9 @@ void ModelObject::scale_mesh_after_creation(const float scale)
         v->scale_geometry_after_creation(scale);
         v->set_offset(Vec3d(scale, scale, scale).cwiseProduct(v->get_offset()));
     }
+    for (DropletSet &set : this->droplet_sets)
+        for (DropletPoint &point : set.points)
+            point.pos *= double(scale);
     this->invalidate_bounding_box();
 }
 
@@ -1054,6 +1076,8 @@ void ModelObject::clone_for_cut(ModelObject** obj)
     (*obj)->set_model(this->get_model());
     (*obj)->sla_support_points.clear();
     (*obj)->sla_drain_holes.clear();
+    // The droplets would otherwise be dispensed once for every part of the cut.
+    (*obj)->droplet_sets.clear();
     (*obj)->sla_points_status = sla::PointsStatus::NoPoints;
     (*obj)->clear_volumes();
     (*obj)->input_file.clear();

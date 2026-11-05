@@ -24,6 +24,7 @@
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "Print.hpp"
+#include "SLAMaterial.hpp"
 #include "ShortestPath.hpp"
 #include "SVG.hpp"
 #include "BoundingBox.hpp"
@@ -689,6 +690,17 @@ void Layer::make_perimeters()
         layerm.m_fill_expolygons_composite.clear();
         layerm.m_fill_expolygons_composite_bboxes.clear();
     };
+    auto discard_gap_fill_from_expanded_geometry = [](
+            LayerRegion &layerm,
+            std::vector<std::pair<ExtrusionRange, ExtrusionRange>> &ranges) {
+        // Gap-fill paths cannot currently be clipped back to a source material
+        // mask without losing their variable-width semantics. For a perimeter
+        // synthesized across an SLA neighbor, omitting them is safer than
+        // extruding FFF material into an exposure-only region.
+        layerm.m_thin_fills.clear();
+        for (auto &range : ranges)
+            range.second = ExtrusionRange{0, 0};
+    };
 
     // Remove layer islands, remove references to perimeters and fills from these layer islands to LayerRegion ExtrusionEntities.
     for (LayerSlice &lslice : this->lslices_ex)
@@ -708,13 +720,15 @@ void Layer::make_perimeters()
 
         // SLA-channel regions are exposed by the SLA video pipeline, not FFF toolpaths.
         // Clearing paths and skipping path generation leaves slices() intact for video synthesis.
-        {
-            const auto& sla_flags = m_object->print()->config().sla_material_extruder.values;
-            if (!sla_flags.empty()) {
-                const unsigned int ext = curr_region.region().extruder(frPerimeter);
-                if (ext > 0 && ext <= (unsigned int)sla_flags.size() && sla_flags[ext - 1])
-                    continue;
-            }
+        // Deliberately do NOT set done[curr_region_id] here: this region must
+        // stay claimable by the "SLA neighbor" scan below (run from whichever
+        // FFF region processes first), or an SLA region whose index precedes
+        // its FFF neighbor's would be permanently skipped instead of unioned,
+        // reopening the outer-wall gap that scan exists to close.
+        if (classify_region_technology(
+                m_object->print()->config(), curr_region.region()).technology
+            == RegionTechnology::SLA) {
+            continue;
         }
 
         BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id() << ", region " << curr_region_id;
@@ -760,22 +774,19 @@ void Layer::make_perimeters()
         // SLA regions are marked done here to avoid a redundant (empty) pass later.
         ExPolygons sla_neighbor_expolys;
         {
-            const auto &sla_flags = m_object->print()->config().sla_material_extruder.values;
-            if (!sla_flags.empty()) {
-                for (size_t rid = 0; rid < m_regions.size(); ++rid) {
-                    if (done[rid])
-                        continue;
-                    LayerRegion &lr = *m_regions[rid];
-                    if (lr.slices().empty())
-                        continue;
-                    const unsigned int ext_lr = lr.region().extruder(frPerimeter);
-                    if (ext_lr == 0 || ext_lr > (unsigned int)sla_flags.size() || !sla_flags[ext_lr - 1])
-                        continue;
-                    layer_region_reset_perimeters(lr);
-                    done[rid] = true;
-                    for (const Surface &s : lr.slices())
-                        sla_neighbor_expolys.push_back(s.expolygon);
-                }
+            for (size_t rid = 0; rid < m_regions.size(); ++rid) {
+                if (done[rid])
+                    continue;
+                LayerRegion &lr = *m_regions[rid];
+                if (lr.slices().empty()
+                    || classify_region_technology(
+                           m_object->print()->config(), lr.region()).technology
+                       != RegionTechnology::SLA)
+                    continue;
+                layer_region_reset_perimeters(lr);
+                done[rid] = true;
+                for (const Surface &s : lr.slices())
+                    sla_neighbor_expolys.push_back(s.expolygon);
             }
         }
 
@@ -795,6 +806,29 @@ void Layer::make_perimeters()
                 for (ExPolygon &ep : combined)
                     expanded_slices.surfaces.emplace_back(Surface(stInternal, std::move(ep)));
                 curr_region.make_perimeters(expanded_slices, perimeter_regions, perimeter_and_gapfill_ranges, fill_expolygons, fill_expolygons_ranges);
+                discard_gap_fill_from_expanded_geometry(
+                    curr_region, perimeter_and_gapfill_ranges);
+                // Perimeters intentionally follow the union of adjacent FFF and
+                // SLA geometry. Fill remains an FFF operation and must be
+                // restricted to the original FFF mask. Rebuild each source
+                // range so later island indexing stays valid if clipping splits
+                // or removes a polygon.
+                {
+                    ExPolygons clipped_fill;
+                    std::vector<ExPolygonRange> clipped_ranges;
+                    clipped_ranges.reserve(fill_expolygons_ranges.size());
+                    const ExPolygons fff_mask = union_ex(curr_region.slices().surfaces);
+                    for (const ExPolygonRange range : fill_expolygons_ranges) {
+                        const uint32_t begin = uint32_t(clipped_fill.size());
+                        for (const uint32_t index : range)
+                            append(clipped_fill, intersection_ex(
+                                ExPolygons{fill_expolygons[index]}, fff_mask));
+                        const uint32_t end = uint32_t(clipped_fill.size());
+                        clipped_ranges.emplace_back(begin, end);
+                    }
+                    fill_expolygons = std::move(clipped_fill);
+                    fill_expolygons_ranges = std::move(clipped_ranges);
+                }
                 // sort_perimeters_into_islands() indexes perimeter_and_gapfill_ranges and
                 // fill_expolygons_ranges in lockstep with the slices passed to it, and those
                 // ranges were produced from expanded_slices above (not curr_region.slices()),
@@ -857,6 +891,31 @@ void Layer::make_perimeters()
                 for (ExPolygon &ep : combined)
                     new_slices_for_perim.surfaces.emplace_back(Surface(stInternal, std::move(ep)));
                 layerm_config->make_perimeters(new_slices_for_perim, perimeter_regions, perimeter_and_gapfill_ranges, fill_expolygons, fill_expolygons_ranges);
+                discard_gap_fill_from_expanded_geometry(
+                    *layerm_config, perimeter_and_gapfill_ranges);
+                // Same reasoning as the single-region branch above: perimeters
+                // follow the union of adjacent FFF and SLA geometry, but fill
+                // remains an FFF operation and must be restricted back to the
+                // merged FFF-only mask (new_slices, built above from the
+                // compatible FFF regions only — sla_neighbor_expolys was never
+                // added to it). Rebuild each source range so later island
+                // indexing stays valid if clipping splits or removes a polygon.
+                {
+                    ExPolygons clipped_fill;
+                    std::vector<ExPolygonRange> clipped_ranges;
+                    clipped_ranges.reserve(fill_expolygons_ranges.size());
+                    const ExPolygons fff_mask = union_ex(new_slices.surfaces);
+                    for (const ExPolygonRange range : fill_expolygons_ranges) {
+                        const uint32_t begin = uint32_t(clipped_fill.size());
+                        for (const uint32_t index : range)
+                            append(clipped_fill, intersection_ex(
+                                ExPolygons{fill_expolygons[index]}, fff_mask));
+                        const uint32_t end = uint32_t(clipped_fill.size());
+                        clipped_ranges.emplace_back(begin, end);
+                    }
+                    fill_expolygons = std::move(clipped_fill);
+                    fill_expolygons_ranges = std::move(clipped_ranges);
+                }
                 // See the single-region branch above: the ranges below are indexed against
                 // new_slices_for_perim (what was actually passed to make_perimeters()), not
                 // new_slices, so that's what must be passed here to avoid out-of-bounds indexing.

@@ -56,6 +56,9 @@ void PrintBase::update_object_placeholders(DynamicConfig &config, const std::str
         const std::string input_filename_base = input_filename.substr(0, input_filename.find_last_of("."));
 //        config.set_key_value("input_filename", new ConfigOptionString(input_filename_base + default_output_ext));
         config.set_key_value("input_filename_base", new ConfigOptionString(input_filename_base));
+    } else if (m_model.has_droplets()) {
+        // A job of droplets only has no object to take the name from.
+        config.set_key_value("input_filename_base", new ConfigOptionString("droplets"));
     }
 }
 

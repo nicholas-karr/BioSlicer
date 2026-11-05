@@ -1155,6 +1155,20 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         }
     }
 
+    // Droplets are not part of any PrintObject: they only reach the G-code.
+    {
+        size_t skipped = 0;
+        std::vector<ResolvedDroplet> droplets = collect_droplets(model, m_config, &skipped);
+        if (skipped != m_droplets_skipped) {
+            update_apply_status(this->invalidate_step(psGCodeExport));
+            m_droplets_skipped = skipped;
+        }
+        if (droplets != m_droplets) {
+            update_apply_status(this->invalidate_step(psGCodeExport));
+            m_droplets = std::move(droplets);
+        }
+    }
+
     // Check the position and rotation of the wipe tower.
     if (model.wipe_tower() != m_model.wipe_tower())
         update_apply_status(this->invalidate_step(psSkirtBrim));

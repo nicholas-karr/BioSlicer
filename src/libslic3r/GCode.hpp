@@ -181,7 +181,15 @@ private:
     class GCodeOutputStream {
     public:
         GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
-        ~GCodeOutputStream() { this->close(); }
+        ~GCodeOutputStream()
+        {
+            try {
+                this->close();
+            } catch (...) {
+                // Destructors must not throw. Export paths close explicitly so
+                // delayed I/O errors are still reported to the caller.
+            }
+        }
 
         // Set a find-replace post-processor to modify the G-code before GCodePostProcessor.
         // It is being set to null inside process_layers(), because the find-replace process
@@ -368,6 +376,26 @@ private:
     std::string     retract_and_wipe(bool toolchange = false, bool reset_e = true);
     std::string     unretract() { return m_writer.unretract(); }
     std::string     set_extruder(unsigned int extruder_id, double print_z);
+    // True when the tool change G-code selects the tool by itself (toolchange_omit_tool_command), so the
+    // printer has no notion of the slicer's tool numbers and only the active tool can be addressed.
+    bool            tools_selected_by_custom_gcode() const;
+    // Name an SLA extruder's video goes by in the G-code metadata and in the SLA placeholders.
+    std::string     sla_video_name(unsigned int extruder_id) const;
+    // The custom toolchange_gcode with its placeholders resolved for a change to extruder_id; empty when
+    // there is none. previous_extruder_id is -1 when no tool was active before.
+    std::string     process_toolchange_gcode(int previous_extruder_id, unsigned int extruder_id, double print_z);
+    // G-code selecting the material of an SLA extruder before it is exposed.
+    std::string     sla_material_change(unsigned int extruder_id, double print_z);
+    // SLA G-code of one layer: for every SLA extruder (1-based, ascending) the projector blanking, material
+    // change, layer transition and exposure. Advances the frame counters, so call it exactly once per layer.
+    std::string     sla_layer_gcode(const std::vector<unsigned int> &sla_extruders, double print_z);
+    // Are droplets due on the layer at layer_z (object height without z offset), or all remaining ones when flush_all?
+    bool            droplets_due(double layer_z, bool flush_all) const;
+    // Droplet G-code of one layer: the droplets landing at or below layer_z (all remaining ones when flush_all),
+    // per droplet extruder ascending. Call it exactly once per layer, after the SLA G-code of the layer.
+    std::string     droplet_layer_gcode(double layer_z, double print_z, bool flush_all);
+    // G-code dispensing the droplets of one droplet extruder (0-based).
+    std::string     droplet_extruder_gcode(unsigned int extruder_id, std::vector<ResolvedDroplet> droplets, double print_z);
     bool line_distancer_is_required(const std::vector<unsigned int>& extruder_ids);
 
     Seams::Placer                       m_seam_placer;
@@ -469,10 +497,18 @@ private:
     bool                                m_second_layer_things_done;
     // Per-SLA-extruder frame counters: extruder_id → number of layers shown so far.
     std::unordered_map<unsigned int, size_t> m_sla_layer_counters;
-    // Last SLA extruder for which BIOSLICER_MATERIAL_SWAP was emitted; -1 if none.
+    // Material name (see material_token) of every extruder, indexed by extruder id; empty when it has none.
+    std::vector<std::string>            m_extruder_material_names;
+    // Last SLA extruder (1-based) whose material was selected, see sla_material_change(); -1 if none.
     int                                 m_last_sla_extruder{ -1 };
+    // Droplets not dispensed yet, ascending by landing height.
+    std::vector<ResolvedDroplet>        m_pending_droplets;
+    // Set when a droplet material was selected: the tool of the next extrusions has to be selected again.
+    bool                                m_reselect_tool{ false };
     // 1-based video position assigned to each SLA extruder (ext0 → position) by the embedding loop.
     std::unordered_map<unsigned int, unsigned int> m_sla_video_index;
+    // Name each SLA extruder's video was emitted under (ext0 → name) by the embedding loop.
+    std::unordered_map<unsigned int, std::string>  m_sla_video_names;
     // G-code that is due to be written before the next extrusion
     std::string                         m_pending_pre_extrusion_gcode;
     // Pointer to currently exporting PrintObject and instance index.

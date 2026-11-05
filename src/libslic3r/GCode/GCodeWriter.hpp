@@ -72,7 +72,8 @@ public:
     // Prefix of the toolchange G-code line, to be used by the CoolingBuffer to separate sections of the G-code
     // printed with the same extruder.
     std::string toolchange_prefix() const;
-    std::string toolchange(unsigned int extruder_id);
+    // With omit_tool_command the T line is replaced by a comment tag carrying the extruder id.
+    std::string toolchange(unsigned int extruder_id, bool omit_tool_command = false);
     std::string set_speed(double F, const std::string_view comment = {}, const std::string_view cooling_marker = {}) const;
 
     /**

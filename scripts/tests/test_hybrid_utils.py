@@ -21,6 +21,7 @@ from hybrid_3mf_utils import (
     make_model_config_xml,
     MeshObject,
     parse_vendor_ini_section,
+    single_sla_channel,
     write_3mf,
     write_slice_settings_ini,
     write_sla_override_ini,
@@ -335,6 +336,30 @@ class Write3mfTests(unittest.TestCase):
         # Object-level extruder metadata added by the staged change
         self.assertIn('key="extruder"', xml)
         self.assertIn('value="2"', xml)
+
+
+class SingleSlaChannelTests(unittest.TestCase):
+    def test_marks_only_the_sla_extruder(self):
+        ch = single_sla_channel(4, 4, "vid")
+        self.assertEqual(ch["sla_flags"], [0, 0, 0, 1])
+        self.assertEqual(ch["synth_flags"], [0, 0, 0, 1])
+        self.assertEqual(ch["embed_flags"], [0, 0, 0, 1])
+        self.assertEqual(ch["video_names"], ["", "", "", "vid"])
+        self.assertEqual(ch["video_paths"], ["", "", "", ""])
+
+    def test_accepted_by_write_sla_override_ini(self):
+        with tempfile.TemporaryDirectory() as d:
+            ini = Path(d) / "o.ini"
+            write_sla_override_ini(ini, **single_sla_channel(4, 2, "v"),
+                                   synth_width=1, synth_height=2, synth_fps=3, synth_lossless=False)
+            text = ini.read_text()
+        self.assertIn("sla_material_extruder = 0,1,0,0", text)
+        self.assertIn("sla_material_video_names = ;v;;", text)
+
+    def test_rejects_out_of_range_extruder(self):
+        for bad in (0, 5):
+            with self.assertRaises(ValueError):
+                single_sla_channel(4, bad, "v")
 
 
 if __name__ == "__main__":

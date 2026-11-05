@@ -22,6 +22,7 @@
 #include "SLA/Hollowing.hpp"
 #include "TriangleMesh.hpp"
 #include "CustomGCode.hpp"
+#include "Droplet.hpp"
 #include "TextConfiguration.hpp"
 #include "EmbossShape.hpp"
 #include "TriangleSelector.hpp"
@@ -403,6 +404,9 @@ public:
     // Holes to be drilled into the object so resin can flow out
     sla::DrainHoles         sla_drain_holes;
 
+    // Droplet points of this object in object coordinates. They follow the instances of the object.
+    DropletSets             droplet_sets;
+
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors           cut_connectors;
     CutId                 cut_id;
@@ -675,7 +679,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, droplet_sets);
 	}
 
     // Called by Print::validate() from the UI thread.
@@ -1259,6 +1263,8 @@ public:
     ModelMaterialMap    materials;
     // Objects are owned by a model. Each model may have multiple instances, each instance having its own transformation (shift, scale, rotation).
     ModelObjectPtrs     objects;
+    // Droplet points that belong to no object, in bed coordinates.
+    DropletSets         droplet_sets;
 
     ModelWipeTower& wipe_tower();
     const ModelWipeTower& wipe_tower() const;
@@ -1312,6 +1318,10 @@ public:
     void          delete_material(t_model_material_id material_id);
     void          clear_materials();
     bool          add_default_instances();
+    // Does any droplet set of the model or of its objects have a point?
+    bool          has_droplets() const;
+    // Is there anything to print: an object or a droplet.
+    bool          has_content() const { return ! this->objects.empty() || this->has_droplets(); }
     // Returns approximate axis aligned bounding box of this model.
     BoundingBoxf3 bounding_box_approx() const;
     // Returns exact axis aligned bounding box of this model.
@@ -1356,7 +1366,7 @@ private:
 	friend class cereal::access;
 	friend class UndoRedo::StackImpl;
 	template<class Archive> void serialize(Archive &ar) {
-		ar(materials, objects, wipe_tower_vector);
+		ar(materials, objects, wipe_tower_vector, droplet_sets);
     }
 };
 

@@ -190,7 +190,7 @@ bool  AppUpdater::priv::http_get_file(const std::string& url, size_t size_limit,
 				url,
 				http_status,
 				error);
-			BOOST_LOG_TRIVIAL(error) << error_message;
+			BOOST_LOG_TRIVIAL(warning) << error_message;
 		})
 		.on_complete([&](std::string body, unsigned /* http_status */) {
 			assert(complete_fn != nullptr);
@@ -348,7 +348,7 @@ void AppUpdater::priv::version_check(const std::string& version_check_url)
 	);
 	if (!res) {
 		std::string message = GUI::format("Downloading %1% version file has failed:\n%2%", SLIC3R_APP_NAME, error_message);
-		BOOST_LOG_TRIVIAL(error) << message;
+		BOOST_LOG_TRIVIAL(warning) << message;
 		if (m_triggered_by_user && wxApp::GetInstance() != nullptr) {
 			wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_APP_DOWNLOAD_FAILED);
 			evt->SetString(message);

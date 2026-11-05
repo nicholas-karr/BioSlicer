@@ -558,7 +558,11 @@ public:
 	void		init_options_list() override;
 	bool 		supports_printer_technology(const PrinterTechnology /* tech */) const override { return true; }
 
-	wxSizer*	create_bed_shape_widget(wxWindow* parent);
+	void		create_build_plate_line(ConfigOptionsGroup* optgroup);
+	wxSizer*	create_build_plate_widget(wxWindow* parent);
+	void		update_build_plate_fields(bool force = false);
+	wxTextCtrl*	m_plate_front_ctrl { nullptr };
+	wxTextCtrl*	m_plate_side_ctrl { nullptr };
 	void		cache_extruder_cnt(const DynamicPrintConfig* config = nullptr);
 	bool		apply_extruder_cnt_from_cache();
 	void		update_sla_prusa_specific_visibility() override;

@@ -62,6 +62,7 @@
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GalleryDialog.hpp"
+#include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
@@ -72,6 +73,9 @@
 #include <dbt.h>
 #include <shlobj.h>
 #endif // _WIN32
+
+// Defined in the generated BuildStamp.cpp, rewritten on every build.
+const char* bioslicer_build_timestamp();
 
 namespace Slic3r {
 namespace GUI {
@@ -596,6 +600,7 @@ void MainFrame::update_title()
     }
 
     title += wxString(build_id);
+    title += wxString::Format(" (built %s)", bioslicer_build_timestamp());
     if (wxGetApp().is_editor())
         title += (" " + _L("based on PrusaSlicer, Slic3r"));
 
@@ -1134,7 +1139,7 @@ bool MainFrame::can_export_gcode() const
     if (m_plater == nullptr)
         return false;
 
-    if (m_plater->model().objects.empty())
+    if (!m_plater->model().has_content())
         return false;
 
     if (m_plater->is_export_gcode_scheduled())
@@ -1147,7 +1152,7 @@ bool MainFrame::can_export_gcode() const
 
 bool MainFrame::can_send_gcode() const
 {
-    if (m_plater && ! m_plater->model().objects.empty())
+    if (m_plater && m_plater->model().has_content())
         if (const DynamicPrintConfig *cfg = wxGetApp().preset_bundle->physical_printers.get_selected_printer_config(); cfg)
             if (const auto *print_host_opt = cfg->option<ConfigOptionString>("print_host"); print_host_opt)
                 return ! print_host_opt->value.empty();
@@ -1178,7 +1183,7 @@ bool MainFrame::can_eject() const
 bool MainFrame::can_slice() const
 {
     bool bg_proc = wxGetApp().app_config->get_bool("background_processing");
-    return (m_plater != nullptr) ? !m_plater->model().objects.empty() && !bg_proc : false;
+    return (m_plater != nullptr) ? m_plater->model().has_content() && !bg_proc : false;
 }
 
 bool MainFrame::can_change_view() const
@@ -1531,6 +1536,22 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) {
                 ShapeGenDialog dlg(this);
                 dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate Droplet &Series") + dots,
+            _L("Generate a droplet series: a grid or line of droplets, or an array of wells with their droplets"),
+            [this](wxCommandEvent&) {
+                DropletGenDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Edit D&roplets"),
+            _L("Add, select and delete droplets by clicking in the 3D scene"),
+            [this](wxCommandEvent&) {
+                if (m_plater)
+                    m_plater->canvas3D()->get_gizmos_manager().open_gizmo(GLGizmosManager::Droplets);
             }, "shape_gallery", nullptr, []() { return true; }, this);
 
         wxMenu* export_menu = new wxMenu();

@@ -22,11 +22,11 @@ deps/build-linux/*
 **/.idea/
 .pkg_cache
 CMakeUserPresets.json
-image-display-config.yaml
 firmware/build
 build-default
 changes.patch
 /.flatpak-build-*/*
+/.flatpak-builder/
 /.flatpak-builder-*/*
 /.flatpak-repo-*/*
 /.cross-bioslicer-*/*
@@ -39,5 +39,7 @@ changes.patch
 /*.flatpak.sha256
 /flatpak/*.log
 /flatpak/bioslicer-deps-src.tar.gz
+/flatpak/bioslicer-deps-src.tar.gz.tmp.*
+/flatpak/.generated-*.yml
 /*.log
 /*-hash

@@ -950,28 +950,28 @@ void OtherInstanceMessageHandler::listen_instance_check()
     // connect to the bus and check for errors (use SESSION bus everywhere!)
     conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
     if (dbus_error_is_set(&err)) { 
-	    BOOST_LOG_TRIVIAL(error) << "DBus Connection Error: "<< err.message;
-	    BOOST_LOG_TRIVIAL(error) << "Dbus Messages listening terminating.";
+	    BOOST_LOG_TRIVIAL(warning) << "DBus Connection Error: "<< err.message;
+	    BOOST_LOG_TRIVIAL(warning) << "Dbus Messages listening terminating.";
         dbus_error_free(&err); 
         return;
     }
     if (NULL == conn) { 
-		BOOST_LOG_TRIVIAL(error) << "DBus Connection is NULL. Dbus Messages listening terminating.";
+		BOOST_LOG_TRIVIAL(warning) << "DBus Connection is NULL. Dbus Messages listening terminating.";
         return;
     }
 
 	// request our name on the bus and check for errors
 	name_req_val = dbus_bus_request_name(conn, interface_name.c_str(), DBUS_NAME_FLAG_REPLACE_EXISTING , &err);
 	if (dbus_error_is_set(&err)) {
-	    BOOST_LOG_TRIVIAL(error) << "DBus Request name Error: "<< err.message; 
-	    BOOST_LOG_TRIVIAL(error) << "Dbus Messages listening terminating.";
+	    BOOST_LOG_TRIVIAL(warning) << "DBus Request name Error: "<< err.message; 
+	    BOOST_LOG_TRIVIAL(warning) << "Dbus Messages listening terminating.";
 	    dbus_error_free(&err); 
 	    dbus_connection_unref(conn);
 	    return;
 	}
 	if (DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER != name_req_val) {
-		BOOST_LOG_TRIVIAL(error) << "Not primary owner of DBus name - probably another PrusaSlicer instance is running.";
-	    BOOST_LOG_TRIVIAL(error) << "Dbus Messages listening terminating.";
+		BOOST_LOG_TRIVIAL(warning) << "Not primary owner of DBus name - probably another PrusaSlicer instance is running.";
+	    BOOST_LOG_TRIVIAL(warning) << "Dbus Messages listening terminating.";
 	    dbus_connection_unref(conn);
 	    return;
 	}
@@ -983,8 +983,8 @@ void OtherInstanceMessageHandler::listen_instance_check()
     // register new object - this is our access to DBus
     dbus_connection_try_register_object_path(conn, object_name.c_str(), &vtable, NULL, &err);
    	if ( dbus_error_is_set(&err) ) {
-   		BOOST_LOG_TRIVIAL(error) << "DBus Register object Error: "<< err.message; 
-	    BOOST_LOG_TRIVIAL(error) << "Dbus Messages listening terminating.";
+   		BOOST_LOG_TRIVIAL(warning) << "DBus Register object Error: "<< err.message; 
+	    BOOST_LOG_TRIVIAL(warning) << "Dbus Messages listening terminating.";
 	    dbus_connection_unref(conn);
 		dbus_error_free(&err);
 		return;
@@ -1101,28 +1101,28 @@ void OtherInstanceMessageHandler::listen_multicast()
     // connect to the bus and check for errors (use SESSION bus everywhere!)
     conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
     if (dbus_error_is_set(&err)) { 
-	    BOOST_LOG_TRIVIAL(error) << "listen_multicast: DBus Connection Error: "<< err.message;
-	    BOOST_LOG_TRIVIAL(error) << "listen_multicast: Dbus Messages listening terminating.";
+	    BOOST_LOG_TRIVIAL(warning) << "listen_multicast: DBus Connection Error: "<< err.message;
+	    BOOST_LOG_TRIVIAL(warning) << "listen_multicast: Dbus Messages listening terminating.";
         dbus_error_free(&err); 
         return;
     }
     if (NULL == conn) { 
-		BOOST_LOG_TRIVIAL(error) << "listen_multicast: DBus Connection is NULL. Dbus Messages listening terminating.";
+		BOOST_LOG_TRIVIAL(warning) << "listen_multicast: DBus Connection is NULL. Dbus Messages listening terminating.";
         return;
     }
 
 	// request our name on the bus and check for errors
 	name_req_val = dbus_bus_request_name(conn, interface_name.c_str(), DBUS_NAME_FLAG_REPLACE_EXISTING , &err);
 	if (dbus_error_is_set(&err)) {
-	    BOOST_LOG_TRIVIAL(error) << "listen_multicast: DBus Request name Error: "<< err.message; 
-	    BOOST_LOG_TRIVIAL(error) << "listen_multicast: Dbus Messages listening terminating.";
+	    BOOST_LOG_TRIVIAL(warning) << "listen_multicast: DBus Request name Error: "<< err.message; 
+	    BOOST_LOG_TRIVIAL(warning) << "listen_multicast: Dbus Messages listening terminating.";
 	    dbus_error_free(&err); 
 	    dbus_connection_unref(conn);
 	    return;
 	}
 	if (DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER != name_req_val) {
-		BOOST_LOG_TRIVIAL(error) << "listen_multicast: Not primary owner of DBus name - probably another PrusaSlicer instance is running.";
-	    BOOST_LOG_TRIVIAL(error) << "listen_multicast: Dbus Messages listening terminating.";
+		BOOST_LOG_TRIVIAL(warning) << "listen_multicast: Not primary owner of DBus name - probably another PrusaSlicer instance is running.";
+	    BOOST_LOG_TRIVIAL(warning) << "listen_multicast: Dbus Messages listening terminating.";
 	    dbus_connection_unref(conn);
 	    return;
 	}

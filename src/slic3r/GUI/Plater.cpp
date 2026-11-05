@@ -151,6 +151,7 @@
 
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
 #include "WipeTowerDialog.hpp"
+#include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
 
 #include "libslic3r/CustomGCode.hpp"
@@ -539,6 +540,8 @@ struct Plater::priv
 
     void on_action_add(SimpleEvent&);
     void on_action_bioslicer_shape(SimpleEvent&);
+    void on_action_droplets_generate(SimpleEvent&);
+    void on_action_droplets_edit(SimpleEvent&);
     void on_action_split_objects(SimpleEvent&);
     void on_action_split_volumes(SimpleEvent&);
     void on_action_layersediting(SimpleEvent&);
@@ -754,6 +757,8 @@ void Plater::priv::init()
         // 3DScene/Toolbar:
         view3D_canvas->Bind(EVT_GLTOOLBAR_ADD, &priv::on_action_add, this);
         view3D_canvas->Bind(EVT_GLTOOLBAR_BIOSLICER_SHAPE, &priv::on_action_bioslicer_shape, this);
+        view3D_canvas->Bind(EVT_GLTOOLBAR_DROPLETS_GENERATE, &priv::on_action_droplets_generate, this);
+        view3D_canvas->Bind(EVT_GLTOOLBAR_DROPLETS_EDIT, &priv::on_action_droplets_edit, this);
         view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE, [this](SimpleEvent&) { q->remove_selected(); });
         view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE_ALL, [this](SimpleEvent&) { delete_all_objects_from_model(); });
 //        view3D_canvas->Bind(EVT_GLTOOLBAR_DELETE_ALL, [q](SimpleEvent&) { q->reset_with_confirm(); });
@@ -1984,7 +1989,8 @@ void Plater::priv::object_list_changed()
     }
 
     sidebar->enable_buttons(
-        s_multiple_beds.is_bed_occupied(s_multiple_beds.get_active_bed())
+        (s_multiple_beds.is_bed_occupied(s_multiple_beds.get_active_bed())
+            || (s_multiple_beds.get_active_bed() == 0 && model.has_droplets()))
         && !export_in_progress
         && is_sliceable(s_print_statuses[s_multiple_beds.get_active_bed()])
     );
@@ -2601,7 +2607,7 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 {
     wxCHECK_RET(!(output_path.empty() && upload_job.empty()), "export_gcode: output_path and upload_job empty");
     
-    if (model.objects.empty())
+    if (!model.has_content())
         return;
 
     if (background_process.is_export_scheduled()) {
@@ -3523,6 +3529,19 @@ void Plater::priv::on_action_bioslicer_shape(SimpleEvent&)
         return;
     ShapeGenDialog dlg(q);
     dlg.ShowModal();
+}
+
+void Plater::priv::on_action_droplets_generate(SimpleEvent&)
+{
+    if (q == nullptr)
+        return;
+    DropletGenDialog dlg(q);
+    dlg.ShowModal();
+}
+
+void Plater::priv::on_action_droplets_edit(SimpleEvent&)
+{
+    view3D->get_canvas3d()->get_gizmos_manager().open_gizmo(GLGizmosManager::Droplets);
 }
 
 void Plater::priv::on_action_split_objects(SimpleEvent&)
@@ -5449,6 +5468,27 @@ bool Plater::delete_object_from_model(size_t obj_idx) { return p->delete_object_
 
 std::vector<size_t> Plater::add_model_objects(const ModelObjectPtrs& model_objects) { return p->load_model_objects(model_objects); }
 
+void Plater::add_droplet_sets(DropletSets &&sets, const wxString &snapshot_name)
+{
+    if (sets.empty())
+        return;
+    Plater::TakeSnapshot snapshot(this, snapshot_name);
+    for (DropletSet &set : sets)
+        p->model.droplet_sets.emplace_back(std::move(set));
+    p->schedule_background_process();
+    p->update();
+    canvas3D()->set_as_dirty();
+}
+
+void Plater::set_droplet_sets(DropletSets &&sets)
+{
+    p->model.droplet_sets = std::move(sets);
+    // The droplets change the G-code only.
+    p->schedule_background_process();
+    p->update();
+    canvas3D()->set_as_dirty();
+}
+
 void Plater::remove_selected()
 {
     if (p->get_selection().is_empty())
@@ -5887,7 +5927,7 @@ std::optional<fs::path> Plater::get_multiple_output_dir(const std::string &start
 
 void Plater::export_gcode(bool prefer_removable)
 {
-    if (p->model.objects.empty())
+    if (!p->model.has_content())
         return;
 
     if (canvas3D()->get_gizmos_manager().is_in_editing_mode(true))
@@ -6331,7 +6371,7 @@ void publish(Model &model) {
 
 bool Plater::export_3mf(const boost::filesystem::path& output_path)
 {
-    if (p->model.objects.empty()) {
+    if (!p->model.has_content()) {
         MessageDialog dialog(nullptr, _L("The plater is empty.\nDo you want to save the project?"), _L("Save project"), wxYES_NO);
         if (dialog.ShowModal() != wxID_YES)
             return false;
@@ -6707,7 +6747,7 @@ void Plater::send_gcode()
 {
     // if physical_printer is selected, send gcode for this printer
     DynamicPrintConfig* physical_printer_config = wxGetApp().preset_bundle->physical_printers.get_selected_printer_config();
-    if (! physical_printer_config || p->model.objects.empty())
+    if (! physical_printer_config || !p->model.has_content())
         return;
 
     // Passwords and API keys

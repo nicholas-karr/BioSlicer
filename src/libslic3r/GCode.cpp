@@ -40,6 +40,7 @@
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "ShortestPath.hpp"
+#include "SLAMaterial.hpp"
 #include "Print.hpp"
 #include "Thread.hpp"
 #include "Utils.hpp"
@@ -301,11 +302,10 @@ static std::vector<ExPolygons> collect_sla_slice_expolys_per_layer(const Print &
 
             for (const LayerRegion *layer_region : layer->regions()) {
                 const PrintRegion &rgn = layer_region->region();
-                const bool matches =
-                    (rgn.extruder(frPerimeter)   != 0 && rgn.extruder(frPerimeter)   - 1 == extruder_id) ||
-                    (rgn.extruder(frInfill)      != 0 && rgn.extruder(frInfill)      - 1 == extruder_id) ||
-                    (rgn.extruder(frSolidInfill) != 0 && rgn.extruder(frSolidInfill) - 1 == extruder_id);
-                if (!matches)
+                const RegionTechnologyAssignment assignment =
+                    classify_region_technology(print.config(), rgn);
+                if (assignment.technology != RegionTechnology::SLA
+                    || assignment.sla_extruder - 1 != extruder_id)
                     continue;
 
                 for (const Surface &surface : layer_region->slices())
@@ -381,15 +381,31 @@ static void synthesize_sla_video_or_throw(
             gcode += '\n';
     }
 
+    // Longest SLA video name emitted; the offline extractor and the printer accept no more.
+    static constexpr size_t max_sla_video_name_length = 128;
+
     static std::string sanitize_sla_video_name(std::string name, unsigned int extruder_id)
     {
         boost::trim(name);
         if (name.empty())
             name = format("sla_t%1%", extruder_id);
 
+        auto is_ascii_alnum = [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9');
+        };
         for (char &c : name)
-            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '.')
+            if (!is_ascii_alnum(static_cast<unsigned char>(c))
+                && c != '_' && c != '-' && c != '.')
                 c = '_';
+        // A name made of digits only would collide with the 1-based position the printer also
+        // registers every video under (SLA_SHOW_FRAME NAME=<position>).
+        const bool digits_only = std::all_of(name.begin(), name.end(),
+            [](unsigned char c) { return c >= '0' && c <= '9'; });
+        if (digits_only || !is_ascii_alnum(static_cast<unsigned char>(name.front())))
+            name = "sla_" + name;
+        if (name.size() > max_sla_video_name_length)
+            name.resize(max_sla_video_name_length);
 
         return name;
     }
@@ -402,29 +418,35 @@ static void synthesize_sla_video_or_throw(
         return encoded;
     }
 
-    static std::vector<unsigned char> read_binary_file_or_throw(const std::string &path)
+    struct BinaryFileDigest {
+        size_t      size { 0 };
+        std::string sha256;
+    };
+
+    static BinaryFileDigest digest_binary_file_or_throw(const std::string &path)
     {
         FilePtr file(boost::nowide::fopen(path.c_str(), "rb"));
         if (file.f == nullptr)
             throw Slic3r::ExportError(format("Failed to open SLA video file: %1%", path));
 
-        if (::fseek(file.f, 0, SEEK_END) != 0)
-            throw Slic3r::ExportError(format("Failed to seek SLA video file: %1%", path));
-
-        const long file_size = ::ftell(file.f);
-        if (file_size < 0)
-            throw Slic3r::ExportError(format("Failed to read SLA video file size: %1%", path));
-
-        if (::fseek(file.f, 0, SEEK_SET) != 0)
-            throw Slic3r::ExportError(format("Failed to rewind SLA video file: %1%", path));
-
-        const size_t payload_size = static_cast<size_t>(file_size);
-        std::vector<unsigned char> video_buffer;
-        video_buffer.resize(payload_size);
-        if (!video_buffer.empty() && ::fread(video_buffer.data(), 1, video_buffer.size(), file.f) != video_buffer.size())
+        Sha256 sha;
+        std::array<unsigned char, 64 * 1024> buffer;
+        size_t total_size = 0;
+        for (;;) {
+            const size_t count = ::fread(buffer.data(), 1, buffer.size(), file.f);
+            if (count > 0) {
+                if (count > std::numeric_limits<size_t>::max() - total_size)
+                    throw Slic3r::ExportError(format("SLA video file is too large: %1%", path));
+                sha.update(buffer.data(), count);
+                total_size += count;
+            }
+            if (count != buffer.size())
+                break;
+        }
+        if (::ferror(file.f))
             throw Slic3r::ExportError(format("Failed to read SLA video file: %1%", path));
 
-        return video_buffer;
+        return { total_size, sha256_digest_to_hex(sha.finalize()) };
     }
 
     // Return true if tch_prefix is found in custom_gcode
@@ -674,21 +696,14 @@ GCodeGenerator::ObjectsLayerToPrint GCodeGenerator::collect_layers_to_print(cons
         // SLA-channel regions generate no FFF toolpaths, but the layer is not empty —
         // the exposure is handled by the SLA video pipeline. Treat such layers as
         // having extrusions so the continuity warning is not falsely triggered.
-        if (!has_extrusions && layer_to_print.object_layer) {
-            const auto& sla_flags = object.print()->config().sla_material_extruder.values;
-            if (!sla_flags.empty()) {
-                for (const LayerRegion* lr : layer_to_print.object_layer->regions()) {
-                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
-                        const unsigned int ext = lr->region().extruder(role);
-                        if (ext > 0 && ext <= (unsigned int)sla_flags.size() && sla_flags[ext - 1]) {
-                            has_extrusions = true;
-                            break;
-                        }
-                    }
-                    if (has_extrusions) break;
+        if (!has_extrusions && layer_to_print.object_layer)
+            for (const LayerRegion* lr : layer_to_print.object_layer->regions())
+                if (classify_region_technology(
+                        object.print()->config(), lr->region()).technology
+                    == RegionTechnology::SLA) {
+                    has_extrusions = true;
+                    break;
                 }
-            }
-        }
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
@@ -968,19 +983,17 @@ void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorRes
     try {
         this->_do_export(*print, file, thumbnail_cb);
         file.flush();
-        if (file.is_error()) {
-            file.close();
-            boost::nowide::remove(path_tmp.c_str());
-            throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed\nIs the disk full?\n");
-        }
-    } catch (std::exception & /* ex */) {
+        file.close();
+    } catch (...) {
         // Rethrow on any exception. std::runtime_exception and CanceledException are expected to be thrown.
         // Close and remove the file.
-        file.close();
+        try {
+            file.close();
+        } catch (...) {
+        }
         boost::nowide::remove(path_tmp.c_str());
         throw;
     }
-    file.close();
 
     if (! m_placeholder_parser_integration.failed_templates.empty()) {
         // G-code export proceeded, but some of the PlaceholderParser substitutions failed.
@@ -1079,10 +1092,16 @@ namespace DoExport {
             if (::fwrite(checksum_hex.data(), 1, checksum_hex.size(), file) != checksum_hex.size())
                 throw Slic3r::RuntimeError("Failed to write checksum value.");
 
-            ::fflush(file);
-            ::fclose(file);
+            if (::fflush(file) != 0 || ::ferror(file))
+                throw Slic3r::RuntimeError("Failed to flush checksum value.");
+            if (::fclose(file) != 0) {
+                file = nullptr;
+                throw Slic3r::RuntimeError("Failed to close checksummed G-code.");
+            }
+            file = nullptr;
         } catch (...) {
-            ::fclose(file);
+            if (file != nullptr)
+                ::fclose(file);
             throw;
         }
     }
@@ -1423,6 +1442,13 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
 
+    m_pending_droplets = print.droplets();
+    std::stable_sort(m_pending_droplets.begin(), m_pending_droplets.end(),
+        [](const ResolvedDroplet &a, const ResolvedDroplet &b) { return a.pos.z() < b.pos.z(); });
+    m_reselect_tool = false;
+    if (! m_pending_droplets.empty() && print.config().complete_objects.value)
+        throw Slic3r::ExportError(_u8L("Sequential printing is not supported with droplets."));
+
     m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
 
@@ -1497,9 +1523,14 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             const int bed_ext = (bte > 0 && bte <= (int)sla_video_extruder_count) ? bte - 1 : 0;
 
             // Build compact dict strings grouped by channel type.
-            std::string sla_exp, sla_dbf, sla_daf, fff_flt, fff_t;
+            std::string sla_exp, sla_dbf, sla_daf, fff_flt, fff_t, drp_nl, drp_hz, drp_settle;
             for (size_t i = 0; i < sla_video_extruder_count; ++i) {
-                if (m_config.sla_material_extruder.get_at(i)) {
+                if (is_droplet_extruder(m_config, unsigned(i + 1))) {
+                    if (!drp_nl.empty()) { drp_nl += ','; drp_hz += ','; drp_settle += ','; }
+                    drp_nl     += format("%zu:%.6g", i, m_config.filament_droplet_nl_per_us.get_at(i));
+                    drp_hz     += format("%zu:%.6g", i, m_config.filament_droplet_frequency.get_at(i));
+                    drp_settle += format("%zu:%.6g", i, m_config.droplet_settle_time.get_at(i));
+                } else if (m_config.sla_material_extruder.get_at(i)) {
                     if (!sla_exp.empty()) { sla_exp += ','; sla_dbf += ','; sla_daf += ','; }
                     sla_exp += format("%zu:%.6g", i, m_config.sla_material_exposure_time.get_at(i));
                     sla_dbf += format("%zu:%.6g", i, m_config.sla_material_delay_before_exposure.get_at(i));
@@ -1514,7 +1545,14 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             // Human-readable comment summary.
             file.write("; === BioSlicer process parameters ===\n");
             for (size_t i = 0; i < sla_video_extruder_count; ++i) {
-                if (m_config.sla_material_extruder.get_at(i))
+                if (is_droplet_extruder(m_config, unsigned(i + 1)))
+                    file.write_format(
+                        "; extruder %zu (droplet): %.6g nL/us, %.4g Hz, settle=%.4gs\n",
+                        i,
+                        m_config.filament_droplet_nl_per_us.get_at(i),
+                        m_config.filament_droplet_frequency.get_at(i),
+                        m_config.droplet_settle_time.get_at(i));
+                else if (m_config.sla_material_extruder.get_at(i))
                     file.write_format(
                         "; extruder %zu (SLA): exposure=%.4gs delay_before=%.4gs delay_after=%.4gs\n",
                         i,
@@ -1531,12 +1569,17 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             file.write_format("; bed: first_layer_temp=%dC temp=%dC\n",
                 m_config.first_layer_bed_temperature.get_at(bed_ext),
                 m_config.bed_temperature.get_at(bed_ext));
-            file.write("; Override: BIOSLICER_OVERRIDE PARAM=sla_exposure EXTRUDER=4 VALUE=7.0  (see bioslicer_klipper.cfg)\n\n");
+            file.write("; Override: BIOSLICER_OVERRIDE PARAM=sla_exposure EXTRUDER=4 VALUE=7.0  (run BIOSLICER_INFO on the printer for all parameters)\n\n");
 
             // Executable variable block — one SET_GCODE_VARIABLE per parameter group.
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_exposure VALUE={%s}\n",       sla_exp.c_str());
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_delay_before VALUE={%s}\n",   sla_dbf.c_str());
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=sla_delay_after VALUE={%s}\n",    sla_daf.c_str());
+            if (!drp_nl.empty()) {
+                file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=droplet_nl_per_us VALUE={%s}\n",    drp_nl.c_str());
+                file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=droplet_frequency VALUE={%s}\n",    drp_hz.c_str());
+                file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=droplet_settle VALUE={%s}\n",       drp_settle.c_str());
+            }
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=fff_first_layer_temp VALUE={%s}\n", fff_flt.c_str());
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=fff_temp VALUE={%s}\n",           fff_t.c_str());
             file.write_format("SET_GCODE_VARIABLE MACRO=BIOSLICER_PROCESS_PARAMS VARIABLE=bed_first_layer_temp VALUE=%d\n",
@@ -1547,7 +1590,6 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         }
 
         // Emit SLA material videos either as base64 payload comments or as external references.
-        static constexpr const size_t max_row_length = 78;
         std::set<std::string> emitted_video_names;
         unsigned int sla_video_position = 0;
 
@@ -1559,6 +1601,13 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             const bool synthesize_video = m_config.sla_material_video_synthesize.get_at(extruder_id);
             std::string video_path = boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id));
             bool synthesized_to_temp = false;
+            ScopeGuard remove_synthesized_temp([&]() {
+                if (synthesized_to_temp) {
+                    boost::system::error_code ec;
+                    boost::filesystem::remove(
+                        boost::filesystem::path(video_path), ec);
+                }
+            });
 
             std::string video_name = sanitize_sla_video_name(m_config.sla_material_video_names.get_at(extruder_id), unsigned(extruder_id));
 
@@ -1581,7 +1630,9 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
                     }
                     const boost::filesystem::path temp_out =
                         boost::filesystem::temp_directory_path() /
-                        format("bioslicer_%1%_t%2%_native.mkv", video_name, extruder_id);
+                        boost::filesystem::unique_path(format(
+                            "bioslicer_%1%_t%2%_native-%%%%%%%%.mkv",
+                            video_name, extruder_id));
                     video_path = temp_out.string();
                     synthesized_to_temp = true;
                 }
@@ -1607,40 +1658,64 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             if (!synthesize_video && collect_sla_slice_expolys_per_layer(print, unsigned(extruder_id)).empty())
                 continue;
 
-            if (!emitted_video_names.insert(video_name).second)
-                video_name = format("%1%_t%2%", video_name, extruder_id);
+            if (!emitted_video_names.insert(video_name).second) {
+                // Two extruders share a name: tell them apart by extruder, keeping the length limit.
+                const std::string suffix = format("_t%1%", extruder_id);
+                if (video_name.size() + suffix.size() > max_sla_video_name_length)
+                    video_name.resize(max_sla_video_name_length - suffix.size());
+                video_name += suffix;
+                emitted_video_names.insert(video_name);
+            }
 
             m_sla_video_index[unsigned(extruder_id)] = ++sla_video_position;
+            m_sla_video_names[unsigned(extruder_id)] = video_name;
 
             file.write_format("; bioslicer_sla_material_map extruder=%u name=%s embedded=%d\n",
                 unsigned(extruder_id), video_name.c_str(), embed_video ? 1 : 0);
 
             if (embed_video) {
-                std::vector<unsigned char> video_data = read_binary_file_or_throw(video_path);
-                std::string encoded = encode_base64(video_data.data(), video_data.size());
-
-                Sha256 sha;
-                sha.update(video_data.data(), video_data.size());
-                const std::string video_sha256 = sha256_digest_to_hex(sha.finalize());
+                const BinaryFileDigest digest = digest_binary_file_or_throw(video_path);
 
                 file.write_format("; bioslicer_sla_video begin name=%s extruder=%u bytes=%zu sha256=%s\n",
-                    video_name.c_str(), unsigned(extruder_id), video_data.size(), video_sha256.c_str());
+                    video_name.c_str(), unsigned(extruder_id), digest.size, digest.sha256.c_str());
 
-                for (size_t offset = 0; offset < encoded.size(); offset += max_row_length) {
-                    const std::string chunk = encoded.substr(offset, max_row_length);
-                    file.write_format("; bioslicer_sla_video %s\n", chunk.c_str());
+                FilePtr video_file(boost::nowide::fopen(video_path.c_str(), "rb"));
+                if (video_file.f == nullptr)
+                    throw Slic3r::ExportError(format("Failed to reopen SLA video file: %1%", video_path));
+
+                // 57 input bytes encode to 76 base64 characters, keeping each
+                // G-code comment bounded without carrying the full video in RAM.
+                std::array<unsigned char, 57> input;
+                size_t streamed_size = 0;
+                Sha256 streamed_sha;
+                for (;;) {
+                    const size_t count = ::fread(input.data(), 1, input.size(), video_file.f);
+                    if (count > 0) {
+                        if (count > std::numeric_limits<size_t>::max() - streamed_size)
+                            throw Slic3r::ExportError(format(
+                                "SLA video file is too large: %1%", video_path));
+                        const std::string encoded = encode_base64(input.data(), count);
+                        file.write_format("; bioslicer_sla_video %s\n", encoded.c_str());
+                        streamed_sha.update(input.data(), count);
+                        streamed_size += count;
+                    }
                     print.throw_if_canceled();
+                    if (count != input.size())
+                        break;
                 }
+                const std::string streamed_sha256 =
+                    sha256_digest_to_hex(streamed_sha.finalize());
+                if (::ferror(video_file.f) || streamed_size != digest.size
+                    || streamed_sha256 != digest.sha256)
+                    throw Slic3r::ExportError(format("SLA video changed or could not be read while embedding: %1%", video_path));
 
                 file.write_format("; bioslicer_sla_video end name=%s\n", video_name.c_str());
 
-                if (synthesized_to_temp) {
-                    boost::system::error_code ec;
-                    boost::filesystem::remove(boost::filesystem::path(video_path), ec);
-                }
             } else {
-                file.write_format("; bioslicer_sla_video ref name=%s extruder=%u path=%s\n",
-                    video_name.c_str(), unsigned(extruder_id), video_path.c_str());
+                const std::string encoded_path = encode_base64(
+                    reinterpret_cast<const unsigned char *>(video_path.data()), video_path.size());
+                file.write_format("; bioslicer_sla_video ref name=%s extruder=%u path_b64=%s\n",
+                    video_name.c_str(), unsigned(extruder_id), encoded_path.c_str());
             }
         }
 
@@ -1664,11 +1739,12 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     print.throw_if_canceled();
 
     // Write some terse information on the slicing parameters.
-    const PrintObject *first_object         = print.objects().front();
-    const double       layer_height         = first_object->config().layer_height.value;
+    // A print of droplets alone has no object.
+    const PrintObject *first_object         = print.objects().empty() ? nullptr : print.objects().front();
+    const double       layer_height         = first_object ? first_object->config().layer_height.value : 0.;
     assert(! print.config().first_layer_height.percent);
     const double       first_layer_height   = print.config().first_layer_height.value;
-    if (!export_to_binary_gcode) {
+    if (!export_to_binary_gcode && first_object != nullptr) {
         for (size_t region_id = 0; region_id < print.num_print_regions(); ++ region_id) {
             const PrintRegion &region = print.get_print_region(region_id);
             file.write_format("; external perimeters extrusion width = %.2fmm\n", region.flow(*first_object, frExternalPerimeter, layer_height).width());
@@ -1706,23 +1782,6 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     unsigned int initial_extruder_id = (unsigned int)-1;
     unsigned int final_extruder_id   = (unsigned int)-1;
     // For SLA-only prints the tool ordering is empty (no FFF paths) but the print is still valid.
-    const auto print_has_sla_regions = [&print]() -> bool {
-        const auto &sla_flags = print.config().sla_material_extruder.values;
-        if (sla_flags.empty()) return false;
-        for (const PrintObject *pobj : print.objects()) {
-            for (const Layer *layer : pobj->layers()) {
-                for (const LayerRegion *lr : layer->regions()) {
-                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
-                        const unsigned int ext1 = lr->region().extruder(role);
-                        if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1])
-                            return true;
-                    }
-                }
-            }
-        }
-        return false;
-    };
-
     bool         has_wipe_tower      = false;
     std::vector<const PrintInstance*> 					print_object_instances_ordering;
     std::vector<const PrintInstance*>::const_iterator 	print_object_instance_sequential_active;
@@ -1737,7 +1796,7 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
             if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1))
                 break;
         }
-        if (initial_extruder_id == static_cast<unsigned int>(-1) && !print_has_sla_regions())
+        if (initial_extruder_id == static_cast<unsigned int>(-1) && !print_has_sla_regions(print) && print.droplets().empty())
             throw Slic3r::SlicingError(_u8L("No extrusions were generated for objects."));
         // We don't allow switching of extruders per layer by Model::custom_gcode_per_print_z in sequential mode.
         // Use the extruder IDs collected from Regions.
@@ -1747,16 +1806,15 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         // If the tool ordering has been pre-calculated by Print class for wipe tower already, reuse it.
         tool_ordering = print.tool_ordering();
         tool_ordering.assign_custom_gcodes(print);
-        if (tool_ordering.all_extruders().empty() && !print_has_sla_regions())
+        if (tool_ordering.all_extruders().empty() && !print_has_sla_regions(print) && print.droplets().empty())
             throw Slic3r::SlicingError(_u8L("No extrusions were generated for objects."));
         has_wipe_tower = print.has_wipe_tower() && tool_ordering.has_wipe_tower();
         if (tool_ordering.all_extruders().empty()) {
             // SLA-only print: no FFF extruder used. Use extruder 0 as a placeholder.
             initial_extruder_id = 0;
             this->set_extruders({0});
-            // Count layers from objects (tool ordering is empty for SLA-only).
-            for (const PrintObject *pobj : print.objects())
-                m_layer_count += (unsigned int)(pobj->instances().size() * pobj->layers().size());
+            // The tool ordering has no extruders, but it still has one entry per printed layer.
+            m_layer_count = tool_ordering.layer_tools().size();
         } else {
             initial_extruder_id = (has_wipe_tower && ! print.config().single_extruder_multi_material_priming) ?
                 // The priming towers will be skipped.
@@ -1839,55 +1897,36 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         for (unsigned int extruder_id : tool_ordering.all_extruders())
             is_extruder_used[extruder_id] = true;
         // Also mark SLA-channel extruders that have geometry — they never appear in tool_ordering.
-        {
-            const auto &sla_flags = print.config().sla_material_extruder.values;
-            if (!sla_flags.empty()) {
-                for (const PrintObject *pobj : print.objects()) {
-                    for (const Layer *layer : pobj->layers()) {
-                        for (const LayerRegion *lr : layer->regions()) {
-                            for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
-                                const unsigned int ext1 = lr->region().extruder(role);
-                                if (ext1 > 0 && ext1 <= (unsigned int)sla_flags.size() && sla_flags[ext1 - 1])
-                                    is_extruder_used[ext1 - 1] = true;
-                            }
-                        }
-                    }
-                }
+        for (const PrintObject *pobj : print.objects())
+            for (const PrintRegion &region : pobj->all_regions()) {
+                const RegionTechnologyAssignment assignment =
+                    classify_region_technology(print.config(), region);
+                if (assignment.technology == RegionTechnology::SLA)
+                    is_extruder_used[assignment.sla_extruder - 1] = true;
             }
-        }
         this->placeholder_parser().set("is_extruder_used", new ConfigOptionBools(is_extruder_used));
 
-        // Build a "materials" placeholder: comma-separated <TYPE>_<NAME> per used extruder.
-        // TYPE comes from channel_type (uppercased), NAME from filament_settings_id with
-        // non-alphanumeric chars collapsed to '_'.
+        // Name the material of every extruder (see material_token), then build the "materials" placeholder:
+        // the names of the used extruders, comma separated. TYPE comes from channel_type, NAME from
+        // filament_settings_id.
         {
-            auto normalize = [](const std::string &in) {
-                std::string out;
-                out.reserve(in.size());
-                for (unsigned char c : in) {
-                    if (std::isalnum(c)) out.push_back(char(std::toupper(c)));
-                    else if (!out.empty() && out.back() != '_') out.push_back('_');
-                }
-                while (!out.empty() && out.back() == '_') out.pop_back();
-                return out;
-            };
-            const auto *channel_types = dynamic_cast<const ConfigOptionStrings *>(print.config().option("channel_type"));
-            // filament_settings_id lives in full_print_config — print.config() doesn't expose it.
-            const auto *filament_ids  = dynamic_cast<const ConfigOptionStrings *>(print.full_print_config().option("filament_settings_id"));
-            std::string materials;
-            const size_t n_ext = print.config().nozzle_diameter.size();
-            for (size_t i = 0; i < n_ext; ++i) {
-                if (!is_extruder_used[i]) continue;
-                std::string type = (channel_types && i < channel_types->values.size()) ? channel_types->values[i] : std::string();
-                std::string name = (filament_ids  && i < filament_ids->values.size())  ? filament_ids->values[i]  : std::string();
-                type = normalize(type);
-                name = normalize(name);
-                if (type.empty() && name.empty()) continue;
-                if (!materials.empty()) materials.push_back(',');
-                if (!type.empty()) { materials += type; materials.push_back('_'); }
-                materials += name;
+            m_extruder_material_names = extruder_material_tokens(print);
+            std::vector<std::string> used_materials;
+            for (size_t i = 0; i < m_extruder_material_names.size(); ++i) {
+                const std::string &name = m_extruder_material_names[i];
+                if (is_extruder_used[i] && !name.empty()
+                    && std::find(used_materials.begin(), used_materials.end(), name) == used_materials.end())
+                    used_materials.emplace_back(name);
             }
-            this->placeholder_parser().set("materials", new ConfigOptionString(materials));
+            this->placeholder_parser().set("materials", new ConfigOptionString(boost::algorithm::join(used_materials, ",")));
+            // The material of the first tool that extrudes. set_extruder does not run the tool change G-code
+            // when only one extruder is in use, so the start G-code selects the first material through this.
+            // Empty for a print without extrusions (SLA only): initial_extruder_id is then a placeholder,
+            // not a tool the print uses, and every SLA material is selected where it is first exposed.
+            const bool has_extruding_tool = tool_ordering.first_extruder() != static_cast<unsigned int>(-1);
+            this->placeholder_parser().set("initial_material", new ConfigOptionString(
+                has_extruding_tool && initial_extruder_id < m_extruder_material_names.size() ?
+                    m_extruder_material_names[initial_extruder_id] : std::string()));
         }
     }
 
@@ -1906,15 +1945,12 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
     // Write the custom start G-code
     file.writeln(start_gcode);
 
-    // If any SLA videos are embedded, instruct the printer to load them.
-    if (!export_to_binary_gcode && sla_video_emission_requested) {
-        for (size_t i = 0; i < m_config.sla_material_extruder.values.size(); ++i) {
-            if (m_config.sla_material_extruder.get_at(i) && m_config.sla_material_video_embed.get_at(i)) {
-                file.writeln("SLA_LOAD_GCODE_VIDEOS");
-                break;
-            }
-        }
-    }
+    // If this file carries SLA videos, embedded or referenced, instruct the printer to load them.
+    // The exposures address a video by its position in the file, which the printer only knows
+    // after reading the file's video metadata, so referenced videos need this as well. A print
+    // that exposes nothing (FFF only) carries no video and does not touch the projector.
+    if (!m_sla_video_index.empty())
+        file.writeln("SLA_LOAD_GCODE_VIDEOS");
 
     this->_print_first_layer_extruder_temperatures(file, print, start_gcode, initial_extruder_id, true);
     this->_print_first_layer_chamber_temperature(file, print, start_gcode, config().chamber_minimal_temperature.get_at(initial_extruder_id), true, false);
@@ -2065,6 +2101,9 @@ void GCodeGenerator::_do_export(Print& print, GCodeOutputStream &file, Thumbnail
         // and export G-code into file.
         this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, 
             smooth_path_cache_global, file);
+        // Droplets without a layer to dispense on, in a print of droplets alone.
+        if (! m_pending_droplets.empty())
+            file.write(this->droplet_layer_gcode(0., m_config.z_offset.value, true));
         file.write(m_label_objects.maybe_stop_instance());
         if (m_wipe_tower)
             // Purge the extruder, pull out the active filament.
@@ -2677,7 +2716,17 @@ void GCodeGenerator::_print_first_layer_extruder_temperatures(GCodeOutputStream 
         m_writer.set_temperature(temp, wait, first_printing_extruder_id);
     } else {
         // Custom G-code does not set the extruder temperature. Do it now.
-        if (print.config().single_extruder_multi_material.value) {
+        if (this->tools_selected_by_custom_gcode()) {
+            // The printer does not know the slicer's tool numbers, and the first printing tool is only
+            // known to be the active one once the start G-code has selected it. Set its temperature,
+            // without a tool index, with the waiting command emitted after the start G-code only.
+            int temp = print.config().first_layer_temperature.get_at(first_printing_extruder_id);
+            if (temp > 0) {
+                const std::string set_temp_gcode = m_writer.set_temperature(temp, wait);
+                if (wait)
+                    file.write(set_temp_gcode);
+            }
+        } else if (print.config().single_extruder_multi_material.value) {
             // Set temperature of the first printing extruder only.
             int temp = print.config().first_layer_temperature.get_at(first_printing_extruder_id);
             if (temp > 0)
@@ -3243,73 +3292,31 @@ LayerResult GCodeGenerator::process_layer(
     const Layer  &layer = (object_layer != nullptr) ? *object_layer : *support_layer;
     LayerResult   result { {}, layer.id(), false, last_layer, false};
 
-    // Collect SLA frame commands for this layer before any early return.
-    // SLA regions have no FFF extrusions and would otherwise be skipped.
-    std::string sla_gcode;
-    {
-        const auto &sla_flags = m_config.sla_material_extruder.values;
-        if (!sla_flags.empty()) {
-            std::set<unsigned int> sla_extruders_emitted;
-            for (const ObjectLayerToPrint &ltp : layers) {
-                if (!ltp.object_layer)
+    // SLA extruders (1-based, ascending) exposed on this layer. Collected before any early return:
+    // SLA regions have no FFF extrusions and would otherwise be skipped. A region without slices on
+    // this layer has no frame in its video (see collect_sla_slice_expolys_per_layer), so it must
+    // neither be exposed nor advance its frame counter.
+    std::vector<unsigned int> sla_extruders;
+    if (!m_config.sla_material_extruder.values.empty()) {
+        std::set<unsigned int> found;
+        for (const ObjectLayerToPrint &ltp : layers) {
+            if (!ltp.object_layer)
+                continue;
+            for (const LayerRegion *lr : ltp.object_layer->regions()) {
+                if (lr->slices().empty())
                     continue;
-                for (const LayerRegion *lr : ltp.object_layer->regions()) {
-                    unsigned int ext1 = 0;
-                    for (auto role : { frPerimeter, frInfill, frSolidInfill }) {
-                        const unsigned int e = lr->region().extruder(role);
-                        if (e > 0 && e <= (unsigned int)sla_flags.size() && sla_flags[e - 1]) {
-                            ext1 = e;
-                            break;
-                        }
-                    }
-                    if (ext1 == 0)
-                        continue;
-                    if (!sla_extruders_emitted.insert(ext1).second)
-                        continue;
-                    const unsigned int ext0 = ext1 - 1;
-                    const std::string sla_name = sanitize_sla_video_name(
-                        m_config.sla_material_video_names.get_at(ext0), ext0);
-                    const auto idx_it = m_sla_video_index.find(ext0);
-                    const std::string sla_video_num = std::to_string(
-                        idx_it != m_sla_video_index.end() ? idx_it->second : ext0 + 1);
-                    if (m_last_sla_extruder != int(ext1)) {
-                        sla_gcode += "SLA_CLEAR\n";
-                        sla_gcode += "BIOSLICER_MATERIAL_SWAP MATERIAL=" + sla_name + "\n";
-                        m_last_sla_extruder = int(ext1);
-                    }
-                    size_t &frame = m_sla_layer_counters[ext0];
-                    const int delay_before_ms = int(1000.0 * m_config.sla_material_delay_before_exposure.get_at(ext0));
-                    const int exposure_ms     = int(1000.0 * m_config.sla_material_exposure_time.get_at(ext0));
-                    const int delay_after_ms  = int(1000.0 * m_config.sla_material_delay_after_exposure.get_at(ext0));
-                    if (m_config.gcode_flavor.value == gcfKlipper) {
-                        // Emit sliced timing as metadata for GCodeProcessor time estimation.
-                        // Actual timing at print time comes from BIOSLICER_PROCESS_PARAMS variables,
-                        // which the user can override in Mainsail before printing.
-                        sla_gcode += format(";bioslicer_sla_params extruder=%u delay_before_ms=%d exposure_ms=%d delay_after_ms=%d\n",
-                            ext0, delay_before_ms, exposure_ms, delay_after_ms);
-                        // Tag read by GCodeProcessor to create a moves-slider step for this frame.
-                        sla_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
-                        sla_gcode += format("BIOSLICER_SLA_EXPOSE EXTRUDER=%u NAME=%s FRAME=%zu\n",
-                            ext0, sla_video_num.c_str(), frame++);
-                    } else {
-                        if (delay_before_ms > 0)
-                            sla_gcode += "G4 P" + std::to_string(delay_before_ms) + "\n";
-                        // Tag read by GCodeProcessor to create a moves-slider step for this frame.
-                        sla_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
-                        sla_gcode += "SLA_SHOW_FRAME NAME=" + sla_video_num + " FRAME=" + std::to_string(frame++) + "\n";
-                        if (exposure_ms > 0)
-                            sla_gcode += "G4 P" + std::to_string(exposure_ms) + "\n";
-                        if (delay_after_ms > 0)
-                            sla_gcode += "G4 P" + std::to_string(delay_after_ms) + "\n";
-                    }
-                }
+                const RegionTechnologyAssignment assignment =
+                    classify_region_technology(m_config, lr->region());
+                if (assignment.technology == RegionTechnology::SLA)
+                    found.insert(assignment.sla_extruder);
             }
         }
+        sla_extruders.assign(found.begin(), found.end());
     }
 
-    if (layer_tools.extruders.empty()) {
-        // SLA-only layer: emit a layer-change marker, Z move, and SLA frame commands.
-        if (!sla_gcode.empty()) {
+    // A layer without extrusions: emit a layer-change marker, the Z move and the SLA commands, if any.
+    auto layer_without_extrusions = [this, &layer, &result, &sla_extruders, last_layer]() {
+        if (!sla_extruders.empty() || this->droplets_due(layer.print_z, last_layer)) {
             const coordf_t print_z = layer.print_z + m_config.z_offset.value;
             std::string gcode;
             gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + "\n";
@@ -3324,11 +3331,15 @@ LayerResult GCodeGenerator::process_layer(
                     gcode += format("SET_PRINT_STATS_INFO CURRENT_LAYER=%d\n", m_layer_index + 1);
             }
             m_layer = &layer;
-            gcode += sla_gcode;
+            gcode += this->sla_layer_gcode(sla_extruders, print_z);
+            gcode += this->droplet_layer_gcode(layer.print_z, print_z, last_layer);
             result.gcode = std::move(gcode);
         }
         return result;
-    }
+    };
+
+    if (layer_tools.extruders.empty())
+        return layer_without_extrusions();
 
     // Extract 1st object_layer and support_layer of this set of layers with an equal print_z.
     coordf_t             print_z       = layer.print_z + m_config.z_offset.value;
@@ -3366,12 +3377,12 @@ LayerResult GCodeGenerator::process_layer(
         this->get_sorted_extrusions(print, layers, layer_tools, instances_to_print, smooth_path_caches, first_layer)};
 
     if (extrusions.empty()) {
-        return result;
+        return layer_without_extrusions();
     }
 
     const auto optional_first_segment{GCode::ExtrusionOrder::get_first_point(extrusions)};
     if (!optional_first_segment) {
-        return result;
+        return layer_without_extrusions();
     }
     const Geometry::ArcWelder::Segment &first_segment{*optional_first_segment};
     const Vec3crd first_point{to_3d(first_segment.point, scaled(print_z + (first_segment.height_fraction - 1.0) * height))};
@@ -3443,8 +3454,12 @@ LayerResult GCodeGenerator::process_layer(
     if (! first_layer && ! m_second_layer_things_done) {
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // first_layer_temperature vs. temperature settings.
+        // When the tool change G-code selects the tools by itself, the printer does not know the slicer's
+        // tool numbers: only the active tool can be addressed, and without a tool index. The other tools
+        // get their temperature when they become active, see set_extruder().
+        const bool tools_by_custom_gcode = this->tools_selected_by_custom_gcode();
         for (const Extruder &extruder : m_writer.extruders()) {
-            if (print.config().single_extruder_multi_material.value || m_ooze_prevention.enable) {
+            if (print.config().single_extruder_multi_material.value || m_ooze_prevention.enable || tools_by_custom_gcode) {
                 // In single extruder multi material mode, set the temperature for the current extruder only.
                 // The same applies when ooze prevention is enabled.
                 if (extruder.id() != m_writer.extruder()->id())
@@ -3452,7 +3467,7 @@ LayerResult GCodeGenerator::process_layer(
             }
             int temperature = print.config().temperature.get_at(extruder.id());
             if (temperature > 0 && (temperature != print.config().first_layer_temperature.get_at(extruder.id())))
-                gcode += m_writer.set_temperature(temperature, false, extruder.id());
+                gcode += m_writer.set_temperature(temperature, false, tools_by_custom_gcode ? -1 : int(extruder.id()));
         }
 
         // Bed temperature for layers from the 2nd layer is based on the first printing
@@ -3626,8 +3641,11 @@ LayerResult GCodeGenerator::process_layer(
         this->set_origin(0.0, 0.0);
     }
 
-    // Append SLA frame commands collected before the FFF extrusion loop.
-    gcode += std::move(sla_gcode);
+    // Expose the SLA materials of this layer once its extrusions are done.
+    gcode += this->sla_layer_gcode(sla_extruders, print_z);
+    // Dispense the droplets that land on this layer, after the SLA cure: a wall cured on this layer
+    // is there to receive the droplets.
+    gcode += this->droplet_layer_gcode(layer.print_z, print_z, last_layer);
 
     BOOST_LOG_TRIVIAL(trace) << "Exported layer " << layer.id() << " print_z " << print_z <<
     log_memory_info();
@@ -3986,19 +4004,22 @@ std::string GCodeGenerator::extrude_support(const std::vector<GCode::ExtrusionOr
 
 bool GCodeGenerator::GCodeOutputStream::is_error() const 
 {
-    return ::ferror(this->f);
+    return this->f == nullptr || ::ferror(this->f);
 }
 
 void GCodeGenerator::GCodeOutputStream::flush()
-{ 
-    ::fflush(this->f);
+{
+    if (this->f == nullptr || ::fflush(this->f) != 0 || ::ferror(this->f))
+        throw Slic3r::RuntimeError("Failed to flush G-code output.");
 }
 
 void GCodeGenerator::GCodeOutputStream::close()
-{ 
+{
     if (this->f) {
-        ::fclose(this->f);
+        FILE *file = this->f;
         this->f = nullptr;
+        if (::fclose(file) != 0)
+            throw Slic3r::RuntimeError("Failed to close G-code output.");
     }
 }
 
@@ -4008,7 +4029,8 @@ void GCodeGenerator::GCodeOutputStream::write(const char *what)
         //FIXME don't allocate a string, maybe process a batch of lines?
         std::string gcode(m_find_replace ? m_find_replace->process_layer(what) : what);
         // writes string to file
-        fwrite(gcode.c_str(), 1, gcode.size(), this->f);
+        if (this->f == nullptr || ::fwrite(gcode.data(), 1, gcode.size(), this->f) != gcode.size())
+            throw Slic3r::RuntimeError("Failed to write G-code output.");
         m_processor.process_buffer(gcode);
     }
 }
@@ -4034,31 +4056,32 @@ void GCodeGenerator::GCodeOutputStream::write_format(const char* format, ...)
     va_list args;
     va_start(args, format);
 
-    int buflen;
+    int required_size;
     {
         va_list args2;
         va_copy(args2, args);
-        buflen =
+        required_size =
     #ifdef _MSC_VER
             ::_vscprintf(format, args2)
     #else
             ::vsnprintf(nullptr, 0, format, args2)
     #endif
-            + 1;
+            ;
         va_end(args2);
     }
 
-    char buffer[1024];
-    bool buffer_dynamic = buflen > 1024;
-    char *bufptr = buffer_dynamic ? (char*)malloc(buflen) : buffer;
-    int res = ::vsnprintf(bufptr, buflen, format, args);
-    if (res > 0)
-        this->write(bufptr);
+    if (required_size < 0) {
+        va_end(args);
+        throw Slic3r::RuntimeError("Failed to format G-code output.");
+    }
 
-    if (buffer_dynamic)
-        free(bufptr);
+    std::vector<char> buffer(static_cast<size_t>(required_size) + 1, '\0');
+    const int res = ::vsnprintf(buffer.data(), buffer.size(), format, args);
 
     va_end(args);
+    if (res < 0 || size_t(res) >= buffer.size())
+        throw Slic3r::RuntimeError("Failed to format G-code output.");
+    this->write(buffer.data());
 }
 
 std::string GCodeGenerator::travel_to_first_position(const Vec3crd& point, const double from_z, const ExtrusionRole role, const std::function<std::string()>& insert_gcode) {
@@ -4667,9 +4690,251 @@ std::string GCodeGenerator::retract_and_wipe(bool toolchange, bool reset_e)
     return gcode;
 }
 
+bool GCodeGenerator::tools_selected_by_custom_gcode() const
+{
+    return m_config.toolchange_omit_tool_command.value && ! m_config.toolchange_gcode.value.empty();
+}
+
+std::string GCodeGenerator::sla_video_name(unsigned int extruder_id) const
+{
+    if (const auto it = m_sla_video_names.find(extruder_id); it != m_sla_video_names.end())
+        return it->second;
+    return sanitize_sla_video_name(m_config.sla_material_video_names.get_at(extruder_id), extruder_id);
+}
+
+std::string GCodeGenerator::process_toolchange_gcode(int previous_extruder_id, unsigned int extruder_id, double print_z)
+{
+    const std::string &toolchange_gcode = m_config.toolchange_gcode.value;
+    if (toolchange_gcode.empty())
+        return {};
+
+    const bool is_sla_material = m_config.sla_material_extruder.get_at(extruder_id);
+    const std::string video_name = is_sla_material ? this->sla_video_name(extruder_id) : std::string();
+    const std::string video_path = is_sla_material ?
+        boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id)) :
+        std::string();
+    const int video_embedded = (is_sla_material && m_config.sla_material_video_embed.get_at(extruder_id)) ? 1 : 0;
+
+    DynamicConfig config;
+    config.set_key_value("previous_extruder", new ConfigOptionInt(previous_extruder_id));
+    config.set_key_value("next_extruder",     new ConfigOptionInt((int)extruder_id));
+    config.set_key_value("layer_num",         new ConfigOptionInt(m_layer_index));
+    config.set_key_value("layer_z",           new ConfigOptionFloat(print_z));
+    config.set_key_value("toolchange_z",      new ConfigOptionFloat(print_z));
+    config.set_key_value("max_layer_z",       new ConfigOptionFloat(m_max_layer_z));
+    config.set_key_value("sla_material_id",   new ConfigOptionString(video_name));
+    config.set_key_value("sla_video_name",    new ConfigOptionString(video_name));
+    config.set_key_value("sla_video_path",    new ConfigOptionString(video_path));
+    config.set_key_value("sla_video_embedded", new ConfigOptionInt(video_embedded));
+    config.set_key_value("next_material",     new ConfigOptionString(
+        extruder_id < m_extruder_material_names.size() ? m_extruder_material_names[extruder_id] : std::string()));
+    return placeholder_parser_process("toolchange_gcode", toolchange_gcode, extruder_id, &config);
+}
+
+// An SLA extruder never runs through set_extruder(): it has no toolpaths and is not part of the tool
+// ordering. Its material is selected here instead, the same way a tool is: by the custom toolchange_gcode
+// (previous_extruder is then the SLA extruder exposed before, -1 for the first one), followed by the
+// slicer's own command unless toolchange_omit_tool_command leaves the selection to that G-code.
+// BIOSLICER_MATERIAL_SWAP is to an SLA material what T<n> is to an extruder.
+std::string GCodeGenerator::sla_material_change(unsigned int extruder_id, double print_z)
+{
+    std::string gcode = this->process_toolchange_gcode(
+        m_last_sla_extruder > 0 ? m_last_sla_extruder - 1 : -1, extruder_id, print_z);
+    check_add_eol(gcode);
+    if (! (m_config.toolchange_omit_tool_command.value && ! gcode.empty()))
+        gcode += "BIOSLICER_MATERIAL_SWAP MATERIAL=" + this->sla_video_name(extruder_id) + "\n";
+    return gcode;
+}
+
+std::string GCodeGenerator::sla_layer_gcode(const std::vector<unsigned int> &sla_extruders, double print_z)
+{
+    std::string gcode;
+    for (const unsigned int ext1 : sla_extruders) {
+        const unsigned int ext0 = ext1 - 1;
+        const auto idx_it = m_sla_video_index.find(ext0);
+        const std::string sla_video_num = std::to_string(
+            idx_it != m_sla_video_index.end() ? idx_it->second : ext0 + 1);
+
+        // Black out the projector before anything moves, then make sure the layer is at its cure
+        // height (a no-op unless the extrusions of this layer left Z elsewhere).
+        gcode += "SLA_CLEAR\n";
+        gcode += m_writer.travel_to_z(print_z, "SLA cure height");
+
+        // Bring this material's resin into place first, so that the layer transition below happens
+        // in the resin that is about to be cured rather than in the one cured before.
+        if (m_last_sla_extruder != int(ext1)) {
+            gcode += this->sla_material_change(ext0, print_z);
+            m_last_sla_extruder = int(ext1);
+        }
+
+        // Layer transition: move the object away from the cure height and back, so that resin can
+        // redistribute before this material's own cure. Runs for every material on every layer.
+        // A positive depth moves to a lower Z coordinate, a negative one to a higher Z coordinate:
+        // which of the two submerges the object depends on the machine.
+        // A depth larger than the layer's height takes the move below Z = 0. That is allowed: the
+        // machine may travel below its Z origin, and keeping that move safe is up to the user.
+        const double transition_depth   = m_config.sla_material_transition_depth.get_at(ext0);
+        const int    transition_time_ms = int(1000.0 * m_config.sla_material_transition_time.get_at(ext0));
+        if (transition_depth != 0.0) {
+            const double transition_z = print_z - transition_depth;
+            const double max_z        = m_config.max_print_height.value;
+            if (max_z > 0. && transition_z > max_z + EPSILON)
+                throw Slic3r::ExportError(format(
+                    _u8L("The SLA layer transition depth of %1% mm set for extruder %2% would move the "
+                         "layer at Z = %3% mm to Z = %4% mm, above the maximum print height. "
+                         "Reduce the depth or reverse its sign."),
+                    transition_depth, ext1, print_z, transition_z));
+            gcode += m_writer.travel_to_z_force(transition_z, "SLA layer transition: leave cure height");
+        }
+        if (transition_time_ms > 0)
+            gcode += "G4 P" + std::to_string(transition_time_ms) + "\n";
+        if (transition_depth != 0.0)
+            gcode += m_writer.travel_to_z_force(print_z, "SLA layer transition: return to cure height");
+
+        size_t &frame = m_sla_layer_counters[ext0];
+        const int delay_before_ms = int(1000.0 * m_config.sla_material_delay_before_exposure.get_at(ext0));
+        const int exposure_ms     = int(1000.0 * m_config.sla_material_exposure_time.get_at(ext0));
+        const int delay_after_ms  = int(1000.0 * m_config.sla_material_delay_after_exposure.get_at(ext0));
+        if (m_config.gcode_flavor.value == gcfKlipper) {
+            // Emit sliced timing as metadata for GCodeProcessor time estimation.
+            // Actual timing at print time comes from BIOSLICER_PROCESS_PARAMS variables,
+            // which the user can override in Mainsail before printing.
+            gcode += format(";bioslicer_sla_params extruder=%u delay_before_ms=%d exposure_ms=%d delay_after_ms=%d\n",
+                ext0, delay_before_ms, exposure_ms, delay_after_ms);
+            // Tag read by GCodeProcessor to create a moves-slider step for this frame.
+            gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
+            gcode += format("BIOSLICER_SLA_EXPOSE EXTRUDER=%u NAME=%s FRAME=%zu\n",
+                ext0, sla_video_num.c_str(), frame++);
+        } else {
+            if (delay_before_ms > 0)
+                gcode += "G4 P" + std::to_string(delay_before_ms) + "\n";
+            // Tag read by GCodeProcessor to create a moves-slider step for this frame.
+            gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::SLA_Frame) + "\n";
+            gcode += "SLA_SHOW_FRAME NAME=" + sla_video_num + " FRAME=" + std::to_string(frame++) + "\n";
+            if (exposure_ms > 0)
+                gcode += "G4 P" + std::to_string(exposure_ms) + "\n";
+            if (delay_after_ms > 0)
+                gcode += "G4 P" + std::to_string(delay_after_ms) + "\n";
+        }
+    }
+    // Leave the projector dark until the next exposure: the layer change, the extrusions of the
+    // next layer and a material change must not keep curing with the last frame.
+    if (! sla_extruders.empty())
+        gcode += "SLA_CLEAR\n";
+    return gcode;
+}
+
+bool GCodeGenerator::droplets_due(double layer_z, bool flush_all) const
+{
+    return ! m_pending_droplets.empty() && (flush_all || m_pending_droplets.front().pos.z() <= layer_z + EPSILON);
+}
+
+std::string GCodeGenerator::droplet_layer_gcode(double layer_z, double print_z, bool flush_all)
+{
+    if (! this->droplets_due(layer_z, flush_all))
+        return {};
+
+    // m_pending_droplets is sorted by height: the droplets that land on this layer or below it come first.
+    const auto first_late = flush_all ? m_pending_droplets.end() :
+        std::find_if(m_pending_droplets.begin(), m_pending_droplets.end(),
+            [layer_z](const ResolvedDroplet &d) { return d.pos.z() > layer_z + EPSILON; });
+    std::map<unsigned int, std::vector<ResolvedDroplet>> by_extruder;
+    for (auto it = m_pending_droplets.begin(); it != first_late; ++ it)
+        by_extruder[it->extruder].push_back(*it);
+    m_pending_droplets.erase(m_pending_droplets.begin(), first_late);
+
+    std::string gcode;
+    for (auto &[extruder1, droplets] : by_extruder)
+        gcode += this->droplet_extruder_gcode(extruder1 - 1, std::move(droplets), print_z);
+
+    // The droplet nozzle left the layer height and the position is not known any more.
+    gcode += m_writer.travel_to_z_force(print_z, "return to the layer height after the droplets");
+    this->last_position = std::nullopt;
+    return gcode;
+}
+
+std::string GCodeGenerator::droplet_extruder_gcode(unsigned int extruder_id, std::vector<ResolvedDroplet> droplets, double print_z)
+{
+    const double standoff   = m_config.droplet_standoff.get_at(extruder_id);
+    const int    settle_ms  = int(1000.0 * m_config.droplet_settle_time.get_at(extruder_id));
+    const double nl_per_us  = m_config.filament_droplet_nl_per_us.get_at(extruder_id);
+    const double frequency  = m_config.filament_droplet_frequency.get_at(extruder_id);
+    const Vec2d  offset     = m_config.extruder_offset.get_at(extruder_id);
+    const bool   klipper    = m_config.gcode_flavor.value == gcfKlipper;
+    if (! klipper && m_config.droplet_gcode.value.empty())
+        throw Slic3r::ExportError(_u8L("Droplets need the 'Droplet G-code' of the printer settings when the G-code flavor is not Klipper."));
+
+    // Authored order is kept where a set asks for it, ahead of the points ordered for the shortest travel.
+    std::vector<ResolvedDroplet> fixed, free_;
+    for (const ResolvedDroplet &d : droplets)
+        (d.keep_order ? fixed : free_).push_back(d);
+    std::sort(fixed.begin(), fixed.end(), [](const ResolvedDroplet &a, const ResolvedDroplet &b)
+        { return std::tie(a.set, a.index) < std::tie(b.set, b.index); });
+    const Vec3d  here = m_writer.get_position();
+    Vec2d        start = fixed.empty() ? Vec2d(here.x(), here.y()) : Vec2d(fixed.back().pos.x(), fixed.back().pos.y());
+    order_droplets_by_travel(free_, start);
+    droplets = std::move(fixed);
+    droplets.insert(droplets.end(), free_.begin(), free_.end());
+
+    // Pull the filament back before the nozzle of the droplet channel takes over.
+    std::string gcode = this->retract_and_wipe(true);
+
+    // Select the droplet material the way a tool is selected. Nothing else selects it: there is no tool number for a
+    // droplet channel, so without a toolchange_gcode the printer is expected to have the valve ready.
+    const std::string select = this->process_toolchange_gcode(
+        m_writer.extruder() != nullptr ? int(m_writer.extruder()->id()) : -1, extruder_id, print_z);
+    if (! select.empty()) {
+        gcode += select;
+        check_add_eol(gcode);
+        m_reselect_tool = true;
+    }
+
+    const double z_offset = m_config.z_offset.value;
+    const double safe_z   = print_z + standoff;
+    gcode += format("; droplets of extruder %1%: %2%\n", extruder_id + 1, droplets.size());
+    gcode += m_writer.travel_to_z_force(safe_z, "droplet safe height");
+    for (const ResolvedDroplet &d : droplets) {
+        const double pulse_us = droplet_pulse_us(d.volume_nl, nl_per_us);
+        // Land the liquid at its height: the nozzle sits one standoff above it. Above the print the liquid lands
+        // on the surface of the layer, so the nozzle stays at the layer height unless the set dips into a well.
+        const double nozzle_z = (d.dip ? d.pos.z() : std::max(d.pos.z(), print_z - z_offset)) + z_offset + standoff;
+        const double x = d.pos.x() + offset.x();
+        const double y = d.pos.y() + offset.y();
+        gcode += format(";bioslicer_droplet extruder=%u x=%.3f y=%.3f z=%.3f volume_nl=%.6g count=%d pulse_us=%.1f frequency=%.6g settle_ms=%d\n",
+            extruder_id, x, y, nozzle_z, d.volume_nl, d.count, pulse_us, frequency, settle_ms);
+        if (klipper) {
+            gcode += format("BIOSLICER_DROPLET EXTRUDER=%u X=%.3f Y=%.3f Z=%.3f SAFE_Z=%.3f VOLUME_NL=%.6g COUNT=%d\n",
+                extruder_id, x, y, nozzle_z, safe_z, d.volume_nl, d.count);
+            // The macro moves the head by itself: tell the writer where it ends up.
+            m_writer.update_position(Vec3d(x, y, nozzle_z));
+        } else {
+            gcode += m_writer.travel_to_z_force(safe_z, "droplet safe height");
+            gcode += m_writer.travel_to_xy_force(Vec2d(x, y), "droplet position");
+            gcode += m_writer.travel_to_z_force(nozzle_z, "droplet height");
+            if (settle_ms > 0)
+                gcode += "G4 P" + std::to_string(settle_ms) + "\n";
+            DynamicConfig config;
+            config.set_key_value("droplet_x",         new ConfigOptionFloat(x));
+            config.set_key_value("droplet_y",         new ConfigOptionFloat(y));
+            config.set_key_value("droplet_z",         new ConfigOptionFloat(nozzle_z));
+            config.set_key_value("droplet_volume_nl", new ConfigOptionFloat(d.volume_nl));
+            config.set_key_value("droplet_pulse_us",  new ConfigOptionFloat(pulse_us));
+            config.set_key_value("droplet_count",     new ConfigOptionInt(d.count));
+            config.set_key_value("droplet_extruder",  new ConfigOptionInt(int(extruder_id)));
+            gcode += this->placeholder_parser_process("droplet_gcode", m_config.droplet_gcode.value, extruder_id, &config);
+            check_add_eol(gcode);
+        }
+    }
+    return gcode;
+}
+
 std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_z)
 {
-    if (!m_writer.need_toolchange(extruder_id))
+    // A droplet material was selected since the last extrusion: the tool is selected again even if it is the one
+    // the writer knows of.
+    const bool reselect = m_reselect_tool;
+    m_reselect_tool = false;
+    if (!m_writer.need_toolchange(extruder_id) && !reselect)
         return "";
 
     // if we are running a single-extruder setup, just set the extruder and return nothing
@@ -4724,38 +4989,17 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
     if (m_ooze_prevention.enable && m_writer.extruder() != nullptr)
         gcode += m_ooze_prevention.pre_toolchange(*this);
 
-    const std::string& toolchange_gcode = m_config.toolchange_gcode.value;
-    std::string toolchange_gcode_parsed;
-
     // Process the custom toolchange_gcode. If it is empty, insert just a Tn command.
-    if (!toolchange_gcode.empty()) {
-        const bool is_sla_material = m_config.sla_material_extruder.get_at(extruder_id);
-        const std::string sla_video_name = is_sla_material ?
-            sanitize_sla_video_name(m_config.sla_material_video_names.get_at(extruder_id), extruder_id) :
-            std::string();
-        const std::string sla_video_path = is_sla_material ?
-            boost::trim_copy(m_config.sla_material_video_paths.get_at(extruder_id)) :
-            std::string();
-        const int sla_video_embedded = (is_sla_material && m_config.sla_material_video_embed.get_at(extruder_id)) ? 1 : 0;
+    const std::string toolchange_gcode_parsed = this->process_toolchange_gcode(
+        m_writer.extruder() != nullptr ? int(m_writer.extruder()->id()) : -1, extruder_id, print_z);
+    gcode += toolchange_gcode_parsed;
+    check_add_eol(gcode);
 
-        DynamicConfig config;
-        config.set_key_value("previous_extruder", new ConfigOptionInt((int)(m_writer.extruder() != nullptr ? m_writer.extruder()->id() : -1 )));
-        config.set_key_value("next_extruder",     new ConfigOptionInt((int)extruder_id));
-        config.set_key_value("layer_num",         new ConfigOptionInt(m_layer_index));
-        config.set_key_value("layer_z",           new ConfigOptionFloat(print_z));
-        config.set_key_value("toolchange_z",      new ConfigOptionFloat(print_z));
-        config.set_key_value("max_layer_z",       new ConfigOptionFloat(m_max_layer_z));
-        config.set_key_value("sla_material_id",   new ConfigOptionString(sla_video_name));
-        config.set_key_value("sla_video_name",    new ConfigOptionString(sla_video_name));
-        config.set_key_value("sla_video_path",    new ConfigOptionString(sla_video_path));
-        config.set_key_value("sla_video_embedded", new ConfigOptionInt(sla_video_embedded));
-        toolchange_gcode_parsed = placeholder_parser_process("toolchange_gcode", toolchange_gcode, extruder_id, &config);
-        gcode += toolchange_gcode_parsed;
-        check_add_eol(gcode);
-    }
-
+    // With toolchange_omit_tool_command the toolchange_gcode selects the tool by itself, so no bare T<n> is emitted; a
+    // comment tag carrying the extruder id takes its place for the G-code analyzer, cooling and pressure equalizer.
+    const bool omit_tool_command = m_config.toolchange_omit_tool_command.value && ! toolchange_gcode_parsed.empty();
     // We inform the writer about what is happening, but we may not use the resulting gcode.
-    std::string toolchange_command = m_writer.toolchange(extruder_id);
+    std::string toolchange_command = m_writer.toolchange(extruder_id, omit_tool_command);
     if (! custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), extruder_id))
         gcode += toolchange_command;
     else {
@@ -4768,6 +5012,15 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
                                          m_config.temperature.get_at(extruder_id));
 
         gcode += m_writer.set_temperature(temp, false);
+    } else if (this->tools_selected_by_custom_gcode()) {
+        // The printer does not know the slicer's tool numbers, so a tool's temperature can only be set
+        // while it is the active one. Without autoemit_temperature_commands the first layer temperatures
+        // are left to the printer and only the change after the first layer is emitted, as for the tool
+        // that is active when that change happens (see process_layer).
+        const int first_layer_temp = m_config.first_layer_temperature.get_at(extruder_id);
+        const int temp = m_layer_index <= 0 ? first_layer_temp : m_config.temperature.get_at(extruder_id);
+        if (temp > 0 && (m_config.autoemit_temperature_commands.value || temp != first_layer_temp))
+            gcode += m_writer.set_temperature(temp, false);
     }
 
     this->placeholder_parser().set("current_extruder", extruder_id);

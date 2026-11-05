@@ -2,44 +2,77 @@
 set -e
 
 APP_ID="com.bioslicer.BioSlicer"
+# Where BioSlicer comes from (one installer, two sources):
+#   release mode (default): the single-file .flatpak bundle attached to the latest
+#       GitHub Release (or BIOSLICER_VERSION=<tag>). Used for public builds.
+#   repo mode: an OSTree repo at <url>/repo-<arch>, where an update downloads only the
+#       files that changed. Used for self-hosted / test builds: deploy.sh publishes a
+#       copy of this script with the two placeholders below filled in, or run this
+#       script with BIOSLICER_URL=<url> [BIOSLICER_SUFFIX=<suffix>].
+RELEASE_REPO="nicholas-karr/BioSlicer"
 BUNDLE_BASE="__BUNDLE_BASE__"
 BUNDLE_SUFFIX="__BUNDLE_SUFFIX__"
-case "${BUNDLE_BASE}" in
-    __*)
-        echo "ERROR: This install.sh has not been configured for a server." >&2
-        echo "       Download it from your BioSlicer server rather than running it directly from the repository." >&2
-        exit 1 ;;
-esac
+case "${BUNDLE_BASE}" in __*) BUNDLE_BASE="${BIOSLICER_URL:-}" ;; esac
+case "${BUNDLE_SUFFIX}" in __*) BUNDLE_SUFFIX="${BIOSLICER_SUFFIX:-}" ;; esac
+BUNDLE_BASE="${BUNDLE_BASE%/}"
+if [ -n "${BUNDLE_BASE}" ]; then
+    _mode=repo
+else
+    _mode=release
+    if [ -n "${BIOSLICER_VERSION:-}" ]; then
+        RELEASE_URL="${BIOSLICER_RELEASE_URL:-https://github.com/${RELEASE_REPO}/releases/download/${BIOSLICER_VERSION}}"
+    else
+        RELEASE_URL="${BIOSLICER_RELEASE_URL:-https://github.com/${RELEASE_REPO}/releases/latest/download}"
+    fi
+fi
 
-# Select the bundle for the host CPU architecture.
+# Select the build for the host CPU architecture.
 _host_arch="$(uname -m)"
 case "${_host_arch}" in
     aarch64|arm64) _arch=aarch64 ;;
     x86_64)        _arch=x86_64 ;;
     *)
-        echo "WARNING: Unrecognized architecture '${_host_arch}', defaulting to x86_64 bundle." >&2
+        echo "WARNING: Unrecognized architecture '${_host_arch}', defaulting to x86_64." >&2
         _arch=x86_64 ;;
 esac
 
-# Use the arch-specific bundle.  For x86_64 only, fall back to the generic bundle if
-# the arch-specific one isn't available yet.  For all other arches (e.g. aarch64)
-# fail loudly rather than silently installing an incompatible x86_64 bundle.
-_arch_url="${BUNDLE_BASE}/BioSlicer-${_arch}${BUNDLE_SUFFIX}.flatpak"
-if curl -fsSI "${_arch_url}" &>/dev/null; then
-    BUNDLE_URL="${_arch_url}"
-elif [ "$_arch" = "x86_64" ]; then
-    echo "NOTE: No arch-specific bundle found for '${_arch}', using generic bundle." >&2
-    BUNDLE_URL="${BUNDLE_BASE}/BioSlicer${BUNDLE_SUFFIX}.flatpak"
-else
-    echo "ERROR: No bundle available for architecture '${_arch}' at ${_arch_url}." >&2
-    echo "       Installing the generic bundle on ${_arch} would fail at runtime." >&2
-    echo "       Please check ${BUNDLE_BASE} for an '${_arch}' release." >&2
-    exit 1
+# === Replace snap curl with apt curl if needed ===
+# snap curl is sandboxed and can't handle certain TLS configs or pipe-through-bash installs.
+# This runs before the first curl call below.
+_curl_path="$(command -v curl 2>/dev/null || true)"
+if [ -n "$_curl_path" ] && echo "$_curl_path" | grep -q '^/snap/'; then
+    echo "==> Replacing snap curl with system curl..."
+    sudo snap remove curl 2>/dev/null || true
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y --fix-missing curl
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y curl
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm curl
+    elif command -v zypper &>/dev/null; then
+        sudo zypper install -y curl
+    fi
+    # Reset bash's command-lookup cache so subsequent `curl` calls find /usr/bin/curl.
+    hash -r
 fi
 
-TMP_BUNDLE="$(mktemp --suffix=.flatpak)"
-
-trap 'rm -f "$TMP_BUNDLE"' EXIT
+if [ "$_mode" = repo ]; then
+    REPO_URL="${BUNDLE_BASE}/repo-${_arch}${BUNDLE_SUFFIX}"
+    REMOTE="bioslicer${BUNDLE_SUFFIX}"
+    if ! curl -fsSL --retry 2 -o /dev/null "${REPO_URL}/summary"; then
+        echo "ERROR: No BioSlicer repo for architecture '${_arch}' at ${REPO_URL}." >&2
+        exit 1
+    fi
+else
+    BUNDLE_URL="${RELEASE_URL}/BioSlicer-${_arch}.flatpak"
+    # The tiny .sha256 asset doubles as the existence probe and the integrity reference.
+    EXPECTED_SHA256="$(curl -fsSL --retry 2 "${BUNDLE_URL}.sha256" 2>/dev/null | tr -d '[:space:]' || true)"
+    if ! [[ "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "ERROR: No BioSlicer release build for architecture '${_arch}' at ${BUNDLE_URL}." >&2
+        echo "       Check https://github.com/${RELEASE_REPO}/releases, or set BIOSLICER_URL to a self-hosted build." >&2
+        exit 1
+    fi
+fi
 
 # === Environment setup (must happen before flatpak calls) ===
 
@@ -98,6 +131,7 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     done
 fi
 
+
 # === ~/.bashrc: XDG_RUNTIME_DIR fallback block ===
 _RUNTIME_BLOCK_HASH="62817c0a"
 _RUNTIME_BLOCK_TAG="BIOSLICER-RUNTIME-${_RUNTIME_BLOCK_HASH}"
@@ -126,7 +160,7 @@ fi
 
 # === Install flatpak if missing ===
 if ! command -v flatpak &>/dev/null; then
-    echo "==> Installing flatpak..."
+    echo "==> Installing flatpak (this can take a few minutes)..."
     if command -v apt-get &>/dev/null; then
         sudo apt-get update -y
         sudo apt-get install -y --fix-missing flatpak malcontent
@@ -149,7 +183,7 @@ fi
 if command -v apt-get &>/dev/null; then
     _fp_minor=$(flatpak --version 2>/dev/null | grep -oP '1\.\K[0-9]+' | head -1)
     if [ "${_fp_minor:-99}" -lt 14 ]; then
-        echo "==> Upgrading flatpak to 1.14+ (fixes WSL2 compatibility)..."
+        echo "==> Upgrading flatpak to 1.14+ (fixes WSL2 compatibility; may take a minute)..."
         sudo apt-get install -y --fix-missing software-properties-common 2>/dev/null || true
         sudo add-apt-repository -y ppa:flatpak/stable 2>/dev/null || true
         sudo apt-get update -y -q 2>/dev/null || true
@@ -163,76 +197,148 @@ elif command -v dnf &>/dev/null && ! rpm -q malcontent &>/dev/null; then
     sudo dnf install -y malcontent 2>/dev/null || true
 fi
 
-# === Replace snap curl with apt curl if needed ===
-# snap curl is sandboxed and can't handle certain TLS configs or pipe-through-bash installs.
-_curl_path="$(command -v curl 2>/dev/null || true)"
-if [ -n "$_curl_path" ] && echo "$_curl_path" | grep -q '^/snap/'; then
-    echo "==> Replacing snap curl with system curl..."
-    sudo snap remove curl 2>/dev/null || true
-    if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y --fix-missing curl
-    elif command -v dnf &>/dev/null; then
-        sudo dnf install -y curl
-    elif command -v pacman &>/dev/null; then
-        sudo pacman -S --noconfirm curl
-    elif command -v zypper &>/dev/null; then
-        sudo zypper install -y curl
-    fi
-    # Reset bash's command-lookup cache so subsequent `curl` calls find /usr/bin/curl.
-    hash -r
-fi
+_t0=${SECONDS}
 
-echo "==> Downloading BioSlicer (${_arch})..."
-BUNDLE_DATE="$(curl -fsSI "$BUNDLE_URL" 2>/dev/null | grep -i '^last-modified:' | sed 's/[Ll]ast-[Mm]odified: //' | tr -d '\r')"
-[ -n "$BUNDLE_DATE" ] && echo "    Bundle built: $(TZ='America/Chicago' date -d "$BUNDLE_DATE" '+%b %d %Y %I:%M %p %Z' 2>/dev/null || echo "$BUNDLE_DATE")"
-curl -fsSL "$BUNDLE_URL" -o "$TMP_BUNDLE"
-
-echo "==> Verifying download integrity..."
-EXPECTED_SHA256="$(curl -fsSL "${BUNDLE_URL}.sha256" 2>/dev/null | tr -d '[:space:]')"
-if [ -n "$EXPECTED_SHA256" ]; then
-    ACTUAL_SHA256="$(sha256sum "$TMP_BUNDLE" | awk '{print $1}')"
-    if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-        echo "    Checksum mismatch — retrying download..."
-        curl -fsSL "$BUNDLE_URL" -o "$TMP_BUNDLE"
-        ACTUAL_SHA256="$(sha256sum "$TMP_BUNDLE" | awk '{print $1}')"
-        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "ERROR: Checksum mismatch after retry — download may be corrupted." >&2
-            echo "  Expected: $EXPECTED_SHA256" >&2
-            echo "  Got:      $ACTUAL_SHA256" >&2
-            exit 1
-        fi
-    fi
-    echo "    Checksum OK."
-else
-    echo "    (No checksum file available — skipping verification.)"
-fi
-
-echo "==> Ensuring Flathub remote is configured..."
+echo "==> Ensuring Flathub remote is configured (needed for the GNOME runtime)..."
 flatpak remote-add --user --if-not-exists flathub \
     https://flathub.org/repo/flathub.flatpakrepo
 
-echo "==> Installing BioSlicer..."
-# Kill any running instances before reinstalling
+# Kill any running instances before updating
 if pgrep -f "flatpak run.*${APP_ID}" &>/dev/null; then
     echo "    Stopping running BioSlicer instances..."
     pkill -f "flatpak run.*${APP_ID}" 2>/dev/null || true
     sleep 0.5
 fi
 # Remove any previous system-wide install (from older installer versions)
-sudo flatpak uninstall --system --noninteractive "$APP_ID" 2>&1 | grep -v '^$' || true
-# Remove any previous user install
-flatpak uninstall --user --noninteractive "$APP_ID" 2>&1 | grep -v '^$' || true
-# Clean up accumulated synthetic remotes from previous bundle installs
-flatpak remote-list --user 2>/dev/null \
-    | awk 'NR>1 && $1 ~ /bioslicer.*-origin/ {print $1}' \
-    | xargs -r flatpak remote-delete --user --force 2>/dev/null || true
-# Install; --reinstall handles the case where the app is already registered
-flatpak install --user --noninteractive --reinstall "$TMP_BUNDLE"
+if flatpak info --system "$APP_ID" &>/dev/null; then
+    echo "    Removing previous system-wide install..."
+    sudo flatpak uninstall --system --noninteractive "$APP_ID" 2>&1 | grep -v '^$' || true
+fi
+
+_origin="$(flatpak info --user --show-origin "$APP_ID" 2>/dev/null || true)"
+# Remembered so the cleanup after the install can tell what the new version replaced.
+_old_commit="$(flatpak info --user --show-commit "$APP_ID" 2>/dev/null || true)"
+_old_runtime="$(flatpak info --user --show-runtime "$APP_ID" 2>/dev/null || true)"
+# Delete synthetic remotes left behind by bundle installs (flatpak creates one per install).
+# They are disabled, so plain `remote-list` hides them.
+_clean_bundle_remotes() {
+    flatpak remote-list --user --show-disabled --columns=name 2>/dev/null \
+        | awk '$1 ~ /^bioslicer.*-origin$/ {print $1}' \
+        | xargs -r flatpak remote-delete --user --force 2>/dev/null || true
+}
+
+# Release mode records the installed bundle's checksum here to skip unneeded downloads.
+_marker_dir="${HOME}/.local/share/bioslicer"
+_marker="${_marker_dir}/installed.sha256"
+
+if [ "$_mode" = repo ]; then
+    # A repo install replaces any bundle the marker describes.
+    rm -f "$_marker"
+    # The repo is unsigned (built locally), hence --no-gpg-verify.
+    flatpak remote-add --user --if-not-exists --no-gpg-verify "$REMOTE" "$REPO_URL"
+    flatpak remote-modify --user --no-gpg-verify --url="$REPO_URL" "$REMOTE"
+    # Indent flatpak's output to match ours; pipefail keeps flatpak's exit status.
+    if [ "$_origin" = "$REMOTE" ]; then
+        echo "==> Updating BioSlicer (only changed files are downloaded)..."
+        ( set -o pipefail
+          flatpak update --user --noninteractive -y "$APP_ID" 2>&1 | sed 's/^/    /' )
+    else
+        # Previous install came from a bundle or another remote: replace it once.
+        if [ -n "$_origin" ]; then
+            echo "    Removing previous user install (origin: ${_origin})..."
+            flatpak uninstall --user --noninteractive "$APP_ID" 2>&1 | grep -v '^$' || true
+        fi
+        _clean_bundle_remotes
+        echo "==> Installing BioSlicer (may also fetch the runtime from Flathub on first install; this can take several minutes)..."
+        ( set -o pipefail
+          flatpak install --user --noninteractive -y "$REMOTE" "$APP_ID" 2>&1 | sed 's/^/    /' )
+    fi
+else
+    # Skip the download when the installed build already matches the release's. The app must
+    # still come from a bundle: a repo install since then would make the marker stale.
+    if [ "$(cat "$_marker" 2>/dev/null)" = "$EXPECTED_SHA256" ] \
+        && [[ "$_origin" =~ ^bioslicer.*-origin$ ]]; then
+        echo "==> BioSlicer is already up to date (${EXPECTED_SHA256:0:12}); nothing to download."
+    else
+        TMP_BUNDLE="$(mktemp --suffix=.flatpak)"
+        trap 'rm -f "$TMP_BUNDLE"' EXIT
+        echo "==> Downloading ${BUNDLE_URL}..."
+        curl -fL --retry 3 --progress-bar "$BUNDLE_URL" -o "$TMP_BUNDLE"
+        echo "==> Verifying download integrity (SHA-256)..."
+        ACTUAL_SHA256="$(sha256sum "$TMP_BUNDLE" | awk '{print $1}')"
+        if [ "$ACTUAL_SHA256" != "${EXPECTED_SHA256,,}" ]; then
+            echo "ERROR: Checksum mismatch — download may be corrupted." >&2
+            echo "  Expected: $EXPECTED_SHA256" >&2
+            echo "  Got:      $ACTUAL_SHA256" >&2
+            exit 1
+        fi
+        echo "    Checksum OK."
+        if [ -n "$_origin" ]; then
+            echo "    Removing previous user install (origin: ${_origin})..."
+            flatpak uninstall --user --noninteractive "$APP_ID" 2>&1 | grep -v '^$' || true
+        fi
+        _clean_bundle_remotes
+        echo "==> Installing BioSlicer (may also fetch the runtime from Flathub on first install; this can take several minutes)..."
+        ( set -o pipefail
+          flatpak install --user --noninteractive --reinstall "$TMP_BUNDLE" 2>&1 | sed 's/^/    /' )
+        mkdir -p "$_marker_dir"
+        printf '%s\n' "$EXPECTED_SHA256" > "$_marker"
+    fi
+fi
+echo "    Done in $((SECONDS - _t0))s."
+
+# === Reclaim storage left behind by previous versions ===
+# Only removes things that are regenerated or no longer referenced; user settings, profiles
+# and presets (~/.var/app/<id>/config and data) are never touched.
+echo "==> Cleaning up storage from previous versions..."
+_new_commit="$(flatpak info --user --show-commit "$APP_ID" 2>/dev/null || true)"
+_new_origin="$(flatpak info --user --show-origin "$APP_ID" 2>/dev/null || true)"
+_new_runtime="$(flatpak info --user --show-runtime "$APP_ID" 2>/dev/null || true)"
+# BioSlicer remotes other than the one the app now comes from: bundle origins and the
+# remote of a previous source (release vs. repo mode, another channel suffix).
+if [ -n "$_new_origin" ]; then
+    flatpak remote-list --user --show-disabled --columns=name 2>/dev/null \
+        | awk -v keep="$_new_origin" '$1 ~ /^bioslicer/ && $1 != keep {print $1}' \
+        | while read -r _r; do
+            echo "    Removing unused remote ${_r}..."
+            flatpak remote-delete --user --force "$_r" 2>/dev/null || true
+        done
+fi
+# The app's cache, skipped if an instance was started again while installing.
+_cache_dir="${HOME}/.var/app/${APP_ID}/cache"
+if [ -d "$_cache_dir" ] && ! flatpak ps --columns=application 2>/dev/null | grep -qxF "$APP_ID"; then
+    if [ -n "$_old_commit" ] && [ "$_old_commit" != "$_new_commit" ]; then
+        # Shader and font caches are rebuilt on demand and may not match the new build.
+        _clear_dir="$_cache_dir"
+    else
+        # Flatpak maps the app's /tmp here. The instances stopped above never removed their
+        # temporary G-code, which BioSlicer only deletes on a normal exit.
+        _clear_dir="${_cache_dir}/tmp"
+    fi
+    if [ -n "$(find "$_clear_dir" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        echo "    Clearing ${_clear_dir/#"$HOME"/\~} ($(du -sh "$_clear_dir" 2>/dev/null | cut -f1))..."
+        find "$_clear_dir" -mindepth 1 -delete 2>/dev/null || true
+    fi
+fi
+# The runtime the previous version used, if the new one moved to another (e.g. GNOME 49 -> 50).
+# Pinned runtimes were installed on purpose (e.g. for building) and are kept; flatpak refuses
+# to remove one that another app still needs.
+if [ -n "$_old_runtime" ] && [ -n "$_new_runtime" ] && [ "$_old_runtime" != "$_new_runtime" ] \
+    && ! flatpak pin --user 2>/dev/null | awk '{print $1}' | grep -qxF "runtime/${_old_runtime}"; then
+    echo "    Removing previous runtime ${_old_runtime}..."
+    flatpak uninstall --user --noninteractive "runtime/${_old_runtime}" 2>&1 | sed 's/^/    /' || true
+fi
+# Runtimes and extensions (GL drivers, codecs, locales) that no installed app uses anymore.
+# Needs flatpak's pinning (1.10+) so runtimes installed explicitly, such as SDKs, are kept.
+if flatpak pin --help &>/dev/null; then
+    flatpak uninstall --user --unused --noninteractive 2>&1 | sed 's/^/    /' || true
+fi
 
 # On WSL2, allow the bioslicer wrapper to (a) create /run/user/$UID so flatpak
 # and the portal agree on the bwrapinfo.json location, and (b) start the system
 # D-Bus without a password prompt (needed for flatpak <1.14 malcontent check).
 if [ "$_is_wsl" = true ]; then
+    echo "==> Configuring WSL2 helpers (run-dir helper and sudoers rule)..."
     # Install the run-dir helper.  /run/user/$UID lives on tmpfs and disappears
     # after a WSL2 restart; the helper recreates it with 0700 ownership so
     # flatpak writes bwrapinfo.json there and the portal can find it.
@@ -301,6 +407,8 @@ case ":${PATH}:" in
 esac
 
 echo "==> Launching BioSlicer..."
+echo "    (Output below is from BioSlicer/flatpak. A 'Can't get document portal' warning is harmless on WSL2.)"
+echo "    ------------------------------------------------------------"
 
 if [ "$_is_wsl" = true ]; then
     echo "    WSL2 — launching (Ctrl-C to quit)..."

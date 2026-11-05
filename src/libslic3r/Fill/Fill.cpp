@@ -26,6 +26,7 @@
 #include "../Layer.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
+#include "../SLAMaterial.hpp"
 #include "../Surface.hpp"
 // for Arachne based infills
 #include "../PerimeterGenerator.hpp"
@@ -485,21 +486,11 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     // SLA regions are driven by the video pipeline; they must never produce FFF fill paths.
     // prepare_infill() populates fill_surfaces for every region (including SLA ones), so
     // clear those surfaces here before group_fills() picks them up.
-    {
-        BOOST_LOG_TRIVIAL(debug) << "make_fills: SLA block enter, layer z=" << this->print_z << " regions=" << m_regions.size();
-        const auto &sla_flags = this->object()->print()->config().sla_material_extruder.values;
-        if (!sla_flags.empty()) {
-            for (size_t ri = 0; ri < m_regions.size(); ++ri) {
-                LayerRegion *lr = m_regions[ri];
-                BOOST_LOG_TRIVIAL(debug) << "make_fills: region[" << ri << "] ptr=" << (void*)lr;
-                const unsigned int ext = lr->region().extruder(frPerimeter);
-                BOOST_LOG_TRIVIAL(debug) << "make_fills: region[" << ri << "] ext=" << ext;
-                if (ext > 0 && ext <= (unsigned int)sla_flags.size() && sla_flags[ext - 1])
-                    lr->m_fill_surfaces.clear();
-            }
-        }
-        BOOST_LOG_TRIVIAL(debug) << "make_fills: SLA block done";
-    }
+    for (LayerRegion *lr : m_regions)
+        if (classify_region_technology(
+                this->object()->print()->config(), lr->region()).technology
+            == RegionTechnology::SLA)
+            lr->m_fill_surfaces.clear();
 
     std::vector<SurfaceFill>  surface_fills       = group_fills(*this);
     const Slic3r::BoundingBox bbox                = this->object()->bounding_box();

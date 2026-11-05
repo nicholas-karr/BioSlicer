@@ -531,3 +531,18 @@ SCENARIO("DynamicPrintConfig serialization", "[Config]") {
         }
     }
 }
+
+TEST_CASE("Tool change material placeholder and omit option are registered", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.option<ConfigOptionBool>("toolchange_omit_tool_command") != nullptr);
+    // Off by default, so every profile that does not ask for it keeps the classic T<n> command.
+    CHECK(config.option<ConfigOptionBool>("toolchange_omit_tool_command")->value == false);
+
+    const auto &placeholders = custom_gcode_specific_placeholders();
+    const auto  it = placeholders.find("toolchange_gcode");
+    REQUIRE(it != placeholders.end());
+    CHECK(std::find(it->second.begin(), it->second.end(), "next_material") != it->second.end());
+
+    REQUIRE(custom_gcode_specific_config_def.has("next_material"));
+    CHECK(custom_gcode_specific_config_def.get("next_material")->type == coString);
+}

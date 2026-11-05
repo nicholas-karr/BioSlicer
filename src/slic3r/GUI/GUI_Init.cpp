@@ -54,6 +54,7 @@ int GUI_Run(GUI_InitParams &params)
     auto sink = boost::log::add_file_log(get_default_datadir() + "/slicer.log");
     sink->locked_backend()->auto_flush();
     boost::log::add_console_log();
+    BOOST_LOG_TRIVIAL(info) << SLIC3R_BUILD_ID << " built " << __DATE__ << " " << __TIME__;
 #endif // SLIC3R_LOG_TO_FILE
     try {
         GUI::GUI_App* gui = new GUI::GUI_App(params.start_as_gcodeviewer ? GUI::GUI_App::EAppMode::GCodeViewer : GUI::GUI_App::EAppMode::Editor);

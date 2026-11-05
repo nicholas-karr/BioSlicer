@@ -14,6 +14,7 @@
 #include <cstdlib>
 
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode.hpp"
 #include "GCodeWriter.hpp"
 #include "libslic3r/GCode/PressureEqualizer.hpp"
@@ -22,6 +23,13 @@
 namespace Slic3r {
 
 static const std::string EXTRUSION_ROLE_TAG = ";_EXTRUSION_ROLE:";
+// A function-local static: GCodeProcessor::Reserved_Tags lives in another translation unit, so it must not be read
+// while this file's own statics are being initialized.
+static const std::string& tool_change_tag()
+{
+    static const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Tool_Change);
+    return tag;
+}
 static const std::string EXTRUDE_END_TAG = ";_EXTRUDE_END";
 static const std::string EXTRUDE_SET_SPEED_TAG = ";_EXTRUDE_SET_SPEED";
 static const std::string EXTERNAL_PERIMETER_TAG = ";_EXTERNAL_PERIMETER";
@@ -313,6 +321,27 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
     else if (found_extrude_end_tag)
         this->opened_extrude_set_speed_block = false;
 
+    // Activate an extruder head; line points at its number.
+    auto activate_extruder = [this, &line, &buf]() {
+        int new_extruder = -1;
+        try {
+            new_extruder = parse_int(line);
+        } catch (Slic3r::InvalidArgument &) {
+            // Ignore invalid GCodes starting with T.
+            eatws(line);
+            return;
+        }
+        assert(new_extruder != -1);
+
+        if (new_extruder != int(m_current_extruder)) {
+            m_current_extruder = new_extruder;
+            m_retracted = true;
+            buf.type = GCODELINETYPE_TOOL_CHANGE;
+        } else {
+            buf.type = GCODELINETYPE_NOOP;
+        }
+    };
+
     // Parse the G-code line, store the result into the buf.
     switch (toupper(*line ++)) {
     case 'G': {
@@ -472,28 +501,16 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
         // Ignore the rest of the M-codes.
         break;
     }
-    case 'T':
-    {
-        // Activate an extruder head.
-        int new_extruder = -1;
-        try {
-            new_extruder = parse_int(line);
-        } catch (Slic3r::InvalidArgument &) {
-            // Ignore invalid GCodes starting with T.
-            eatws(line);
-            break;
-        }
-        assert(new_extruder != -1);
-
-        if (new_extruder != int(m_current_extruder)) {
-            m_current_extruder = new_extruder;
-            m_retracted = true;
-            buf.type = GCODELINETYPE_TOOL_CHANGE;
-        } else {
-            buf.type = GCODELINETYPE_NOOP;
+    case ';':
+        // A tool change carried by a comment tag instead of a T command (toolchange_omit_tool_command).
+        if (strncmp(line - 1, tool_change_tag().data(), tool_change_tag().length()) == 0) {
+            line += tool_change_tag().length() - 1;
+            activate_extruder();
         }
         break;
-    }
+    case 'T':
+        activate_extruder();
+        break;
     }
 
     buf.extruder_id = m_current_extruder;

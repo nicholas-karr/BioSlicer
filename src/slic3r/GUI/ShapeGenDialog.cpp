@@ -203,16 +203,27 @@ static indexed_triangle_set make_square_frustum(float s0, float s1, float z_lo, 
     its.vertices.push_back({ h0, -h0, z_lo}); // 1
     its.vertices.push_back({ h0,  h0, z_lo}); // 2
     its.vertices.push_back({-h0,  h0, z_lo}); // 3
+    if (h1 <= 1e-4f) {
+        // A pyramid has one apex. Four coincident top vertices create
+        // zero-area edges and duplicate side triangles that confuse mesh
+        // repair and downstream boolean operations.
+        its.vertices.push_back({0.f, 0.f, z_hi}); // 4
+        its.indices.push_back({0, 2, 1});
+        its.indices.push_back({0, 3, 2});
+        its.indices.push_back({0, 1, 4});
+        its.indices.push_back({1, 2, 4});
+        its.indices.push_back({2, 3, 4});
+        its.indices.push_back({3, 0, 4});
+        return its;
+    }
     its.vertices.push_back({-h1, -h1, z_hi}); // 4
     its.vertices.push_back({ h1, -h1, z_hi}); // 5
     its.vertices.push_back({ h1,  h1, z_hi}); // 6
     its.vertices.push_back({-h1,  h1, z_hi}); // 7
     // Bottom cap (-Z)
     its.indices.push_back({0, 2, 1}); its.indices.push_back({0, 3, 2});
-    // Top cap (+Z) — skip when degenerate (pyramid apex)
-    if (h1 > 1e-4f) {
-        its.indices.push_back({4, 5, 6}); its.indices.push_back({4, 6, 7});
-    }
+    // Top cap (+Z)
+    its.indices.push_back({4, 5, 6}); its.indices.push_back({4, 6, 7});
     // Four side faces
     its.indices.push_back({0, 1, 5}); its.indices.push_back({0, 5, 4}); // front -Y
     its.indices.push_back({1, 2, 6}); its.indices.push_back({1, 6, 5}); // right +X
@@ -245,21 +256,46 @@ static indexed_triangle_set make_body(int shape_idx, float size, float height)
 }
 
 // Z-band segment for Stripes — uses full cross-section of the shape.
+// Conservative (min-over-band) shape radius for [z_lo, z_hi]. Sampling only at
+// z_mid lets a constant-radius band bulge outward past a tapered/curved
+// boundary over half the band; the cone's radius is linear-decreasing and the
+// sphere's is concave in z, so in both cases the minimum over the interval is
+// attained at one of the two endpoints — using it keeps the band inscribed.
+static float shape_radius_over_zband(int shape_idx, float size, float full_height,
+                                      float z_lo, float z_hi)
+{
+    float half = size * 0.5f;
+    float fh   = std::max(full_height, 0.01f);
+    switch (shape_idx) {
+    case 2: { // Cone.
+        float r_lo = half * std::max(0.f, 1.f - z_lo / fh);
+        float r_hi = half * std::max(0.f, 1.f - z_hi / fh);
+        return std::max(std::min(r_lo, r_hi), 0.5f);
+    }
+    case 3: { // Sphere, translated so its bottom is at Z=0.
+        auto radius_at = [half](float z) {
+            return std::sqrt(std::max(0.f, half*half - (z-half)*(z-half)));
+        };
+        return std::max(std::min(radius_at(z_lo), radius_at(z_hi)), 0.5f);
+    }
+    default: return half;
+    }
+}
+
 static indexed_triangle_set make_zband(int shape_idx, float size, float full_height,
                                        float z_lo, float z_hi)
 {
     const double step = 2.0 * M_PI / 512.0;
     float seg_h = z_hi - z_lo;
     float half  = size * 0.5f;
-    float z_mid = (z_lo + z_hi) * 0.5f;
     float fh    = std::max(full_height, 0.01f);
 
     indexed_triangle_set seg;
     switch (shape_idx) {
     case 0:  seg = its_make_cube(size, size, seg_h); break;
     case 1:  seg = its_make_cylinder(half, seg_h, step); break;
-    case 2:  seg = its_make_cylinder(std::max(half*(1.f-z_mid/fh), 0.5f), seg_h, step); break;
-    case 3:  seg = its_make_cylinder(std::max(std::sqrt(std::max(0.f, half*half-(z_mid-half)*(z_mid-half))), 0.5f), seg_h, step); break;
+    case 2:  seg = its_make_cylinder(shape_radius_over_zband(shape_idx, size, full_height, z_lo, z_hi), seg_h, step); break;
+    case 3:  seg = its_make_cylinder(shape_radius_over_zband(shape_idx, size, full_height, z_lo, z_hi), seg_h, step); break;
     case 4: {
         float s_lo = size * std::max(1.f - z_lo / fh, 0.f);
         float s_hi = size * std::max(1.f - z_hi / fh, 0.f);
@@ -286,22 +322,10 @@ static indexed_triangle_set make_zband(int shape_idx, float size, float full_hei
 // Round shapes use angular wedge sectors.
 // Cube/Pyramid use X-direction slabs so the geometry exactly matches the shape.
 
-static float shape_radius_at_z(int shape_idx, float size, float full_height, float z_mid)
-{
-    float half = size * 0.5f;
-    float fh   = std::max(full_height, 0.01f);
-    switch (shape_idx) {
-    case 2:  return std::max(half * (1.f - z_mid / fh), 0.5f);
-    case 3:  return std::max(std::sqrt(std::max(0.f, half*half-(z_mid-half)*(z_mid-half))), 0.5f);
-    default: return half;
-    }
-}
-
 // One cell: Z-band [z_lo,z_hi], sector j out of n_a total.
 static indexed_triangle_set make_grid_cell(int shape_idx, float size, float height,
                                             float z_lo, float z_hi, int j, int n_a)
 {
-    float z_mid = (z_lo + z_hi) * 0.5f;
     float half  = size * 0.5f;
     float seg_h = z_hi - z_lo;
 
@@ -312,8 +336,14 @@ static indexed_triangle_set make_grid_cell(int shape_idx, float size, float heig
         for (auto& v : box.vertices) { v.x() += x_lo; v.y() -= half; v.z() += z_lo; }
         return box;
     }
-    if (shape_idx == 4) {   // Pyramid: X-slab tapering with height
-        float scale  = std::max(1.f - z_mid / std::max(height, 0.01f), 0.01f);
+    if (shape_idx == 4) {   // Pyramid: X-slab tapering with height.
+        // Scale is linear-decreasing in z, so the min over [z_lo,z_hi] (the
+        // conservative — non-bulging — width for the whole band) is at z_hi;
+        // computed from both endpoints for consistency with the cone/sphere case.
+        float fh       = std::max(height, 0.01f);
+        float scale_lo = std::max(1.f - z_lo / fh, 0.01f);
+        float scale_hi = std::max(1.f - z_hi / fh, 0.01f);
+        float scale    = std::min(scale_lo, scale_hi);
         float sw     = scale * size;
         float x_step = sw / n_a;
         float x_lo   = -sw * 0.5f + j * x_step;
@@ -326,7 +356,7 @@ static indexed_triangle_set make_grid_cell(int shape_idx, float size, float heig
     double a_lo = j * (2.0 * M_PI / n_a);
     double a_hi = (j + 1) * (2.0 * M_PI / n_a);
 
-    return make_wedge(shape_radius_at_z(shape_idx, size, height, z_mid),
+    return make_wedge(shape_radius_over_zband(shape_idx, size, height, z_lo, z_hi),
                       z_lo, z_hi, a_lo, a_hi, arc_steps);
 }
 
@@ -361,34 +391,52 @@ build_honeycomb(int shape_idx, float size, float height, int n_cells, int wall_p
         const float x_offset = (std::abs(row) % 2 == 1) ? dx * 0.5f : 0.f;
         for (int col = -cols; col <= cols; ++col) {
             const float cx = col * dx + x_offset;
-            const float r2 = cx*cx + cy*cy;
 
-            bool in_shape = false;
-            switch (shape_idx) {
-            case 0: case 4:  in_shape = std::abs(cx) < half && std::abs(cy) < half; break;
-            default:         in_shape = r2 < half*half; break;
-            }
-            if (!in_shape) continue;
+            // Test the complete inner hex, not just its center. This keeps the
+            // generated material volume inside the body's lateral boundary.
+            bool contained = true;
+            float cell_z_lo = 0.f;
+            float cell_z_hi = height;
+            for (int vertex = 0; vertex < 6; ++vertex) {
+                const float angle = vertex * float(M_PI / 3.0) + float(M_PI / 6.0);
+                const float x = cx + R_in * std::cos(angle);
+                const float y = cy + R_in * std::sin(angle);
+                const float radius = std::sqrt(x * x + y * y);
+                const float square_radius = std::max(std::abs(x), std::abs(y));
 
-            // Clip inner hex height to the shape surface so we don't generate
-            // large amounts of geometry that can't possibly overlap the body.
-            float cell_h = height;
-            switch (shape_idx) {
-            case 2: {
-                float r = std::sqrt(r2);
-                cell_h = height * std::max(0.f, 1.f - r / half);
-                break;
-            }
-            case 4: {
-                float r = std::max(std::abs(cx), std::abs(cy));
-                cell_h = height * std::max(0.f, 1.f - r / half);
-                break;
-            }
-            default: break;
-            }
-            if (cell_h < 0.1f) continue;
+                if ((shape_idx == 0 || shape_idx == 4)
+                        ? square_radius > half
+                        : radius > half) {
+                    contained = false;
+                    break;
+                }
 
-            its_append(meshes[1 % n_materials], make_hex_prism(cx, cy, R_in, 0.f, cell_h));
+                switch (shape_idx) {
+                case 2: // Cone.
+                    cell_z_hi = std::min(
+                        cell_z_hi, height * std::max(0.f, 1.f - radius / half));
+                    break;
+                case 3: { // Sphere, translated so its bottom is at Z=0.
+                    const float dz = std::sqrt(std::max(
+                        0.f, half * half - radius * radius));
+                    cell_z_lo = std::max(cell_z_lo, half - dz);
+                    cell_z_hi = std::min(cell_z_hi, half + dz);
+                    break;
+                }
+                case 4: // Pyramid.
+                    cell_z_hi = std::min(
+                        cell_z_hi,
+                        height * std::max(0.f, 1.f - square_radius / half));
+                    break;
+                default:
+                    break;
+                }
+            }
+            if (!contained || cell_z_hi - cell_z_lo < 0.1f)
+                continue;
+
+            its_append(meshes[1 % n_materials],
+                make_hex_prism(cx, cy, R_in, cell_z_lo, cell_z_hi));
         }
     }
     return meshes;
@@ -726,6 +774,12 @@ ShapeGenDialog::ShapeGenDialog(wxWindow* parent)
 
     SetSizerAndFit(outer);
     SetMinSize(wxSize(420, -1));
+
+    // Dock against the left edge of the application window so the live preview stays visible.
+    if (wxWindow *top = wxGetTopLevelParent(GetParent())) {
+        const wxRect r = top->GetScreenRect();
+        Move(r.x + 8, r.y + std::max(0, (r.height - GetSize().y) / 2));
+    }
 
     // Event bindings
     m_choice_shape->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {

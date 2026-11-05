@@ -214,20 +214,57 @@ void encode_sla_video_with_ffmpeg_or_throw(
         }
     });
 
-    // RAII guard: always join stderr_thread even if an exception is thrown
-    // below. A joinable std::thread destroyed without join() calls terminate().
-    struct ThreadGuard {
-        std::thread &t;
-        ~ThreadGuard() { if (t.joinable()) t.join(); }
-    } _guard{stderr_thread};
+    // On an exceptional render path, closing stdin alone is insufficient:
+    // ffmpeg may remain alive while the stderr-draining thread waits for EOF.
+    // Terminate and reap the child before joining that thread.
+    struct ProcessGuard {
+        process::child    &child;
+        process::opstream &input;
+        std::thread       &stderr_thread;
+        bool               finished { false };
 
-    for (size_t i = 0; i < frame_count && ffmpeg_stdin.good(); ++i)
-        render_frame(ffmpeg_stdin, i);
+        ~ProcessGuard()
+        {
+            if (finished)
+                return;
+            try {
+                input.pipe().close();
+            } catch (...) {
+            }
+            try {
+                if (child.running())
+                    child.terminate();
+                child.wait();
+            } catch (...) {
+            }
+            try {
+                if (stderr_thread.joinable())
+                    stderr_thread.join();
+            } catch (...) {
+                // A destructor must never let a second exception escape while
+                // one is already unwinding (e.g. from render_frame throwing) —
+                // that calls std::terminate(). Losing the stderr thread's own
+                // failure here is an acceptable tradeoff against crashing the
+                // whole export instead of surfacing the original ExportError.
+            }
+        }
+    } guard{child, ffmpeg_stdin, stderr_thread};
+
+    size_t frames_written = 0;
+    for (; frames_written < frame_count && ffmpeg_stdin.good(); ++frames_written)
+        render_frame(ffmpeg_stdin, frames_written);
+
+    if (frames_written != frame_count || !ffmpeg_stdin.good())
+        throw Slic3r::ExportError("Native SLA synthesis lost its ffmpeg input pipe.");
 
     ffmpeg_stdin.flush();
+    if (!ffmpeg_stdin.good())
+        throw Slic3r::ExportError("Native SLA synthesis failed while flushing frames to ffmpeg.");
     ffmpeg_stdin.pipe().close();
-    stderr_thread.join();
     child.wait();
+    if (stderr_thread.joinable())
+        stderr_thread.join();
+    guard.finished = true;
 
     if (child.exit_code() != 0)
         throw Slic3r::ExportError(format("Native SLA synthesis failed during ffmpeg encode: %1%", stderr_text));

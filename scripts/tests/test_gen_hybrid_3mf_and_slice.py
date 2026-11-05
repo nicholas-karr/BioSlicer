@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 import scripts.sla_video_runtime as runtime
+from scripts.tests._test_support import require_slicer_binary
 
 
 def _probe_video_size(video_path: Path) -> tuple[int, int]:
@@ -144,12 +145,10 @@ class HybridScriptSmokeTests(unittest.TestCase):
     def test_native_synthesis_smoke(self):
         repo_root = Path(__file__).resolve().parents[2]
         script_path = repo_root / "scripts" / "gen_hybrid_3mf_and_slice.py"
-        slicer_path = repo_root / "build" / "src" / "prusa-slicer"
-
-        self.assertTrue(slicer_path.exists(), f"Missing slicer binary: {slicer_path}")
+        slicer_path = require_slicer_binary()
 
         if shutil.which("ffmpeg") is None:
-            raise AssertionError("ffmpeg is required for native synthesis smoke test")
+            raise unittest.SkipTest("ffmpeg is required for native synthesis smoke test")
 
         with tempfile.TemporaryDirectory(prefix="bioslicer_hybrid_smoke_") as td:
             out_dir = Path(td)

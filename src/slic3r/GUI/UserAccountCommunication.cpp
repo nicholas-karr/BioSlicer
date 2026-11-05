@@ -152,7 +152,7 @@ void load_tokens_linux(UserAccountCommunication::StoreData& result)
             source = boost::filesystem::path(Slic3r::data_dir()) / "UserAcountData.dat";
             ec.clear();            
             if (!boost::filesystem::exists(source, ec) || ec) {
-                BOOST_LOG_TRIVIAL(error) << "UserAccount: Failed to read token - no datafile found.";
+                BOOST_LOG_TRIVIAL(debug) << "UserAccount: Failed to read token - no datafile found.";
                 return;
             }
             delete_after_read = true;

@@ -2,149 +2,121 @@
 
 ## Flatpak (Linux distribution)
 
-BioSlicer is distributed as a Flatpak bundle. The host URL and web root are passed explicitly at deploy time.
+BioSlicer is distributed as a Flatpak. There is a single installer,
+[`flatpak/install.sh`](../flatpak/install.sh), committed in the repo, and it has two sources:
+
+| Mode | Source | Used for | Update cost |
+|---|---|---|---|
+| release (default) | `BioSlicer-<arch>.flatpak` + `.sha256` attached to the latest [GitHub Release](https://github.com/nicholas-karr/BioSlicer/releases) | Public builds | Whole bundle (~90 MB), skipped if already installed |
+| repo | An **OSTree repository** at `<url>/repo-<arch>`, chosen with `BIOSLICER_URL=<url>` or a `deploy.sh`-generated `install.sh` | Self-hosted / fast test loop | Only the files that changed (~40 MB for a code change, "Nothing to do" if none) |
+
+Why two: GitHub Releases can only host flat asset files, so public builds are bundles, as
+with PrusaSlicer. An OSTree repo is a directory tree of thousands of hashed files that needs
+a real web server, but it updates incrementally and skips the slow bundling step, which is
+what a build-test loop needs. OSTree stores every file once, named by its hash, so a client
+only downloads files it doesn't already have.
+
+End users run the installer straight from GitHub (see the
+[main README](../README.md#install-linux--wsl2)). Installer environment variables:
+`BIOSLICER_URL` (use a self-hosted repo), `BIOSLICER_SUFFIX` (its channel suffix),
+`BIOSLICER_VERSION` (release tag instead of latest), `BIOSLICER_RELEASE_URL` (override the
+release download base URL, e.g. to test against a local server).
 
 ### Building and deploying
 
 ```bash
-flatpak/deploy.sh --web-root <dir> --url <https://your-server/BioSlicer>
+flatpak/deploy.sh --web-root <dir> [--url <public url of dir>] [--bundle] [--arch x86_64]
 ```
 
-This builds the Flatpak, exports a distributable bundle, and writes the bundle and a configured `install.sh` to `<dir>`. The bundle and installer will be served at:
+This builds the Flatpak, exports it into a persistent local OSTree repo
+(`.flatpak-repo-<arch>`), and mirrors it into `<dir>`:
 
-- `<url>/BioSlicer.flatpak`
-- `<url>/install.sh`
+- `repo-<arch>/` (`repo-x86_64`, `repo-aarch64`), always
+- `install<suffix>.sh`: a copy of the installer set to repo mode for `--url`, when `--url` is given
+- `BioSlicer-<arch>.flatpak` and `.sha256`, with `--bundle` (the GitHub Release assets)
 
-**Incremental rebuilds** (source-only changes) complete in ~3 minutes thanks to ccache and mold.
+Options: `--arch x86_64|aarch64|all` (default: host, plus aarch64 when a cross toolchain is
+available), `--bundle` (also make release bundles: ~90 s slower, single-threaded),
+`--deltas` (generate static deltas for the repo: ~15 s slower to publish, roughly halves the
+download), `--suffix S` (publish `install<S>.sh`, `repo-<arch><S>` and `BioSlicer-<arch><S>.flatpak`
+as a separate channel), `--no-build` (redeploy `install.sh` only). Run `flatpak/deploy.sh` with
+no arguments for the option list.
+
+The last build's inputs are hashed, so re-running with no source changes skips the build (~2 s).
+The repo is kept between runs, so export only writes changed objects. Progress is logged, with
+a heartbeat every 10 s during the quiet export/bundle steps and a timing line per phase.
+
+**Typical times** (12 cores, warm ccache): no changes ~2 s; one-file change ~45 s, of which
+flatpak-builder is ~35 s; adding `--bundle` adds ~90 s.
+
+### Publishing a release
+
+1. `flatpak/deploy.sh --bundle --web-root dist` on each architecture you ship (or `--arch all`).
+2. Attach `dist/BioSlicer-<arch>.flatpak` and `.flatpak.sha256` for every arch to a GitHub
+   Release, keeping those exact file names:
+   `gh release create v0.1.0 dist/BioSlicer-*.flatpak dist/BioSlicer-*.flatpak.sha256`.
+3. `curl -fsSL https://raw.githubusercontent.com/nicholas-karr/BioSlicer/master/flatpak/install.sh | bash`
+   now installs it.
+
+**Planned:** a GitHub Actions workflow that does this on version tags. A cold CI build compiles
+all dependencies, so it needs the GNOME 49 SDK plus a cache for the flatpak-builder state and
+ccache to stay fast. Not set up yet.
+
+### Installing what you built
+
+- **Same machine:** `flatpak/install-local.sh [arch]` installs from the local repo; no web
+  server or release needed.
+- **Another machine, self-hosted:** `curl -fsSL <url>/install.sh | bash` (or the repo's
+  installer with `BIOSLICER_URL=<url>`). The first run installs; later runs update only what
+  changed. To test without a real server: `cd <web-root> && python3 -m http.server 8123`, then
+  deploy with `--url http://<host>:8123`.
+
+The self-hosted repo is unsigned (built locally), so the installer adds it with
+`--no-gpg-verify`. An update can also fetch a newer GNOME runtime from Flathub if one exists.
 
 ### Cache behaviour
 
-The build has two layers of caching:
+The build has three layers of caching:
 
 | Layer | What's cached | Invalidated when |
 |---|---|---|
-| flatpak module cache (ostree) | Built deps (Boost, OCCT, wxWidgets, …) | `flatpak/bioslicer-deps-src.tar.gz` sha256 changes |
+| deploy.sh input hash | The whole published build | Any tracked/untracked source file changes |
+| flatpak module cache (ostree) | Built deps (Boost, OCCT, wxWidgets, …) | Anything in `deps/` or `cmake/` changes |
 | ccache | Individual `.o` files for BioSlicer | Source file content changes |
 
-The deps cache is keyed to `flatpak/bioslicer-deps-src.tar.gz`. **If you change anything in `deps/` or `cmake/`**, regenerate the tarball and update the sha256 in `flatpak/com.bioslicer.BioSlicer.yml`:
+`flatpak/bioslicer-deps-src.tar.gz` is an archive of `deps/` and `cmake/` that the manifest's
+`BioSlicerDeps` module builds from. It is not committed: `deploy.sh` regenerates it on every
+build from the files git knows about (so local build trees such as `deps/build-default` never
+get in), with fixed order, timestamps, owners and modes, so the same sources give the same
+bytes, and the same sha256, on every machine.
 
-```bash
-cd /path/to/BioSlicer
-tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owner \
-    --exclude='deps/build' \
-    --exclude='deps/build-win64-clang-cross' \
-    --exclude='deps/.pkg_cache' \
-    -czf flatpak/bioslicer-deps-src.tar.gz \
-    deps/ cmake/
-sha256sum flatpak/bioslicer-deps-src.tar.gz
-# Update the sha256: field in flatpak/com.bioslicer.BioSlicer.yml under the BioSlicerDeps module
-```
+flatpak-builder keys the deps cache on the `sha256:` recorded for that archive in
+`flatpak/com.bioslicer.BioSlicer.yml`, not on the file's content. **If you change anything in
+`deps/` or `cmake/`**, `deploy.sh` notices that the archive no longer matches the recorded
+checksum, builds from a generated copy of the manifest carrying the real one (which rebuilds
+and re-caches the deps, a long build), and prints the value to put into the manifest when
+you commit the change.
 
-Then commit the new tarball and run a full build (which will rebuild and re-cache deps, then be fast again).
+### What the installer does to your system
 
-### End-user install
-
-```bash
-curl -fsSL <url>/install.sh | bash
-```
-
-Installs the Flatpak system-wide, creates a `bioslicer` shortcut in `~/.local/bin`, and launches the app. Safe to run again to update.
-
----
-
-# Image and Video Display Scripts
-
-Minimal TCP display stack for BioSlicer SLA video workflows.
-
-## Quick Start
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp image-display-config.yaml.template image-display-config.yaml
-python image-display.py
-```
-
-## MainsailOS (Pi 4) Defaults
-
-The template defaults are tuned for MainsailOS:
-
-- `video_cache_dir`: `/home/pi/printer_data/cache/bioslicer-sla-video-cache`
-- `monitor_auto_detect`: `true`
-
-Optional monitor probe:
-
-```bash
-python image-display.py --enum-monitors
-```
-
-## Systemd Service
-
-Install and start the service:
-
-```bash
-sudo ./install-image-display-service.sh
-```
-
-Override user/path/display if needed:
-
-```bash
-sudo SERVICE_USER=pi SCRIPTS_DIR=/home/pi/BioSlicer/scripts DISPLAY_VALUE=:0 ./install-image-display-service.sh
-```
-
-Default unit name: `bioslicer-image-display.service`.
-
-## Command Examples
-
-```bash
-python send-image.py localhost 5555 '{"type":"DISPLAY_IMAGE","path":"/data/frame.png"}'
-python send-image.py localhost 5555 '{"type":"LOAD_VIDEOS_FROM_GCODE","gcode_path":"/data/job.gcode"}'
-python send-image.py localhost 5555 '{"type":"SHOW_VIDEO_FRAME","name":"resin_a","frame":240}'
-python send-image.py localhost 5555 '{"type":"CLEAR"}'
-```
-
-On localhost, `send-image.py` will try to start `bioslicer-image-display.service` if the first connection is refused.
-Disable autostart with:
-
-```bash
-python send-image.py localhost 5555 --no-ensure-running '{"type":"CLEAR"}'
-```
-
-## Commands
-
-- `DISPLAY_IMAGE`
-- `CLEAR`
-- `LOAD_VIDEO`
-- `LOAD_VIDEOS_FROM_GCODE`
-- `SHOW_VIDEO_FRAME`
-- `LIST_VIDEOS`
-- `UNLOAD_VIDEO`
-
-## Web Installer Publish
-
-Create a web-hosted Linux installer and a stable `latest` archive for Ubuntu 24 clients:
-
-```bash
-PUBLISH_DIR=/path/to/web/root/bioslicer ./make-web-installer.sh
-```
-
-The generated installer is meant to live at a stable URL, for example:
-
-```bash
-wget -qO- <url>/bioslicer-install.sh | bash
-```
-
-By default the installer places BioSlicer in the current user profile under `~/.local/opt/bioslicer` and creates a `bioslicer` launcher in `~/.local/bin`. Run the installer as root to install system-wide under `/opt/bioslicer`.
-
-The publish script copies artifacts into the web root specified by `PUBLISH_DIR` and then performs a smoke test by downloading the installer from `http://127.0.0.1/bioslicer/bioslicer-install.sh` and running it in an isolated `HOME`.
+The installer can also change packages, D-Bus state, shell configuration, older
+Flatpak installations, and WSL sudoers configuration. Its complete system-effect
+inventory is maintained in
+[`flatpak/INSTALLER_EFFECTS.md`](../flatpak/INSTALLER_EFFECTS.md).
 
 ## Typical SLA Flow
 
 1. Configure SLA video fields in slicer custom G-code settings.
 2. Export G-code.
-3. Start the display server (or service).
-4. Run macros from `scripts/macros/` to load videos and show frames during SLA steps.
+3. Inspect or test the generated frame sequence:
+
+   ```bash
+   python scripts/extract_sla_frames_from_gcode.py build/generated/job.gcode
+   ```
+
+The extractor retains only the G-code parsing and ffmpeg frame-decoding support
+needed to test slicer output. Printer display services and controller macros are
+deliberately outside this repository.
 
 ## Hybrid Multi-Material Generators
 

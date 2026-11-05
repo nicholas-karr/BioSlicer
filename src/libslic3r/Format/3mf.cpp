@@ -19,6 +19,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <optional>
 #include <string_view>
 
@@ -91,6 +92,7 @@ const std::string LAYER_HEIGHTS_PROFILE_FILE = "Metadata/Slic3r_PE_layer_heights
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/Prusa_Slicer_layer_config_ranges.xml";
 const std::string SLA_SUPPORT_POINTS_FILE = "Metadata/Slic3r_PE_sla_support_points.txt";
 const std::string SLA_DRAIN_HOLES_FILE = "Metadata/Slic3r_PE_sla_drain_holes.txt";
+const std::string DROPLETS_FILE = "Metadata/BioSlicer_droplets.txt";
 const std::string CUSTOM_GCODE_PER_PRINT_Z_FILE = "Metadata/Prusa_Slicer_custom_gcode_per_print_z.xml";
 const std::string WIPE_TOWER_INFORMATION_FILE = "Metadata/Prusa_Slicer_wipe_tower_information.xml";
 const std::string CUT_INFORMATION_FILE = "Metadata/Prusa_Slicer_cut_information.xml";
@@ -272,6 +274,22 @@ int get_attribute_value_int(const char** attributes, unsigned int attributes_siz
     return value;
 }
 
+// Unlike get_attribute_value_int(), does not silently default a missing or
+// malformed attribute to zero. Used for resource-id attributes, where zero is
+// a valid id and must not be confused with "absent"/"unparsable" — see C6-2.
+std::optional<int> get_attribute_value_int_or_none(const char** attributes, unsigned int attributes_size, const char* attribute_key)
+{
+    const char *text = get_attribute_value_charptr(attributes, attributes_size, attribute_key);
+    if (text == nullptr)
+        return std::nullopt;
+    int value = 0;
+    const char *end = text + strlen(text);
+    const char *cursor = text;
+    if (!boost::spirit::qi::parse(cursor, end, boost::spirit::qi::int_, value) || cursor != end)
+        return std::nullopt;
+    return value;
+}
+
 const char* get_local_name(const char* name)
 {
     if (name == nullptr)
@@ -299,11 +317,18 @@ const char* get_local_name(const char* name)
         return (text != nullptr) ? text : "";
     }
 
-    int get_attribute_value_int_local_name(const char** attributes, unsigned int attributes_size, const char* attribute_local_key)
+    std::optional<int> get_attribute_value_int_local_name(const char** attributes, unsigned int attributes_size, const char* attribute_local_key)
     {
         int value = 0;
-        if (const char *text = get_attribute_value_charptr_local_name(attributes, attributes_size, attribute_local_key); text != nullptr)
-            boost::spirit::qi::parse(text, text + strlen(text), boost::spirit::qi::int_, value);
+        const char *text = get_attribute_value_charptr_local_name(
+            attributes, attributes_size, attribute_local_key);
+        if (text == nullptr)
+            return std::nullopt;
+        const char *end = text + strlen(text);
+        const char *cursor = text;
+        if (!boost::spirit::qi::parse(cursor, end, boost::spirit::qi::int_, value)
+            || cursor != end)
+            return std::nullopt;
         return value;
     }
 
@@ -621,6 +646,9 @@ namespace Slic3r {
         IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToSlaSupportPointsMap m_sla_support_points;
         IdToSlaDrainHolesMap    m_sla_drain_holes;
+        // Droplet sets by 1 based model object index, and those of the model itself.
+        std::map<int, DropletSets> m_droplet_sets;
+        DropletSets             m_model_droplet_sets;
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
         std::map<int, VolumetricVolumeDataInfo> m_volumetric_data;
         std::map<int, VolumetricFunctionInfo> m_volumetric_functions;
@@ -663,6 +691,7 @@ namespace Slic3r {
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_droplets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_wipe_tower_information_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
@@ -947,6 +976,9 @@ namespace Slic3r {
                     // extract sla support points file
                     _extract_sla_drain_holes_from_archive(archive, stat);
                 }
+                else if (boost::algorithm::iequals(name, DROPLETS_FILE)) {
+                    _extract_droplets_from_archive(archive, stat);
+                }
                 else if (boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
@@ -1042,6 +1074,8 @@ namespace Slic3r {
             }
         }
 
+        m_model->droplet_sets = std::move(m_model_droplet_sets);
+
         for (const IdToModelObjectMap::value_type& object : m_objects) {
             if (object.second >= int(m_model->objects.size())) {
                 add_error("Unable to find object");
@@ -1075,6 +1109,10 @@ namespace Slic3r {
             if (obj_drain_holes != m_sla_drain_holes.end() && !obj_drain_holes->second.empty()) {
                 model_object->sla_drain_holes = std::move(obj_drain_holes->second);
             }
+
+            // m_droplet_sets are indexed by a 1 based model object index.
+            if (auto obj_droplets = m_droplet_sets.find(object.second + 1); obj_droplets != m_droplet_sets.end())
+                model_object->droplet_sets = std::move(obj_droplets->second);
 
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
@@ -1594,6 +1632,45 @@ namespace Slic3r {
         }
     }
     
+    void _3MF_Importer::_extract_droplets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    {
+        if (stat.m_uncomp_size == 0)
+            return;
+        std::string buffer(size_t(stat.m_uncomp_size), 0);
+        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading droplets data to buffer");
+            return;
+        }
+
+        // Sections start with "model" or "object <1 based index>"; the sets follow, see droplet_sets_from_text().
+        int         section = -1; // -1 = none yet, 0 = model, >0 = object
+        std::string text;
+        auto flush = [&]() {
+            if (section == 0)
+                m_model_droplet_sets = droplet_sets_from_text(text);
+            else if (section > 0)
+                m_droplet_sets[section] = droplet_sets_from_text(text);
+            text.clear();
+        };
+        std::istringstream in(buffer);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line == "model" || line == "model\r") {
+                flush();
+                section = 0;
+            } else if (line.compare(0, 7, "object ") == 0) {
+                flush();
+                section = std::atoi(line.c_str() + 7);
+                if (section <= 0)
+                    add_error("Found invalid object id in droplets");
+            } else if (section >= 0) {
+                text += line;
+                text += '\n';
+            }
+        }
+        flush();
+    }
+
     void _3MF_Importer::_extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
     {
         if (stat.m_uncomp_size > 0) {
@@ -2157,7 +2234,12 @@ namespace Slic3r {
             if (m_curr_object.object->name.empty())
                 m_curr_object.object->name = m_name + "_" + std::to_string(m_model->objects.size());
 
-            m_curr_object.id = get_attribute_value_int(attributes, num_attributes, ID_ATTR);
+            const std::optional<int> id = get_attribute_value_int_or_none(attributes, num_attributes, ID_ATTR);
+            if (!id.has_value() || *id < 0) {
+                add_error("Missing or invalid object id");
+                return false;
+            }
+            m_curr_object.id = *id;
         }
 
         return true;
@@ -2211,7 +2293,18 @@ namespace Slic3r {
     {
         // reset current geometry
         m_curr_object.geometry.reset();
-        m_curr_object.volume_data_id = get_attribute_value_int_local_name(attributes, num_attributes, VOLUMEID_ATTR);
+        const char *raw_volume_id = get_attribute_value_charptr_local_name(
+            attributes, num_attributes, VOLUMEID_ATTR);
+        if (raw_volume_id == nullptr) {
+            m_curr_object.volume_data_id = -1;
+        } else if (const auto volume_id = get_attribute_value_int_local_name(
+                       attributes, num_attributes, VOLUMEID_ATTR);
+                   volume_id.has_value() && *volume_id >= 0) {
+            m_curr_object.volume_data_id = *volume_id;
+        } else {
+            add_error("Found mesh with invalid volumetric volume id");
+            return false;
+        }
         return true;
     }
 
@@ -2430,13 +2523,19 @@ namespace Slic3r {
 
     bool _3MF_Importer::_handle_start_volumetric_volume_data(const char** attributes, unsigned int num_attributes)
     {
-        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
-        if (id < 0)
-            return true;
+        const auto id_value = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (!id_value.has_value() || *id_value < 0) {
+            add_error("Found volumetric data with invalid id");
+            return false;
+        }
+        const int id = *id_value;
 
         VolumetricVolumeDataInfo data;
         data.id = id;
-        m_volumetric_data[id] = std::move(data);
+        if (!m_volumetric_data.emplace(id, std::move(data)).second) {
+            add_error("Found duplicate volumetric data id");
+            return false;
+        }
         m_curr_volumetric_data_id = id;
         m_in_volumetric_composite = false;
         return true;
@@ -2459,7 +2558,13 @@ namespace Slic3r {
             return true;
 
         VolumetricVolumeDataInfo::Composite composite;
-        composite.basematerial_id = get_attribute_value_int_local_name(attributes, num_attributes, BASEMATERIALID_ATTR);
+        const auto base_material_id = get_attribute_value_int_local_name(
+            attributes, num_attributes, BASEMATERIALID_ATTR);
+        if (!base_material_id.has_value() || *base_material_id < 0) {
+            add_error("Found volumetric composite with invalid base material id");
+            return false;
+        }
+        composite.basematerial_id = *base_material_id;
         it->second.composite = std::move(composite);
         m_in_volumetric_composite = true;
         return true;
@@ -2481,7 +2586,13 @@ namespace Slic3r {
             return true;
 
         VolumetricVolumeDataInfo::MaterialMapping mapping;
-        mapping.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        const auto function_id = get_attribute_value_int_local_name(
+            attributes, num_attributes, FUNCTIONID_ATTR);
+        if (!function_id.has_value() || *function_id < 0) {
+            add_error("Found volumetric material mapping with invalid function id");
+            return false;
+        }
+        mapping.function_id = *function_id;
         mapping.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
         it->second.composite->mappings.emplace_back(std::move(mapping));
         return true;
@@ -2497,7 +2608,13 @@ namespace Slic3r {
             return true;
 
         VolumetricVolumeDataInfo::Color color;
-        color.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        const auto function_id = get_attribute_value_int_local_name(
+            attributes, num_attributes, FUNCTIONID_ATTR);
+        if (!function_id.has_value() || *function_id < 0) {
+            add_error("Found volumetric color with invalid function id");
+            return false;
+        }
+        color.function_id = *function_id;
         color.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
         it->second.color = std::move(color);
         return true;
@@ -2514,7 +2631,13 @@ namespace Slic3r {
 
         VolumetricVolumeDataInfo::Property property;
         property.name = get_attribute_value_string_local_name(attributes, num_attributes, NAME_ATTR);
-        property.function_id = get_attribute_value_int_local_name(attributes, num_attributes, FUNCTIONID_ATTR);
+        const auto function_id = get_attribute_value_int_local_name(
+            attributes, num_attributes, FUNCTIONID_ATTR);
+        if (!function_id.has_value() || *function_id < 0) {
+            add_error("Found volumetric property with invalid function id");
+            return false;
+        }
+        property.function_id = *function_id;
         property.channel = get_attribute_value_string_local_name(attributes, num_attributes, CHANNEL_ATTR);
         const std::string required = get_attribute_value_string_local_name(attributes, num_attributes, REQUIRED_ATTR);
         property.required = required == "true" || required == "1";
@@ -2524,28 +2647,46 @@ namespace Slic3r {
 
     bool _3MF_Importer::_handle_start_volumetric_function_from_image3d(const char** attributes, unsigned int num_attributes)
     {
-        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
-        if (id < 0)
-            return true;
+        const auto id_value = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (!id_value.has_value() || *id_value < 0) {
+            add_error("Found volumetric function with invalid id");
+            return false;
+        }
+        const int id = *id_value;
 
         VolumetricFunctionInfo function;
         function.id = id;
         function.display_name = get_attribute_value_string_local_name(attributes, num_attributes, DISPLAYNAME_ATTR);
-        function.image3d_id = get_attribute_value_int_local_name(attributes, num_attributes, IMAGE3DID_ATTR);
-        m_volumetric_functions[id] = std::move(function);
+        const auto image_id = get_attribute_value_int_local_name(
+            attributes, num_attributes, IMAGE3DID_ATTR);
+        if (!image_id.has_value() || *image_id < 0) {
+            add_error("Found volumetric function with invalid image3d id");
+            return false;
+        }
+        function.image3d_id = *image_id;
+        if (!m_volumetric_functions.emplace(id, std::move(function)).second) {
+            add_error("Found duplicate volumetric function id");
+            return false;
+        }
         return true;
     }
 
     bool _3MF_Importer::_handle_start_volumetric_image3d(const char** attributes, unsigned int num_attributes)
     {
-        const int id = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
-        if (id < 0)
-            return true;
+        const auto id_value = get_attribute_value_int_local_name(attributes, num_attributes, ID_ATTR);
+        if (!id_value.has_value() || *id_value < 0) {
+            add_error("Found volumetric image with invalid id");
+            return false;
+        }
+        const int id = *id_value;
 
         VolumetricImage3DInfo image;
         image.id = id;
         image.name = get_attribute_value_string_local_name(attributes, num_attributes, NAME_ATTR);
-        m_volumetric_images[id] = std::move(image);
+        if (!m_volumetric_images.emplace(id, std::move(image)).second) {
+            add_error("Found duplicate volumetric image id");
+            return false;
+        }
         return true;
     }
 
@@ -2556,59 +2697,18 @@ namespace Slic3r {
             return true;
 
         const VolumetricVolumeDataInfo& volume_data = volumetric_it->second;
-        int synthesized_channel_count = 0;
-        if (volume_data.composite.has_value()) {
-            std::unordered_set<std::string> unique_channel_labels;
-            int fallback_count = 0;
-
-            for (const VolumetricVolumeDataInfo::MaterialMapping& mapping : volume_data.composite->mappings) {
-                if (!mapping.channel.empty())
-                    unique_channel_labels.insert(mapping.channel);
-                else
-                    ++fallback_count;
-            }
-
-            if (!unique_channel_labels.empty())
-                synthesized_channel_count = int(unique_channel_labels.size());
-            else
-                synthesized_channel_count = fallback_count;
-        }
-
-        // No composite mappings means there is nothing to synthesize into channels.
-        if (synthesized_channel_count == 0)
+        if (!volume_data.composite.has_value()
+            || volume_data.composite->mappings.empty())
             return true;
 
-        synthesized_channel_count = std::max(1, synthesized_channel_count);
-
-        // Keep existing explicit object extruder assignment if already valid.
-        int object_extruder = 0;
-        if (const ConfigOption* opt = object.config.option("extruder"); opt != nullptr)
-            object_extruder = opt->getInt();
-        if (object_extruder <= 0) {
-            object_extruder = 1;
-            object.config.set_key_value("extruder", new ConfigOptionInt(object_extruder));
-        }
-
-        // Assign channels across volumes deterministically when no explicit volume extruder exists.
-        // If there is just one volume, it receives channel 1 as the base channel.
-        for (size_t i = 0; i < object.volumes.size(); ++i) {
-            ModelVolume* vol = object.volumes[i];
-            if (vol == nullptr)
-                continue;
-
-            int volume_extruder = 0;
-            if (const ConfigOption* vol_opt = vol->config.option("extruder"); vol_opt != nullptr)
-                volume_extruder = vol_opt->getInt();
-
-            if (volume_extruder <= 0) {
-                const int channel_idx = int(i % size_t(synthesized_channel_count));
-                vol->config.set_key_value("extruder", new ConfigOptionInt(channel_idx + 1));
-            }
-        }
-
-        BOOST_LOG_TRIVIAL(info)
-            << "Synthesized " << synthesized_channel_count
-            << " logical channels from volumetric composite for object '" << object.name << "'";
+        // A volumetric function is a spatial field, not a one-to-one mapping
+        // between mesh volumes and channels. Keep explicit slicer assignments
+        // intact and import the geometry without inventing a round-robin
+        // assignment that could silently change the manufactured result.
+        BOOST_LOG_TRIVIAL(warning)
+            << "Volumetric material fields for object '" << object.name
+            << "' were imported as geometry metadata only; spatial volumetric "
+               "channel evaluation is not implemented";
 
         return true;
     }
@@ -2781,7 +2881,12 @@ namespace Slic3r {
 
     bool _3MF_Importer::_handle_start_config_object(const char** attributes, unsigned int num_attributes)
     {
-        int object_id = get_attribute_value_int(attributes, num_attributes, ID_ATTR);
+        const std::optional<int> id = get_attribute_value_int_or_none(attributes, num_attributes, ID_ATTR);
+        if (!id.has_value() || *id < 0) {
+            add_error("Missing or invalid config object id");
+            return false;
+        }
+        int object_id = *id;
         IdToMetadataMap::iterator object_item = m_objects_metadata.find(object_id);
         if (object_item != m_objects_metadata.end()) {
             add_error("Found duplicated object id");
@@ -3142,6 +3247,7 @@ namespace Slic3r {
         bool _add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_drain_holes_file_to_archive(mz_zip_archive& archive, Model& model);
+        bool _add_droplets_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, const Model& model);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const IdToObjectDataMap &objects_data);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
@@ -3238,6 +3344,12 @@ namespace Slic3r {
         }
         
         if (!_add_sla_drain_holes_file_to_archive(archive, model)) {
+            close_zip_writer(&archive);
+            boost::filesystem::remove(filename);
+            return false;
+        }
+
+        if (!_add_droplets_file_to_archive(archive, model)) {
             close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
@@ -3980,6 +4092,29 @@ namespace Slic3r {
                 add_error("Unable to add sla support points file to archive");
                 return false;
             }
+        }
+        return true;
+    }
+
+    bool _3MF_Exporter::_add_droplets_file_to_archive(mz_zip_archive& archive, Model& model)
+    {
+        assert(is_decimal_separator_point());
+        std::string out;
+        unsigned int count = 0;
+        for (const ModelObject* object : model.objects) {
+            ++count;
+            if (object->droplet_sets.empty())
+                continue;
+            out += string_printf("object %d\n", count);
+            out += droplet_sets_to_text(object->droplet_sets);
+        }
+        if (!model.droplet_sets.empty()) {
+            out += "model\n";
+            out += droplet_sets_to_text(model.droplet_sets);
+        }
+        if (!out.empty() && !mz_zip_writer_add_mem(&archive, DROPLETS_FILE.c_str(), static_cast<const void*>(out.data()), out.length(), mz_uint(MZ_DEFAULT_COMPRESSION))) {
+            add_error("Unable to add droplets file to archive");
+            return false;
         }
         return true;
     }

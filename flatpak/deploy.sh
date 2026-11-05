@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build BioSlicer flatpak(s) and deploy bundles to WEB_ROOT.
+# Build BioSlicer flatpak(s) and publish to WEB_ROOT: an OSTree repo (fast incremental
+# updates, for self-hosted/test builds) and, with --bundle, single-file .flatpak release
+# assets (what gets attached to a GitHub Release).
 # Does NOT install locally — use install-local.sh for that.
 #
 # Usage:
@@ -7,11 +9,27 @@
 #
 # Options:
 #   --arch ARCH       x86_64 | aarch64 | all  (default: host + aarch64 if cross available)
-#   --web-root DIR    Directory to write bundles and install.sh into (default: <repo>/dist)
-#   --url URL         Public base URL embedded in install.sh (required)
+#   --web-root DIR    Directory to write repo-<arch> and install.sh into (default: <repo>/dist)
+#   --url URL         Public base URL embedded in the published install.sh copy (optional;
+#                     without it no install.sh copy is written)
+#   --bundle          Also write BioSlicer-<arch><SUFFIX>.flatpak + .sha256 to WEB_ROOT
+#                     (slow: build-bundle compresses on one thread, ~90s). These are the
+#                     GitHub Release assets the repo's install.sh downloads by default.
 #   --no-build        Skip the flatpak build; redeploy install.sh only
-#   --suffix SUFFIX   Append SUFFIX before .flatpak/.sh in all output filenames (e.g. -dev)
+#   --deltas          Also generate static deltas (+~15s here, halves the remote download;
+#                     worth it only on slow links)
+#   --suffix SUFFIX   Publish install<SUFFIX>.sh and repo-<arch><SUFFIX> (e.g. -dev) as a
+#                     separate channel
 set -e
+set -o pipefail
+# Without this, `set -e` is silently OFF inside command-substitution subshells
+# (e.g. `x="$(f)"`), so a failing command in the middle of a function called
+# that way doesn't abort — execution just continues to the next statement and
+# the function's exit status ends up reflecting whatever ran last, not the
+# failure. _compute_build_hash() is only ever invoked as `$(_compute_build_hash
+# ...)`, so without this its internal failures (a broken symlink hitting
+# sha256sum, a failing git call) would be silently masked despite `pipefail`.
+shopt -s inherit_errexit
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ID="com.bioslicer.BioSlicer"
@@ -28,54 +46,214 @@ HOST_ARCH="$(uname -m)"
 
 _arch_arg=""
 NO_BUILD=false
+DELTAS=false
+BUNDLE=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --arch)       _arch_arg="$2"; shift 2 ;;
         --web-root)   WEB_ROOT="$2";  shift 2 ;;
         --url)        PUBLIC_URL="$2"; shift 2 ;;
         --no-build)   NO_BUILD=true;  shift ;;
+        --deltas)     DELTAS=true;    shift ;;
+        --bundle)     BUNDLE=true;    shift ;;
         --suffix)     SUFFIX="$2";    shift 2 ;;
         *) echo "ERROR: Unknown option '$1'. See usage in script header." >&2; exit 1 ;;
     esac
 done
 
-[ -z "${PUBLIC_URL}" ] && { echo "ERROR: --url is required." >&2; exit 1; }
 
 if $NO_BUILD; then
+    # Nothing below this arch-selection block is used when skipping the build
+    # (the build loop is separately guarded by `if ! $NO_BUILD`), so skip it
+    # entirely rather than computing it and immediately discarding it — that
+    # previously also printed a misleading "Target arch(s)" line and ran an
+    # unnecessary clang cross-compile probe on --no-build.
     ARCHS=()
-fi
-
-# ── Arch selection ────────────────────────────────────────────────────────────
-
-_can_cross_aarch64=false
-if [ "${HOST_ARCH}" = "x86_64" ] && \
-   clang -target aarch64-linux-gnu -x c -E /dev/null -o /dev/null &>/dev/null; then
-    _can_cross_aarch64=true
-fi
-
-if [ -n "${_arch_arg:-}" ]; then
-    _req="${_arch_arg}"
-    [ "${_req}" = "arm64" ] && _req=aarch64
-    case "${_req}" in
-        x86_64|aarch64) ARCHS=("${_req}") ;;
-        all)
-            ARCHS=("${HOST_ARCH}")
-            ${_can_cross_aarch64} && [ "${HOST_ARCH}" = "x86_64" ] && ARCHS+=("aarch64")
-            ;;
-        *)
-            echo "ERROR: Unknown arch '${_req}'. Use x86_64, aarch64, or all." >&2
-            exit 1 ;;
-    esac
 else
-    # Default: host arch + aarch64 via cross-compile if available.
-    ARCHS=("${HOST_ARCH}")
-    if ${_can_cross_aarch64} && [ "${HOST_ARCH}" = "x86_64" ]; then
-        echo "==> Clang cross-compilation for aarch64 available."
-        ARCHS+=("aarch64")
+    # ── Arch selection ────────────────────────────────────────────────────────
+
+    _can_cross_aarch64=false
+    if [ "${HOST_ARCH}" = "x86_64" ] && \
+       clang -target aarch64-linux-gnu -x c -E /dev/null -o /dev/null &>/dev/null; then
+        _can_cross_aarch64=true
     fi
+
+    if [ -n "${_arch_arg:-}" ]; then
+        _req="${_arch_arg}"
+        [ "${_req}" = "arm64" ] && _req=aarch64
+        case "${_req}" in
+            x86_64|aarch64) ARCHS=("${_req}") ;;
+            all)
+                ARCHS=("${HOST_ARCH}")
+                ${_can_cross_aarch64} && [ "${HOST_ARCH}" = "x86_64" ] && ARCHS+=("aarch64")
+                ;;
+            *)
+                echo "ERROR: Unknown arch '${_req}'. Use x86_64, aarch64, or all." >&2
+                exit 1 ;;
+        esac
+    else
+        # Default: host arch + aarch64 via cross-compile if available.
+        ARCHS=("${HOST_ARCH}")
+        if ${_can_cross_aarch64} && [ "${HOST_ARCH}" = "x86_64" ]; then
+            echo "==> Clang cross-compilation for aarch64 available."
+            ARCHS+=("aarch64")
+        fi
+    fi
+
+    echo "==> Target arch(s): ${ARCHS[*]}"
 fi
 
-echo "==> Target arch(s): ${ARCHS[*]}"
+# ── Phase timing ──────────────────────────────────────────────────────────────
+
+_phase_t0=${SECONDS}
+_phase() {  # _phase LABEL — print elapsed time since the previous _phase call
+    local now=${SECONDS}
+    echo "==> [timing] $1: $((now - _phase_t0))s"
+    _phase_t0=${now}
+}
+
+# Run a long, silent command with a heartbeat every 10s so the user can tell it
+# is still working. If OUT_FILE is given, its growing size is shown too.
+#   _with_heartbeat LABEL OUT_FILE cmd args...
+_with_heartbeat() {
+    local label="$1" out_file="$2"; shift 2
+    local t0=${SECONDS} hb_pid rc=0
+    (
+        while sleep 10; do
+            size=""
+            if [ -n "${out_file}" ] && [ -e "${out_file}" ]; then
+                size=", $(du -h "${out_file}" | cut -f1) written"
+            fi
+            echo "    ... ${label} still running ($((SECONDS - t0))s${size})"
+        done
+    ) &
+    hb_pid=$!
+    "$@" || rc=$?
+    kill "${hb_pid}" 2>/dev/null || true
+    wait "${hb_pid}" 2>/dev/null || true
+    if [ "${rc}" -ne 0 ]; then
+        echo "==> ${label} FAILED (exit ${rc}) after $((SECONDS - t0))s" >&2
+        return "${rc}"
+    fi
+    echo "==> ${label} done in $((SECONDS - t0))s"
+}
+
+# Export BUILD_DIR into a persistent OSTree repo (so export only writes changed
+# objects) and publish it; clients pull just the objects that changed.
+#   _export_repo ARCH REPO_DIR BUILD_DIR
+_export_repo() {
+    local ARCH="$1" REPO_DIR="$2" BUILD_DIR="$3"
+    echo "==> [${ARCH}] Exporting build to OSTree repo (${REPO_DIR})..."
+    # archive-z2 repos zlib-compress every file (default level 6) *before* checking
+    # whether the object already exists, so an unchanged 300MB tree still costs
+    # ~6s of pure compression. Level 1 is ~2x faster for ~8% larger objects.
+    if command -v ostree &>/dev/null; then
+        [ -d "${REPO_DIR}/objects" ] || ostree init --repo="${REPO_DIR}" --mode=archive-z2
+        ostree --repo="${REPO_DIR}" config set archive.zlib-level 1
+    fi
+    _with_heartbeat "[${ARCH}] build-export" "" \
+        flatpak build-export --arch="${ARCH}" --disable-fsync --no-update-summary \
+            "${REPO_DIR}" "${BUILD_DIR}"
+    _with_heartbeat "[${ARCH}] build-update-repo" "" \
+        flatpak build-update-repo --prune --prune-depth=1 \
+            $($DELTAS && echo --generate-static-deltas) "${REPO_DIR}"
+    _publish_repo "${ARCH}" "${REPO_DIR}"
+    if $BUNDLE; then
+        local BUNDLE_FILE="${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak"
+        mkdir -p "${WEB_ROOT}"
+        echo "==> [${ARCH}] Creating ${BUNDLE_FILE##*/} (compression is single-threaded and quiet; can take minutes)..."
+        rm -f "${BUNDLE_FILE}"  # so the heartbeat size reflects this run
+        _with_heartbeat "[${ARCH}] build-bundle" "${BUNDLE_FILE}" \
+            flatpak build-bundle --arch="${ARCH}" "${REPO_DIR}" "${BUNDLE_FILE}" "${APP_ID}"
+        sha256sum "${BUNDLE_FILE}" | awk '{print $1}' > "${BUNDLE_FILE}.sha256"
+        chmod 644 "${BUNDLE_FILE}" "${BUNDLE_FILE}.sha256"
+        echo "==> [${ARCH}] Bundle size: $(du -h "${BUNDLE_FILE}" | cut -f1)"
+    fi
+}
+
+# Mirror the repo into the web root (objects are content-addressed, so rsync
+# only copies what changed).
+_publish_repo() {
+    local ARCH="$1" REPO_DIR="$2" dest
+    dest="${WEB_ROOT}/repo-${ARCH}${SUFFIX}"
+    mkdir -p "${dest}"
+    _with_heartbeat "[${ARCH}] publish repo" "" \
+        rsync -a --delete --chmod=D755,F644 --exclude=/tmp --exclude=/.lock \
+            "${REPO_DIR}/" "${dest}/"
+}
+
+# Unmount stale flatpak-builder rofiles FUSE mounts left by an interrupted run.
+_clear_rofiles() {
+    local STATE_DIR="$1" mnt
+    if [ -d "${STATE_DIR}/rofiles" ]; then
+        for mnt in "${STATE_DIR}/rofiles"/rofiles-*; do
+            [ -d "${mnt}" ] && fusermount -u "${mnt}" 2>/dev/null || true
+        done
+        rm -rf "${STATE_DIR}/rofiles"
+    fi
+}
+
+# ── Deps source tarball ───────────────────────────────────────────────────────
+
+# The manifest's BioSlicerDeps module builds from flatpak/bioslicer-deps-src.tar.gz, an
+# archive of deps/ and cmake/. flatpak-builder keys its module cache for a local archive on
+# the manifest's sha256 (not on the file's content), so the two must always agree.
+#
+# This regenerates the archive from the files git knows about (tracked, plus untracked ones
+# that are not ignored), so local build trees such as deps/build-default never get in, and
+# with fixed order, timestamps, owners and modes, so the same sources give the same bytes on
+# every machine. It then prints the manifest to build from: the committed one when its
+# sha256 matches, otherwise a generated copy carrying the real checksum.
+_prepare_deps_source() {
+    local tarball="${SCRIPT_DIR}/bioslicer-deps-src.tar.gz"
+    local manifest="${SCRIPT_DIR}/${APP_ID}.yml"
+    local tmp="${tarball}.tmp.$$"
+    local path actual recorded
+    local -a files=()
+
+    while IFS= read -r -d '' path; do
+        if [ -f "${ROOT_DIR}/${path}" ] || [ -L "${ROOT_DIR}/${path}" ]; then
+            files+=("${path}")
+        fi
+    done < <(git -C "${ROOT_DIR}" ls-files --cached --others --exclude-standard -z -- deps cmake \
+                 | LC_ALL=C sort -z)
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "ERROR: No deps/ or cmake/ sources found in ${ROOT_DIR}." >&2
+        return 1
+    fi
+
+    printf '%s\0' "${files[@]}" \
+        | tar -C "${ROOT_DIR}" --null --no-recursion --files-from=- \
+              --format=gnu --mtime='2026-01-01 00:00:00 UTC' \
+              --owner=0 --group=0 --numeric-owner --mode='a+rX,u+w,go-w' -cf - \
+        | gzip -n > "${tmp}"
+    if [ -f "${tarball}" ] && cmp -s "${tmp}" "${tarball}"; then
+        rm -f "${tmp}"
+    else
+        mv "${tmp}" "${tarball}"
+        echo "==> Regenerated ${tarball##*/} from deps/ and cmake/." >&2
+    fi
+
+    actual="$(sha256sum "${tarball}" | awk '{print $1}')"
+    recorded="$(awk '/path: bioslicer-deps-src\.tar\.gz/ {found=1; next}
+                     found && /sha256:/ {print $2; exit}' "${manifest}")"
+    if [ "${actual}" = "${recorded}" ]; then
+        echo "${manifest}"
+        return 0
+    fi
+
+    # deps/ or cmake/ changed since the manifest's checksum was recorded. Build from a copy
+    # that carries the real one, so the deps module is rebuilt exactly when its sources change.
+    local generated="${SCRIPT_DIR}/.generated-${APP_ID}.yml"
+    sed "/path: bioslicer-deps-src\.tar\.gz/{n;s/sha256: .*/sha256: ${actual}/}" \
+        "${manifest}" > "${generated}"
+    {
+        echo "==> deps/ or cmake/ differ from the sha256 recorded in ${manifest##*/}."
+        echo "    Building from a generated manifest. To record the change, set that sha256 to:"
+        echo "    ${actual}"
+    } >&2
+    echo "${generated}"
+}
 
 # ── Native flatpak-builder build (host arch) ──────────────────────────────────
 
@@ -84,24 +262,22 @@ build_host_flatpak() {
     local BUILD_DIR="${ROOT_DIR}/.flatpak-build-${ARCH}"
     local REPO_DIR="${ROOT_DIR}/.flatpak-repo-${ARCH}"
     local STATE_DIR="${ROOT_DIR}/.flatpak-builder-state-${ARCH}"
-    local BUNDLE="${ROOT_DIR}/BioSlicer-${ARCH}${SUFFIX}.flatpak"
+    local BUILD_INPUT_HASH
+    BUILD_INPUT_HASH="$(_compute_build_hash "${ARCH}")"
 
     echo ""
     echo "==> Building BioSlicer flatpak for ${ARCH} (native)..."
 
-    if _is_build_current "${ARCH}" "${BUNDLE}"; then
+    if _is_build_current "${ARCH}" "${BUILD_INPUT_HASH}"; then
         echo "==> [${ARCH}] No changes since last build — skipping rebuild."
-        _deploy_bundle "${ARCH}" "${BUNDLE}"
+        _publish_repo "${ARCH}" "${REPO_DIR}"
         return 0
     fi
 
-    rm -rf "${REPO_DIR}"
-    if [ -d "${STATE_DIR}/rofiles" ]; then
-        for mnt in "${STATE_DIR}/rofiles"/rofiles-*; do
-            [ -d "${mnt}" ] && fusermount -u "${mnt}" 2>/dev/null || true
-        done
-        rm -rf "${STATE_DIR}/rofiles"
-    fi
+    _clear_rofiles "${STATE_DIR}"
+    local MANIFEST
+    MANIFEST="$(_prepare_deps_source)"
+    _phase "hash + up-to-date check"
 
     flatpak-builder \
         --user \
@@ -110,21 +286,17 @@ build_host_flatpak() {
         --arch="${ARCH}" \
         --state-dir="${STATE_DIR}" \
         "${BUILD_DIR}" \
-        "${SCRIPT_DIR}/${APP_ID}.yml"
+        "${MANIFEST}"
+    _phase "flatpak-builder"
 
     echo ""
     echo "==> BioSlicer (${ARCH}) built."
     echo ""
 
-    echo "==> Exporting to repo and creating bundle (${ARCH})..."
-    flatpak build-export --arch="${ARCH}" "${REPO_DIR}" "${BUILD_DIR}"
-    flatpak build-bundle --arch="${ARCH}" "${REPO_DIR}" "${BUNDLE}" "${APP_ID}"
+    _export_repo "${ARCH}" "${REPO_DIR}" "${BUILD_DIR}"
+    _phase "export + publish"
 
-    echo "==> Generating SHA256 checksum (${ARCH})..."
-    sha256sum "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
-
-    _deploy_bundle "${ARCH}" "${BUNDLE}"
-    _save_build_hash "${ARCH}"
+    _save_build_hash "${ARCH}" "${BUILD_INPUT_HASH}"
 }
 
 # ── Clang cross-compile build (aarch64 from x86_64 host) ─────────────────────
@@ -133,20 +305,21 @@ build_cross_aarch64() {
     local ARCH=aarch64
     local STAGE_DIR="${ROOT_DIR}/.flatpak-build-${ARCH}"
     local REPO_DIR="${ROOT_DIR}/.flatpak-repo-${ARCH}"
-    local BUNDLE="${ROOT_DIR}/BioSlicer-${ARCH}${SUFFIX}.flatpak"
     local DEPS_BUILD="${ROOT_DIR}/.cross-deps-${ARCH}"
     local DEPS_DEST="${ROOT_DIR}/.cross-deps-${ARCH}-install"
     local APP_BUILD="${ROOT_DIR}/.cross-bioslicer-${ARCH}"
     local DOWNLOAD_CACHE="${ROOT_DIR}/.cross-downloads"
     local WRAPPER_DIR="${ROOT_DIR}/.cross-toolchain-${ARCH}"
     local APPDIR="${STAGE_DIR}/files"
+    local BUILD_INPUT_HASH
+    BUILD_INPUT_HASH="$(_compute_build_hash "${ARCH}")"
 
     echo ""
     echo "==> Building BioSlicer for aarch64 via Clang cross-compilation..."
 
-    if _is_build_current "${ARCH}" "${BUNDLE}"; then
+    if _is_build_current "${ARCH}" "${BUILD_INPUT_HASH}"; then
         echo "==> [aarch64] No changes since last build — skipping rebuild."
-        _deploy_bundle "aarch64" "${BUNDLE}"
+        _publish_repo "aarch64" "${REPO_DIR}"
         return 0
     fi
 
@@ -162,14 +335,8 @@ build_cross_aarch64() {
     echo "    Sysroot : ${SYSROOT}"
 
     # ── Linker ────────────────────────────────────────────────────────────────
-    local LLD_PATH=""
-    for _v in 20 15 14 12; do
-        if [ -x "/usr/bin/ld.lld-${_v}" ]; then
-            LLD_PATH="/usr/bin/ld.lld-${_v}"
-            break
-        fi
-    done
-    command -v ld.lld &>/dev/null && [ -z "${LLD_PATH}" ] && LLD_PATH="$(command -v ld.lld)"
+    local LLD_PATH
+    LLD_PATH="$(_detect_cross_lld)"
     [ -n "${LLD_PATH}" ] && echo "    Linker  : ${LLD_PATH}" || echo "    Linker  : system default"
 
     # ── Staging sysroot ───────────────────────────────────────────────────────
@@ -203,14 +370,9 @@ done
 PREAMBLE
 )
 
-    local _CC_BIN=clang _CXX_BIN=clang++
-    for _v in 20 19 18 17; do
-        if [ -x "/usr/bin/clang-${_v}" ]; then
-            _CC_BIN="clang-${_v}"
-            _CXX_BIN="clang++-${_v}"
-            break
-        fi
-    done
+    local _CC_BIN
+    _CC_BIN="$(_detect_cross_cc)"
+    local _CXX_BIN="${_CC_BIN/clang/clang++}"
 
     cat > "${CC_WRAPPER}" <<EOF
 #!/bin/bash
@@ -382,58 +544,122 @@ EOF
         --filesystem=xdg-run/gvfs \
         --filesystem=/run/media \
         --filesystem=/media \
-        "--own-name=com.bioslicer.bioslicer.*" \
+        "--own-name=com.prusa3d.prusaslicer.*" \
         --system-talk-name=org.freedesktop.UDisks2 \
         "--talk-name=org.freedesktop.DBus.Introspectable.*" \
-        "--talk-name=com.bioslicer.bioslicer.InstanceCheck.*" \
+        "--talk-name=com.prusa3d.prusaslicer.InstanceCheck.*" \
         --env=PRUSA_SLICER_DARK_THEME=false \
         "${STAGE_DIR}"
 
-    rm -rf "${REPO_DIR}"
-    flatpak build-export --arch=aarch64 "${REPO_DIR}" "${STAGE_DIR}"
-    flatpak build-bundle --arch=aarch64 "${REPO_DIR}" "${BUNDLE}" "${APP_ID}"
-
-    echo "==> Generating SHA256 checksum (aarch64)..."
-    sha256sum "${BUNDLE}" | awk '{print $1}' > "${BUNDLE}.sha256"
-
-    _deploy_bundle "aarch64" "${BUNDLE}"
-    _save_build_hash "aarch64"
+    _export_repo aarch64 "${REPO_DIR}" "${STAGE_DIR}"
+    _save_build_hash "aarch64" "${BUILD_INPUT_HASH}"
 }
 
-# ── Deploy helper ─────────────────────────────────────────────────────────────
+# ── Cross-toolchain detection (shared by the build and its fingerprint, so ────
+#    they cannot silently drift apart) ──────────────────────────────────────────
 
-_deploy_bundle() {
-    local ARCH="$1" BUNDLE="$2"
-    echo "==> Deploying BioSlicer-${ARCH}${SUFFIX}.flatpak to ${WEB_ROOT}..."
-    mkdir -p "${WEB_ROOT}"
-    cp "${BUNDLE}"         "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak"
-    cp "${BUNDLE}.sha256"  "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak.sha256"
-    chmod 644 "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak" \
-              "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak.sha256"
+_detect_cross_cc() {
+    local v
+    for v in 20 19 18 17; do
+        if [ -x "/usr/bin/clang-${v}" ]; then
+            echo "clang-${v}"
+            return 0
+        fi
+    done
+    echo "clang"
+}
+
+_detect_cross_lld() {
+    local v
+    for v in 20 15 14 12; do
+        if [ -x "/usr/bin/ld.lld-${v}" ]; then
+            echo "/usr/bin/ld.lld-${v}"
+            return 0
+        fi
+    done
+    command -v ld.lld 2>/dev/null || true
 }
 
 # ── Build-hash helpers (fast no-op when nothing changed) ──────────────────────
 
 _compute_build_hash() {
-    local git_head diff_hash manifest_md5
-    git_head=$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo "unknown")
-    # Include a hash of uncommitted working-tree changes so edits that haven't
-    # been committed still invalidate the cached bundle.
-    diff_hash=$(git -C "${ROOT_DIR}" diff HEAD 2>/dev/null | md5sum | awk '{print $1}')
-    manifest_md5=$(md5sum "${SCRIPT_DIR}/${APP_ID}.yml" 2>/dev/null | awk '{print $1}' || echo "unknown")
-    echo "${git_head}:${diff_hash}:${manifest_md5}:${SUFFIX}"
+    local arch="${1:-unknown}" path
+    {
+        printf 'schema=4\narch=%s\nsuffix=%s\nhost=%s\nflatpak=%s\n' \
+            "${arch}" "${SUFFIX}" "$(uname -m)" \
+            "$(flatpak --version 2>/dev/null || echo unavailable)"
+        # The manifest text (tracked, already hashed below) pins a runtime
+        # *branch*, e.g. org.gnome.Sdk//49 — but a `flatpak update` can move
+        # that branch to a new commit without changing any tracked file, which
+        # silently changes what actually gets built. Pin the installed commits.
+        printf 'sdk_commit=%s\nplatform_commit=%s\n' \
+            "$(flatpak info --arch="${arch}" org.gnome.Sdk//49 2>/dev/null \
+                | awk -F': ' '/^Commit/{print $2; exit}')" \
+            "$(flatpak info --arch="${arch}" org.gnome.Platform//49 2>/dev/null \
+                | awk -F': ' '/^Commit/{print $2; exit}')"
+        # The aarch64 path additionally cross-compiles with an autodetected
+        # host clang/lld; a system compiler upgrade changes the build without
+        # changing any tracked file either.
+        if [ "${arch}" = "aarch64" ]; then
+            local cc lld
+            cc="$(_detect_cross_cc)"
+            lld="$(_detect_cross_lld)"
+            printf 'cross_cc=%s\ncross_cc_version=%s\n' \
+                "${cc}" "$("${cc}" --version 2>/dev/null | head -1 || echo unavailable)"
+            printf 'cross_lld=%s\ncross_lld_version=%s\n' \
+                "${lld}" \
+                "$([ -n "${lld}" ] && "${lld}" --version 2>/dev/null | head -1 || echo unavailable)"
+        fi
+        # Hash the content and path of every tracked or untracked, non-ignored
+        # input. This includes staged changes, deletions, new files, executable
+        # bits through Git's index listing, and submodule worktree state.
+        # Regular files/symlinks are collected and hashed in one batched
+        # sha256sum call (a fork per file was ~6s per invocation on this tree).
+        git -C "${ROOT_DIR}" ls-files --stage
+        local -a _files=()
+        while IFS= read -r -d '' path; do
+            if [ -f "${ROOT_DIR}/${path}" ] || [ -L "${ROOT_DIR}/${path}" ]; then
+                _files+=("${path}")
+                continue
+            fi
+            printf 'path=%s\n' "${path}"
+            if [ -d "${ROOT_DIR}/${path}" ] \
+                    && git -C "${ROOT_DIR}/${path}" rev-parse --is-inside-work-tree &>/dev/null; then
+                git -C "${ROOT_DIR}/${path}" rev-parse HEAD
+                git -C "${ROOT_DIR}/${path}" status --porcelain=v1 --untracked-files=all
+            else
+                printf 'deleted\n'
+            fi
+        done < <(git -C "${ROOT_DIR}" ls-files --cached --others --exclude-standard -z | LC_ALL=C sort -z)
+        if [ "${#_files[@]}" -gt 0 ]; then
+            printf '%s\0' "${_files[@]}" | (cd "${ROOT_DIR}" && xargs -0 sha256sum --)
+        fi
+    } | sha256sum | awk '{print $1}'
 }
 
 _hash_file() { echo "${ROOT_DIR}/.flatpak-build-${1}-hash"; }
 
 _is_build_current() {
-    local ARCH="$1" BUNDLE="$2"
+    local ARCH="$1" HASH="$2"   # HASH: the caller's already-computed input hash
     local hf; hf="$(_hash_file "${ARCH}")"
-    [ -f "${hf}" ] && [ -f "${BUNDLE}" ] && [ -f "${BUNDLE}.sha256" ] && \
-        [ "$(_compute_build_hash)" = "$(cat "${hf}")" ]
+    [ -f "${hf}" ] && [ "${HASH}" = "$(cat "${hf}")" ] || return 1
+    [ -f "${WEB_ROOT}/repo-${ARCH}${SUFFIX}/summary" ] && \
+        [ -f "${ROOT_DIR}/.flatpak-repo-${ARCH}/summary" ] || return 1
+    ! $BUNDLE || [ -f "${WEB_ROOT}/BioSlicer-${ARCH}${SUFFIX}.flatpak.sha256" ]
 }
 
-_save_build_hash() { _compute_build_hash > "$(_hash_file "$1")"; }
+_save_build_hash() {
+    local arch="$1" expected="$2" current hash_file temp_file
+    current="$(_compute_build_hash "${arch}")"
+    if [ "${current}" != "${expected}" ]; then
+        echo "WARNING: Source inputs changed during the ${arch} build; not caching this build." >&2
+        return 0
+    fi
+    hash_file="$(_hash_file "${arch}")"
+    temp_file="${hash_file}.tmp.$$"
+    printf '%s\n' "${expected}" > "${temp_file}"
+    mv "${temp_file}" "${hash_file}"
+}
 
 if ! $NO_BUILD; then
 
@@ -495,33 +721,29 @@ if [ "${#_FAILED_ARCHS[@]}" -gt 0 ]; then
     exit 1
 fi
 
-# Keep BioSlicer${SUFFIX}.flatpak pointing to the x86_64 bundle for backward compat.
-_built_x86=false
-for ARCH in "${ARCHS[@]}"; do [ "${ARCH}" = "x86_64" ] && _built_x86=true; done
-if ${_built_x86}; then
-    echo "==> Updating generic BioSlicer${SUFFIX}.flatpak (→ x86_64)..."
-    cp "${WEB_ROOT}/BioSlicer-x86_64${SUFFIX}.flatpak"        "${WEB_ROOT}/BioSlicer${SUFFIX}.flatpak"
-    cp "${WEB_ROOT}/BioSlicer-x86_64${SUFFIX}.flatpak.sha256" "${WEB_ROOT}/BioSlicer${SUFFIX}.flatpak.sha256"
-    chmod 644 "${WEB_ROOT}/BioSlicer${SUFFIX}.flatpak" "${WEB_ROOT}/BioSlicer${SUFFIX}.flatpak.sha256"
-fi
-
 fi # --no-build
 
-echo "==> Deploying install${SUFFIX}.sh (url: ${PUBLIC_URL})..."
-sed -e "s|__BUNDLE_BASE__|${PUBLIC_URL}|g" \
-    -e "s|__BUNDLE_SUFFIX__|${SUFFIX}|g" \
-    "${SCRIPT_DIR}/install.sh" > "${WEB_ROOT}/install${SUFFIX}.sh"
-chmod 644 "${WEB_ROOT}/install${SUFFIX}.sh"
+mkdir -p "${WEB_ROOT}"
+if [ -n "${PUBLIC_URL}" ]; then
+    echo "==> Deploying install${SUFFIX}.sh (url: ${PUBLIC_URL})..."
+    sed -e "s|__BUNDLE_BASE__|${PUBLIC_URL}|g" \
+        -e "s|__BUNDLE_SUFFIX__|${SUFFIX}|g" \
+        "${SCRIPT_DIR}/install.sh" > "${WEB_ROOT}/install${SUFFIX}.sh"
+    chmod 644 "${WEB_ROOT}/install${SUFFIX}.sh"
+fi
 
 echo ""
-echo "==> Done. Published at:"
+echo "==> Done. Output in ${WEB_ROOT}:"
 if ! $NO_BUILD; then
     for ARCH in "${ARCHS[@]}"; do
-        echo "    ${PUBLIC_URL}/BioSlicer-${ARCH}${SUFFIX}.flatpak"
+        echo "    repo-${ARCH}${SUFFIX}/"
+        ! $BUNDLE || echo "    BioSlicer-${ARCH}${SUFFIX}.flatpak (+ .sha256)  <- GitHub Release assets"
     done
-    ${_built_x86} && echo "    ${PUBLIC_URL}/BioSlicer${SUFFIX}.flatpak  (alias → x86_64)"
 fi
-echo "    ${PUBLIC_URL}/install${SUFFIX}.sh"
+if [ -n "${PUBLIC_URL}" ]; then
+    echo "    install${SUFFIX}.sh"
+    echo "    Install/update/launch on any machine: curl -fsSL ${PUBLIC_URL}/install${SUFFIX}.sh | bash"
+fi
 echo ""
 if ! $NO_BUILD; then
     echo "    To install locally: flatpak/install-local.sh [arch]"

@@ -246,6 +246,26 @@ def ini_bool(values: Dict[str, str], key: str, fallback: bool) -> bool:
     return fallback
 
 
+def single_sla_channel(extruder_count: int, sla_extruder: int, video_name: str) -> dict:
+    """Per-extruder lists for write_sla_override_ini() with one synthesized-video SLA channel.
+
+    ``sla_extruder`` is the 1-based extruder number that carries the SLA material.
+    """
+    if not 1 <= sla_extruder <= extruder_count:
+        raise ValueError(f"sla_extruder {sla_extruder} outside 1..{extruder_count}")
+
+    def pick(on, off):
+        return [on if i == sla_extruder - 1 else off for i in range(extruder_count)]
+
+    return {
+        "sla_flags": pick(1, 0),
+        "video_names": pick(video_name, ""),
+        "synth_flags": pick(1, 0),
+        "embed_flags": pick(1, 0),
+        "video_paths": pick("", ""),
+    }
+
+
 def write_sla_override_ini(
     path_ini: Path,
     sla_flags: list,

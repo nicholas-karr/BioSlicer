@@ -1577,6 +1577,7 @@ bool GUI_App::on_init_inner()
     // no-op if the variant is already enabled — both are safe on every startup.
     copy_vendor_ini({"UTDHBL"});
     app_config->set_variant("UTDHBL", "BioTrident_250", "8ch", true);
+    app_config->set_variant("UTDHBL", "BioTrident_250", "9ch", true);
     app_config->set_variant("UTDHBL", "Printess_Standard", "2syr", true);
     // Mark all UTDHBL filament presets as installed so they appear in dropdowns.
     // set() is a no-op when the value is already "1", so this is safe every run.
@@ -1587,6 +1588,7 @@ bool GUI_App::on_init_inner()
         "GelMA 10% @BIOSLICERTRIDENT",
         "PEGDA 20% @BIOSLICERTRIDENT",
         "Alginate-GelMA Bioink @BIOSLICERTRIDENT",
+        "Water @BIOSLICERTRIDENT",
         "1mL BD Syringe @PRINTESS",
         "3mL BD Syringe @PRINTESS",
         "5mL BD Syringe @PRINTESS",
@@ -1595,6 +1597,18 @@ bool GUI_App::on_init_inner()
         "Pluronic F-127 @PRINTESS",
     })
         app_config->set(AppConfig::SECTION_FILAMENTS, f, "1");
+
+    // Open on the BioTrident with the droplet valve: a fresh install, or a config that still selects the
+    // 8 channel printer, switches once. After that the selection is the user's.
+    {
+        const std::string droplet_printer = "BioTrident 250 - 8 Channel + Droplet";
+        const std::string current         = app_config->get("presets", "printer");
+        if (app_config->get("bioslicer_droplet_default").empty()) {
+            if (current.empty() || current == "BioTrident 250 - 8 Channel")
+                app_config->set("presets", "printer", droplet_printer);
+            app_config->set("bioslicer_droplet_default", "1");
+        }
+    }
 
     // Reset the SLA bucket (extruders 4–7) filament selections so that
     // default_filament_profile from the bundle is applied on every startup.
@@ -3563,7 +3577,20 @@ void GUI_App::window_pos_restore(wxTopLevelWindow* window, const std::string &na
         return;
     }
 
-    const wxRect& rect = metrics->get_rect();
+    wxRect rect = metrics->get_rect();
+
+#ifdef __WXGTK__
+    if (metrics->get_maximized()) {
+        // The rectangle saved for a maximized window is the maximized one. Restoring that size and then
+        // maximizing leaves the window size unchanged, in which case the WSLg window manager does not switch
+        // its frame to the maximized layout: the window ends up offset and its title bar buttons unusable.
+        // Restore a smaller rectangle centered on the same display instead.
+        const int display_idx = wxDisplay::GetFromPoint(wxPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        const wxRect display = wxDisplay(display_idx == wxNOT_FOUND ? 0u : unsigned(display_idx)).GetClientArea();
+        rect.SetSize(wxSize(4 * display.width / 5, 4 * display.height / 5));
+        rect = rect.CenterIn(display);
+    }
+#endif // __WXGTK__
 
     if (app_config->get_bool("restore_win_position")) {
         // workaround for crash related to the positioning of the window on secondary monitor

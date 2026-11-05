@@ -211,6 +211,12 @@ set(SLIC3R_SOURCES
     GCode/ModelVisibility.hpp
     GCode/SLAVideoSynth.cpp
     GCode/SLAVideoSynth.hpp
+    Droplet.cpp
+    Droplet.hpp
+    DropletPattern.cpp
+    DropletPattern.hpp
+    SLAMaterial.cpp
+    SLAMaterial.hpp
     GCode/SmoothPath.cpp
     GCode/SmoothPath.hpp
     GCode/ToolOrdering.cpp
@@ -657,6 +663,11 @@ endif ()
 
 if (TARGET OpenVDB::openvdb)
     target_link_libraries(libslic3r PUBLIC OpenVDB::openvdb)
+    # Some OpenVDB packages omit hidden dependencies from their imported
+    # static target. Express Blosc explicitly when the finder exposed it.
+    if (TARGET Blosc::blosc)
+        target_link_libraries(libslic3r PUBLIC Blosc::blosc)
+    endif()
 endif()
 
 if(WIN32)
