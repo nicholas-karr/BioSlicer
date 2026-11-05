@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
 	test_marchingsquares.cpp
     test_multiple_beds.cpp
 	test_region_expansion.cpp
+	test_shape_gen.cpp
 	test_sla_material.cpp
 	test_timeutils.cpp
 	test_utils.cpp

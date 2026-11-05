@@ -342,6 +342,8 @@ set(SLIC3R_SOURCES
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
     Semver.cpp
+    ShapeGen.cpp
+    ShapeGen.hpp
     ShortEdgeCollapse.cpp
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
