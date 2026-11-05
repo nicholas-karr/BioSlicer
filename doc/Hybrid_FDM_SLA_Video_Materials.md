@@ -748,6 +748,7 @@ value works.
 | Channel diameter | a block with one round channel | mm |
 | Distance between two channels | a block with two round channels, centre to centre | mm |
 | Droplet volume | a round SLA well with one droplet (needs a droplet channel) | nL |
+| Layer height of each copy | a 1 mm wall on a base plate, every copy with its own layer height as a setting of its object | mm |
 
 The first copy has the *value of the first copy*, and each next copy adds *change per copy*. Every copy is its
 own object, named for example `Sweep 3 of 6: channel diameter 1.00 mm`, so it can be moved, deleted or given
@@ -766,6 +767,14 @@ a decimal point and `\n` line ends, and these columns:
 | `width_mm`, `depth_mm`, `height_mm` | size of the copy including its label |
 | `volume_mm3` | volume of the copy |
 | `droplets` | number of droplets on the copy |
+| `layer_height_mm` | layer height of the copy, empty unless the layer height was stepped |
+
+Process settings are written where the printer reads them. The volume of every droplet is in the `BIOSLICER_DROPLET`
+line of the G-code (`VOLUME_NL`), and a copy with its own layer height is sliced with it, so its layers are at its
+own heights in the G-code. The exposure time of an SLA material is not a choice: it is a setting of the printer's
+extruder, and a layer is exposed once for all objects with one frame, so two copies cannot have different exposure
+times in one print. To compare exposure times, print the same sweep once for each exposure time and keep the
+experiment record of each print (below).
 
 The positions are those the copies are placed at; they change if the objects are moved afterwards. The
 generator is in `src/libslic3r/ParameterSweep.hpp`. Stepping a print setting of an arbitrary object is not

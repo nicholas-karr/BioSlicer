@@ -35,7 +35,7 @@ ParameterSweepDialog::ParameterSweepDialog(wxWindow *parent)
     : ParamDialog(parent, _L("Generate Parameter Sweep"), _L("Place on bed"))
 {
     m_subject = add_choice(_L("Vary:"), { _L("Wall thickness (mm)"), _L("Channel diameter (mm)"), _L("Distance between two channels (mm)"),
-                                          _L("Droplet volume (nL)") }, s_last.subject);
+                                          _L("Droplet volume (nL)"), _L("Layer height of each copy (mm)") }, s_last.subject);
     m_start   = add_value(_L("Value of the first copy"), _L("mm or nL"), 0.05, 100000., s_last.start, 0.1);
     m_step    = add_value(_L("Change per copy"), _L("mm or nL"), -1000., 1000., s_last.step, 0.05);
     m_count   = add_count(_L("Number of copies"), 1, 100, s_last.count);
@@ -43,7 +43,8 @@ ParameterSweepDialog::ParameterSweepDialog(wxWindow *parent)
     m_label   = add_check(_L("Engrave the number of each copy"), s_last.label);
     m_csv     = add_check(_L("Save a table of the copies (CSV) after placing"), s_last.csv);
     add_note(_L("Every copy is a small separate object numbered 1, 2, 3 and so on. The table lists the number, the value, the position on "
-                "the bed and the size of each copy. Droplet volumes need a droplet channel in the printer."));
+                "the bed and the size of each copy. Droplet volumes need a droplet channel in the printer. With layer height every copy is printed with its own layer "
+                "height. The exposure time of an SLA material cannot differ per copy, because a layer is exposed once for all objects."));
     finish_layout();
 }
 

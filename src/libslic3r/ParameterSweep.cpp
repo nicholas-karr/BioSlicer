@@ -125,6 +125,20 @@ Piece make_piece(const SweepParams &p, double value)
         piece.mesh  = std::move(coupon.mesh);
         break;
     }
+    case SweepSubject::LayerHeight: {
+        if (value < 0.02 || value > 2.) {
+            piece.error = "The layer height must be between 0.02 and 2 mm.";
+            break;
+        }
+        WallThicknessCouponParams wall = p.wall;
+        wall.first_thickness = p.layer_height_wall;
+        wall.step            = 0.;
+        wall.count           = 1;
+        Coupon coupon = make_wall_thickness_coupon(wall);
+        piece.error = coupon.error;
+        piece.mesh  = std::move(coupon.mesh);
+        break;
+    }
     case SweepSubject::DropletVolume: {
         if (value <= 0.) {
             piece.error = "The droplet volume must be above zero.";
@@ -175,6 +189,7 @@ std::string sweep_subject_name(SweepSubject subject)
     case SweepSubject::ChannelDiameter: return "channel";
     case SweepSubject::ChannelPitch:    return "channel pair";
     case SweepSubject::DropletVolume:   return "droplet well";
+    case SweepSubject::LayerHeight:     return "wall";
     }
     return {};
 }
@@ -186,6 +201,7 @@ std::string sweep_parameter_name(SweepSubject subject)
     case SweepSubject::ChannelDiameter: return "channel diameter";
     case SweepSubject::ChannelPitch:    return "channel pitch";
     case SweepSubject::DropletVolume:   return "droplet volume";
+    case SweepSubject::LayerHeight:     return "layer height";
     }
     return {};
 }
@@ -230,6 +246,8 @@ SweepResult make_parameter_sweep(const SweepParams &p)
         item.index = i + 1;
         item.label = std::to_string(item.index);
         item.value = p.start + i * p.step;
+        if (p.subject == SweepSubject::LayerHeight)
+            item.layer_height_mm = item.value;
 
         Piece piece = make_piece(p, item.value);
         if (! piece.error.empty() || piece.mesh.indices.empty()) {
@@ -289,7 +307,7 @@ SweepResult make_parameter_sweep(const SweepParams &p)
     }
 
     std::ostringstream csv;
-    csv << "index,label,subject,parameter,value,unit,x_mm,y_mm,width_mm,depth_mm,height_mm,volume_mm3,droplets\n";
+    csv << "index,label,subject,parameter,value,unit,x_mm,y_mm,width_mm,depth_mm,height_mm,volume_mm3,droplets,layer_height_mm\n";
     for (const SweepItem &item : result.items) {
         size_t droplets = 0;
         for (const DropletSet &set : item.droplets)
@@ -297,7 +315,7 @@ SweepResult make_parameter_sweep(const SweepParams &p)
         csv << item.index << ',' << item.label << ',' << result.subject_name << ',' << result.parameter << ',' << format_number(item.value) << ','
             << result.unit << ',' << format_number(item.plate_position.x()) << ',' << format_number(item.plate_position.y()) << ','
             << format_number(item.size.x()) << ',' << format_number(item.size.y()) << ',' << format_number(item.size.z()) << ','
-            << format_number(item.volume_mm3) << ',' << droplets << '\n';
+            << format_number(item.volume_mm3) << ',' << droplets << ',' << (item.layer_height_mm > 0. ? format_number(item.layer_height_mm) : std::string()) << '\n';
     }
     result.csv = csv.str();
     return result;
@@ -316,6 +334,8 @@ void add_sweep_to_model(Model &model, const SweepResult &sweep, const Vec2d &cen
             set.dip      = true;
             object->droplet_sets.emplace_back(std::move(set));
         }
+        if (item.layer_height_mm > 0.)
+            object->config.set_key_value("layer_height", new ConfigOptionFloat(item.layer_height_mm));
         object->center_around_origin();
         ModelInstance *instance = object->add_instance();
         instance->set_offset(Vec3d(center.x() + item.offset.x(), center.y() + item.offset.y(), item.size.z() * 0.5));

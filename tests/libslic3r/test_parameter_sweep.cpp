@@ -27,6 +27,8 @@ std::vector<std::vector<std::string>> parse_csv(const std::string &csv)
         std::istringstream cols(line);
         for (std::string cell; std::getline(cols, cell, ','); )
             cells.emplace_back(cell);
+        if (! line.empty() && line.back() == ',')
+            cells.emplace_back();
         rows.emplace_back(std::move(cells));
     }
     return rows;
@@ -82,7 +84,7 @@ TEST_CASE("The CSV lists every copy with the numbers used to make it", "[Sweep]"
     const auto rows = parse_csv(sweep.csv);
     REQUIRE(rows.size() == 4);
     const std::vector<std::string> header { "index", "label", "subject", "parameter", "value", "unit", "x_mm", "y_mm",
-                                            "width_mm", "depth_mm", "height_mm", "volume_mm3", "droplets" };
+                                            "width_mm", "depth_mm", "height_mm", "volume_mm3", "droplets", "layer_height_mm" };
     CHECK(rows[0] == header);
     for (size_t i = 1; i < rows.size(); ++i) {
         REQUIRE(rows[i].size() == header.size());
@@ -100,6 +102,8 @@ TEST_CASE("The CSV lists every copy with the numbers used to make it", "[Sweep]"
         CHECK(std::stod(rows[i][10]) == Approx(item.size.z()).margin(5e-4));
         CHECK(std::stod(rows[i][11]) == Approx(item.volume_mm3).margin(5e-4));
         CHECK(rows[i][12] == "0");
+        // The layer height column is empty unless the layer height is what was stepped.
+        CHECK(rows[i].back().empty());
     }
     // The values have three decimals and a point, whatever the locale.
     CHECK(rows[1][4] == "0.600");
@@ -332,4 +336,42 @@ TEST_CASE("A sweep becomes one object per copy with its droplets", "[Sweep]")
         CHECK(point.pos.x() > box.min.x());
         CHECK(point.pos.x() < box.max.x());
     }
+}
+
+TEST_CASE("A layer height sweep gives every copy its own layer height", "[Sweep]")
+{
+    SweepParams p;
+    p.subject       = SweepSubject::LayerHeight;
+    p.start         = 0.1;
+    p.step          = 0.05;
+    p.count         = 4;
+    p.engrave_index = true;
+    const SweepResult sweep = make_parameter_sweep(p);
+    REQUIRE(sweep.valid());
+    CHECK(sweep.parameter == "layer height");
+    CHECK(sweep.unit == "mm");
+
+    // The copies are the same piece; only the layer height differs.
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(sweep.items[i].layer_height_mm == Approx(0.1 + 0.05 * double(i)));
+        CHECK(sweep.items[i].volume_mm3 + sweep_label_area(sweep.items[i].label, p.label_height) * p.label_depth
+            == Approx(sweep.items[0].volume_mm3 + sweep_label_area("1", p.label_height) * p.label_depth).margin(1e-3));
+    }
+    const auto rows = parse_csv(sweep.csv);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[0].back() == "layer_height_mm");
+    CHECK(rows[1][4] == "0.100");
+    CHECK(rows[4][4] == "0.250");
+    CHECK(rows[4].back() == "0.250");
+
+    Model model;
+    add_sweep_to_model(model, sweep, Vec2d(100., 100.));
+    REQUIRE(model.objects.size() == 4);
+    for (size_t i = 0; i < 4; ++i) {
+        REQUIRE(model.objects[i]->config.has("layer_height"));
+        CHECK(model.objects[i]->config.opt_float("layer_height") == Approx(0.1 + 0.05 * double(i)));
+    }
+
+    p.start = 0.01;
+    CHECK_FALSE(make_parameter_sweep(p).valid());
 }

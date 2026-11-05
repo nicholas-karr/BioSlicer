@@ -6,6 +6,7 @@
 
 #include "libslic3r/Droplet.hpp"
 #include "libslic3r/DropletPattern.hpp"
+#include "libslic3r/ParameterSweep.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Model.hpp"
@@ -501,4 +502,46 @@ TEST_CASE("Walls that have no length, thickness or height are empty", "[Droplet]
     CHECK(make_wall_mesh(wall, 2., 2.).indices.empty());
     CHECK(make_wall_mesh(wall, 3., 2.).indices.empty());
     CHECK(make_wall_mesh({}, 0., 2.).indices.empty());
+}
+
+SCENARIO("A droplet volume sweep writes the volume of every copy into the G-code", "[Droplet][Sweep]")
+{
+    SweepParams params;
+    params.subject       = SweepSubject::DropletVolume;
+    params.start         = 25.;
+    params.step          = 25.;
+    params.count         = 3;
+    params.engrave_index = false;
+    const SweepResult sweep = make_parameter_sweep(params);
+    REQUIRE(sweep.valid());
+
+    Model model;
+    add_sweep_to_model(model, sweep, Vec2d(100., 100.), 3);
+    Print print;
+    print.apply(model, droplet_config());
+    print.set_status_silent();
+    std::vector<std::string> warnings;
+    REQUIRE(print.validate(&warnings) == "");
+
+    const std::vector<std::string> lines = split_lines(Slic3r::Test::gcode(print));
+    THEN("every copy has its droplet at its own place with its own volume") {
+        std::vector<std::pair<double, double>> found;   // x, volume
+        const std::regex pattern("BIOSLICER_DROPLET .* X=([0-9.]+) .* VOLUME_NL=([0-9.]+) ");
+        for (const std::string &line : lines) {
+            std::smatch match;
+            if (has_prefix(line, "BIOSLICER_DROPLET") && std::regex_search(line, match, pattern))
+                found.emplace_back(std::stod(match[1]), std::stod(match[2]));
+        }
+        REQUIRE(found.size() == 3);
+        for (const SweepItem &item : sweep.items) {
+            const double centre_x = 100. + item.offset.x();
+            size_t matches = 0;
+            for (const auto &[x, volume] : found)
+                if (std::abs(volume - item.value) < 1e-6) {
+                    ++matches;
+                    CHECK(std::abs(x - centre_x) < 0.5 * item.size.x());
+                }
+            CHECK(matches == 1);
+        }
+    }
 }

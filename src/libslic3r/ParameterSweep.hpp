@@ -26,6 +26,10 @@ enum class SweepSubject {
     ChannelPitch,
     // A round well with its droplet; the volume of the droplet is stepped, in nanolitres.
     DropletVolume,
+    // A wall printed with its own layer height, set as a setting of the copy's object. A process parameter: the copy
+    // is the same, the print of it is not. The exposure time of an SLA material is not offered because a layer is
+    // exposed once for all objects.
+    LayerHeight,
 };
 
 struct SweepParams
@@ -50,6 +54,8 @@ struct SweepParams
     WallThicknessCouponParams wall;
     ChannelCouponParams       channel;
     WellArrayParams           well;
+    // The wall of the layer height sweep: thickness of the wall.
+    double                    layer_height_wall { 1.0 };
 };
 
 struct SweepItem
@@ -63,6 +69,8 @@ struct SweepItem
     DropletSets          droplets;
     Vec3d       size { Vec3d::Zero() };
     double      volume_mm3 { 0. };
+    // The layer height the copy is printed with when it is the stepped value, else 0 for the print setting.
+    double      layer_height_mm { 0. };
     // The middle of the copy relative to the middle of the arrangement, and on the plate.
     Vec2d       offset { Vec2d::Zero() };
     Vec2d       plate_position { Vec2d::Zero() };
