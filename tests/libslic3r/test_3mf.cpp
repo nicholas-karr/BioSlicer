@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Vessel/VesselTree.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem/operations.hpp>
@@ -719,6 +721,61 @@ SCENARIO("Importing a 3mf with a missing object id fails cleanly", "[3mf]") {
 
             THEN("import fails instead of silently treating the object as id zero") {
                 REQUIRE_FALSE(ret);
+            }
+        }
+    }
+}
+
+SCENARIO("Vessel tree parameters of an object survive a 3mf file cycle", "[3mf][Vessel]") {
+    GIVEN("a model with a plain object and an object made by the vessel tree generator") {
+        Model src_model;
+        load_stl((std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl").c_str(), &src_model);
+        src_model.add_default_instances();
+        ModelObject *plain = src_model.objects.front();
+        ModelObject *tree  = src_model.add_object(*plain);
+        tree->name = "Vessel tree";
+
+        vessel::VesselSpec spec;
+        spec.tree.depth       = 4;
+        spec.tree.root_radius = 2.5;
+        spec.tree.seed        = 77;
+        spec.mesh.wall_thickness = 0.4;
+        spec.bounds_object    = "Heart wall";
+        tree->vessel_tree_spec = vessel::spec_to_text(spec);
+
+        WHEN("the model is copied") {
+            Model copy = src_model;
+            THEN("the parameters are copied with the object") {
+                REQUIRE(copy.objects[0]->vessel_tree_spec.empty());
+                REQUIRE(copy.objects[1]->vessel_tree_spec == tree->vessel_tree_spec);
+            }
+        }
+
+        WHEN("the model is saved and loaded as a 3mf file") {
+            const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/vessel_tree.3mf";
+            REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
+
+            Model dst_model;
+            DynamicPrintConfig dst_config;
+            {
+                ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+                boost::optional<Semver> version;
+                REQUIRE(load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false, version));
+            }
+            boost::filesystem::remove(test_file);
+
+            THEN("only the generated object has parameters and they regenerate the same tree") {
+                REQUIRE(dst_model.objects.size() == 2);
+                REQUIRE(dst_model.objects[0]->vessel_tree_spec.empty());
+                vessel::VesselSpec loaded;
+                REQUIRE(vessel::spec_from_text(dst_model.objects[1]->vessel_tree_spec, loaded));
+                REQUIRE(loaded.tree.depth == 4);
+                REQUIRE(loaded.tree.seed == 77);
+                REQUIRE(loaded.mesh.wall_thickness == Catch::Approx(0.4));
+                REQUIRE(loaded.bounds_object == "Heart wall");
+                const vessel::Skeleton a = vessel::generate_tree(spec.tree), b = vessel::generate_tree(loaded.tree);
+                REQUIRE(a.branches.size() == b.branches.size());
+                REQUIRE(a.branches.back().end.isApprox(b.branches.back().end, 1e-6));
             }
         }
     }

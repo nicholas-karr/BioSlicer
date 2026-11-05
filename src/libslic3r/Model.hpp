@@ -407,6 +407,10 @@ public:
     // Droplet points of this object in object coordinates. They follow the instances of the object.
     DropletSets             droplet_sets;
 
+    // Parameters of the vessel tree generator (vessel::spec_to_text()) when this object was made by it, else empty.
+    // They allow the tree to be regenerated.
+    std::string             vessel_tree_spec;
+
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors           cut_connectors;
     CutId                 cut_id;
@@ -679,7 +683,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, droplet_sets);
+            cut_connectors, cut_id, droplet_sets, vessel_tree_spec);
 	}
 
     // Called by Print::validate() from the UI thread.

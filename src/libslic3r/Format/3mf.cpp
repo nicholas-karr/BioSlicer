@@ -93,6 +93,7 @@ const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/Prusa_Slicer_layer_config
 const std::string SLA_SUPPORT_POINTS_FILE = "Metadata/Slic3r_PE_sla_support_points.txt";
 const std::string SLA_DRAIN_HOLES_FILE = "Metadata/Slic3r_PE_sla_drain_holes.txt";
 const std::string DROPLETS_FILE = "Metadata/BioSlicer_droplets.txt";
+const std::string VESSEL_TREES_FILE = "Metadata/BioSlicer_vessel_trees.txt";
 const std::string CUSTOM_GCODE_PER_PRINT_Z_FILE = "Metadata/Prusa_Slicer_custom_gcode_per_print_z.xml";
 const std::string WIPE_TOWER_INFORMATION_FILE = "Metadata/Prusa_Slicer_wipe_tower_information.xml";
 const std::string CUT_INFORMATION_FILE = "Metadata/Prusa_Slicer_cut_information.xml";
@@ -648,6 +649,8 @@ namespace Slic3r {
         IdToSlaDrainHolesMap    m_sla_drain_holes;
         // Droplet sets by 1 based model object index, and those of the model itself.
         std::map<int, DropletSets> m_droplet_sets;
+        // Vessel tree generator parameters by 1 based model object index.
+        std::map<int, std::string> m_vessel_tree_specs;
         DropletSets             m_model_droplet_sets;
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
         std::map<int, VolumetricVolumeDataInfo> m_volumetric_data;
@@ -692,6 +695,7 @@ namespace Slic3r {
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_droplets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_vessel_trees_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_wipe_tower_information_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
@@ -979,6 +983,9 @@ namespace Slic3r {
                 else if (boost::algorithm::iequals(name, DROPLETS_FILE)) {
                     _extract_droplets_from_archive(archive, stat);
                 }
+                else if (boost::algorithm::iequals(name, VESSEL_TREES_FILE)) {
+                    _extract_vessel_trees_from_archive(archive, stat);
+                }
                 else if (boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
@@ -1113,6 +1120,9 @@ namespace Slic3r {
             // m_droplet_sets are indexed by a 1 based model object index.
             if (auto obj_droplets = m_droplet_sets.find(object.second + 1); obj_droplets != m_droplet_sets.end())
                 model_object->droplet_sets = std::move(obj_droplets->second);
+
+            if (auto obj_vessel = m_vessel_tree_specs.find(object.second + 1); obj_vessel != m_vessel_tree_specs.end())
+                model_object->vessel_tree_spec = std::move(obj_vessel->second);
 
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
@@ -1664,6 +1674,42 @@ namespace Slic3r {
                 if (section <= 0)
                     add_error("Found invalid object id in droplets");
             } else if (section >= 0) {
+                text += line;
+                text += '\n';
+            }
+        }
+        flush();
+    }
+
+    void _3MF_Importer::_extract_vessel_trees_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    {
+        if (stat.m_uncomp_size == 0)
+            return;
+        std::string buffer(size_t(stat.m_uncomp_size), 0);
+        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading vessel tree data to buffer");
+            return;
+        }
+
+        // Sections start with "object <1 based index>" and hold the text of vessel::spec_to_text().
+        int         section = 0;
+        std::string text;
+        auto flush = [&]() {
+            if (section > 0 && !text.empty())
+                m_vessel_tree_specs[section] = text;
+            text.clear();
+        };
+        std::istringstream in(buffer);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (line.compare(0, 7, "object ") == 0) {
+                flush();
+                section = std::atoi(line.c_str() + 7);
+                if (section <= 0)
+                    add_error("Found invalid object id in vessel trees");
+            } else if (section > 0) {
                 text += line;
                 text += '\n';
             }
@@ -3248,6 +3294,7 @@ namespace Slic3r {
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_drain_holes_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_droplets_file_to_archive(mz_zip_archive& archive, Model& model);
+        bool _add_vessel_trees_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, const Model& model);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const IdToObjectDataMap &objects_data);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
@@ -3350,6 +3397,12 @@ namespace Slic3r {
         }
 
         if (!_add_droplets_file_to_archive(archive, model)) {
+            close_zip_writer(&archive);
+            boost::filesystem::remove(filename);
+            return false;
+        }
+
+        if (!_add_vessel_trees_file_to_archive(archive, model)) {
             close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
@@ -4114,6 +4167,26 @@ namespace Slic3r {
         }
         if (!out.empty() && !mz_zip_writer_add_mem(&archive, DROPLETS_FILE.c_str(), static_cast<const void*>(out.data()), out.length(), mz_uint(MZ_DEFAULT_COMPRESSION))) {
             add_error("Unable to add droplets file to archive");
+            return false;
+        }
+        return true;
+    }
+
+    bool _3MF_Exporter::_add_vessel_trees_file_to_archive(mz_zip_archive& archive, Model& model)
+    {
+        std::string out;
+        unsigned int count = 0;
+        for (const ModelObject* object : model.objects) {
+            ++count;
+            if (object->vessel_tree_spec.empty())
+                continue;
+            out += string_printf("object %d\n", count);
+            out += object->vessel_tree_spec;
+            if (out.back() != '\n')
+                out += '\n';
+        }
+        if (!out.empty() && !mz_zip_writer_add_mem(&archive, VESSEL_TREES_FILE.c_str(), static_cast<const void*>(out.data()), out.length(), mz_uint(MZ_DEFAULT_COMPRESSION))) {
+            add_error("Unable to add vessel trees file to archive");
             return false;
         }
         return true;

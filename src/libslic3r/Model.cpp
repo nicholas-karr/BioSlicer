@@ -459,6 +459,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_points_status           = rhs.sla_points_status;
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->droplet_sets                = rhs.droplet_sets;
+    this->vessel_tree_spec            = rhs.vessel_tree_spec;
     this->layer_config_ranges         = rhs.layer_config_ranges;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
@@ -497,6 +498,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_points_status           = std::move(rhs.sla_points_status);
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->droplet_sets                = std::move(rhs.droplet_sets);
+    this->vessel_tree_spec            = std::move(rhs.vessel_tree_spec);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
@@ -1078,6 +1080,7 @@ void ModelObject::clone_for_cut(ModelObject** obj)
     (*obj)->sla_drain_holes.clear();
     // The droplets would otherwise be dispensed once for every part of the cut.
     (*obj)->droplet_sets.clear();
+    (*obj)->vessel_tree_spec.clear();
     (*obj)->sla_points_status = sla::PointsStatus::NoPoints;
     (*obj)->clear_volumes();
     (*obj)->input_file.clear();
