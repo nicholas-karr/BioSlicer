@@ -285,6 +285,8 @@ set(SLIC3R_SOURCES
     MultiMaterialSegmentation.cpp
     MultiMaterialSegmentation.hpp
     MeshNormals.hpp
+    MeshPrimitives.cpp
+    MeshPrimitives.hpp
     MeshNormals.cpp
     Measure.hpp
     Measure.cpp
