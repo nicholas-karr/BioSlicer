@@ -142,7 +142,7 @@ private:
     void        append_menu_item_scale_selection_to_fit_print_volume(wxMenu* menu);
     void        append_menu_items_convert_unit(wxMenu* menu, int insert_pos = 1); // Add "Conver/Revert..." menu items (from/to inches/meters) after "Reload From Disk"
     void        append_menu_item_merge_to_multipart_object(wxMenu *menu);
-    void        append_menu_items_solid_editing(wxMenu *menu, bool booleans, bool negative_volumes, bool channel);
+    void        append_menu_items_solid_editing(wxMenu *menu, bool booleans, bool negative_volumes, bool channel, bool history = true);
 //    void        append_menu_item_merge_to_single_object(wxMenu *menu);
     void        append_menu_items_mirror(wxMenu *menu);
     void        append_menu_item_edit_text(wxMenu *menu);

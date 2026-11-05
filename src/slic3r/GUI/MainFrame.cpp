@@ -1680,6 +1680,9 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(editMenu, wxID_ANY, _L("Subtract &channel") + dots,
             _L("Cut a round channel of a given diameter (mm) along a path of points"), [this](wxCommandEvent&) { m_plater->subtract_channel(); },
             "", nullptr, [this](){ return m_plater->can_subtract_channel(); }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Boolean &history") + dots,
+            _L("Show the steps that built this part, switch steps off or change them, and rebuild the part"), [this](wxCommandEvent&) { m_plater->edit_boolean_history(); },
+            "", nullptr, [this](){ return m_plater->can_edit_boolean_history(); }, this);
 
         editMenu->AppendSeparator();
 #ifdef __APPLE__
