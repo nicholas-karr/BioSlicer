@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <string>
 
+#include <boost/nowide/fstream.hpp>
+
 #include <wx/button.h>
 #include <wx/choice.h>
+#include <wx/filedlg.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
@@ -131,7 +134,10 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
 
     m_btn_place      = new wxButton(this, wxID_OK, m_edit_object_idx >= 0 ? _L("Apply") : _L("Add to Bed"));
     auto *btn_cancel = new wxButton(this, wxID_CANCEL, _L("Cancel"));
+    auto *btn_csv    = new wxButton(this, wxID_ANY, _L("Export Points (CSV)..."));
+    btn_csv->SetToolTip(_L("Save the start and end point of every vessel with its radius, in mm, as a table for experiments"));
     auto *btn_row    = new wxBoxSizer(wxHORIZONTAL);
+    btn_row->Add(btn_csv, 0);
     btn_row->AddStretchSpacer();
     btn_row->Add(m_btn_place, 0, wxRIGHT, 6);
     btn_row->Add(btn_cancel, 0);
@@ -170,6 +176,7 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
     });
     m_btn_place->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_place, this);
     btn_cancel->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_cancel, this);
+    btn_csv->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_export_csv, this);
 
     write_controls(s_spec);
     refresh_controls();
@@ -359,6 +366,29 @@ void VesselTreeDialog::on_place(wxCommandEvent &)
         m_status->SetLabel(from_u8(e.what()));
         Layout();
     }
+}
+
+void VesselTreeDialog::on_export_csv(wxCommandEvent &)
+{
+    try {
+        const vessel::VesselSpec spec = read_controls();
+        indexed_triangle_set bounds;
+        const bool bounded = bounds_mesh(spec.bounds_object, bounds);
+        const std::string csv = vessel::skeleton_to_csv(vessel::generate_tree(spec.tree, bounded ? &bounds : nullptr));
+
+        wxFileDialog file_dialog(this, _L("Export vessel points and radii"), wxEmptyString, "vessel_tree.csv",
+                                 _L("CSV files") + " (*.csv)|*.csv", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (file_dialog.ShowModal() != wxID_OK)
+            return;
+        boost::nowide::ofstream out(into_u8(file_dialog.GetPath()), std::ios::binary);
+        out << csv;
+        out.close();
+        m_status->SetLabel(out ? _L("Saved the points and radii (mm). The root starts at the position of the first row.")
+                               : _L("The file could not be written."));
+    } catch (const std::exception &e) {
+        m_status->SetLabel(from_u8(e.what()));
+    }
+    Layout();
 }
 
 void VesselTreeDialog::on_cancel(wxCommandEvent &)

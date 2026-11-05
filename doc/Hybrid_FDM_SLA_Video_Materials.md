@@ -714,15 +714,20 @@ object. Select a tree it made and use the same menu entry to edit it. Every leng
 | Random angle / length variation | Limits of a random change of each branching angle and length. The branching plane of every bifurcation is also chosen at random. |
 | Stop below this radius | Branches that would be thinner than this are not grown. |
 | Random seed | The same settings and seed always give the same tree. |
-| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is this thick along the tubes (measured) and at least this thick at the junctions (by construction, not measured). It must be smaller than the radius of the thinnest tube. |
+| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is at least this thick, along the tubes and at the junctions (measured by ray casting in the tests). It must be smaller than the radius of the thinnest tube. |
 | Detail | Corners per cross section. The cross section is a regular polygon inscribed in the true circle, so the volume is low by 0.16 percent at 64 corners and 0.64 percent at 32. |
 | Keep the vessels inside this object | Tubes that would leave the chosen object are shortened to end one radius before its surface, or left out. The root start (X, Y, Z in bed coordinates) must be inside the object. The tubes can still touch the surface of the object where they run close to it at a shallow angle. |
+
+*Export Points (CSV)* saves the centreline as a table for experiments: one row for the start and one for the end of
+every vessel, with the columns `branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm`. `point` is 0 for the start and 1
+for the end, `parent` is -1 for the root, and the numbers read back as exactly the values the tree was built from.
+Positions are relative to the root start (0, 0, 0) unless a bounding object is chosen, then they are bed coordinates.
 
 Tubes are straight and meet in ball shaped junctions whose radius is 1.1 times that of the tube entering them. The
 preview uses 12 corners and no wall; the object added to the bed uses the settings as given. Adding or editing a
 tree is one undo step. The settings are stored in the 3mf project (`Metadata/BioSlicer_vessel_trees.txt`), so a
 saved project can be edited later, and the tree can be regenerated from them.
 
-The same code can sweep a single tube along a path of points (straight or Catmull-Rom spline with a sample spacing in
+Surfaces are combined in exact arithmetic and rounded to the float vertices of the mesh at the end; in exactly symmetric trees this can leave a few zero-area triangles, which do not open the mesh. The same code can sweep a single tube along a path of points (straight or Catmull-Rom spline with a sample spacing in
 mm, a radius at every point, round or elliptical section, round or flat ends, optional hollow lumen); it lives in
 `src/libslic3r/Vessel` and is covered by `tests/libslic3r/test_vessel.cpp`.

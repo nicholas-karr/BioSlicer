@@ -31,6 +31,7 @@ private:
     void remove_temp_objects();
     void on_place(wxCommandEvent &);
     void on_cancel(wxCommandEvent &);
+    void on_export_csv(wxCommandEvent &);
 
     // Mesh of the object the tree has to stay inside, in bed coordinates. Empty if there is none.
     bool bounds_mesh(const std::string &object_name, indexed_triangle_set &out) const;
