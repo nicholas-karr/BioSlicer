@@ -714,8 +714,8 @@ object. Select a tree it made and use the same menu entry to edit it. Every leng
 | Random angle / length variation | Limits of a random change of each branching angle and length. The branching plane of every bifurcation is also chosen at random. |
 | Stop below this radius | Branches that would be thinner than this are not grown. |
 | Random seed | The same settings and seed always give the same tree. |
-| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is at least this thick everywhere, also at the junctions. It must be smaller than the radius of the thinnest tube. |
-| Detail | Corners per cross section. The cross section is a regular polygon inscribed in the true circle, so the volume is low by 0.16 percent at 64 corners and 0.7 percent at 32. |
+| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is this thick along the tubes (measured) and at least this thick at the junctions (by construction, not measured). It must be smaller than the radius of the thinnest tube. |
+| Detail | Corners per cross section. The cross section is a regular polygon inscribed in the true circle, so the volume is low by 0.16 percent at 64 corners and 0.64 percent at 32. |
 | Keep the vessels inside this object | Tubes that would leave the chosen object are shortened to end one radius before its surface, or left out. The root start (X, Y, Z in bed coordinates) must be inside the object. The tubes can still touch the surface of the object where they run close to it at a shallow angle. |
 
 Tubes are straight and meet in ball shaped junctions whose radius is 1.1 times that of the tube entering them. The
