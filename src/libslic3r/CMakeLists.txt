@@ -284,6 +284,8 @@ set(SLIC3R_SOURCES
     FileReader.hpp
     MultiMaterialSegmentation.cpp
     MultiMaterialSegmentation.hpp
+    DimensionsReport.cpp
+    DimensionsReport.hpp
     MeshNormals.hpp
     MeshPrimitives.cpp
     MeshPrimitives.hpp
