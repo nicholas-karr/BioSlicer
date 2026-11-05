@@ -35,6 +35,7 @@
 #include "format.hpp"
 #include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
+#include "ChannelDialog.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -2622,6 +2623,240 @@ bool ObjectList::can_merge_to_single_object() const
 
     // selected object should be multipart
     return (*m_objects)[obj_idx]->volumes.size() > 1;
+}
+
+bool ObjectList::can_boolean_operation() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.GetCount() < 2 || has_selected_cut_object())
+        return false;
+
+    // Either all selected items are solid parts of one object, or all are whole objects.
+    int    volume_obj_idx = -1;
+    size_t volumes = 0, objects = 0;
+    for (const wxDataViewItem &item : sels) {
+        const ItemType type = m_objects_model->GetItemType(item);
+        if (type & itObject)
+            ++ objects;
+        else if (type & itVolume) {
+            const int obj_idx = m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item));
+            const int vol_idx = m_objects_model->GetVolumeIdByItem(item);
+            if (obj_idx < 0 || vol_idx < 0 || (volume_obj_idx != -1 && volume_obj_idx != obj_idx) ||
+                ! (*m_objects)[obj_idx]->volumes[vol_idx]->is_model_part())
+                return false;
+            volume_obj_idx = obj_idx;
+            ++ volumes;
+        } else
+            return false;
+    }
+    return objects == sels.GetCount() || volumes == sels.GetCount();
+}
+
+void ObjectList::boolean_operation(SolidEdit::BooleanOp op)
+{
+    if (! can_boolean_operation())
+        return;
+
+    const wxString title = op == SolidEdit::BooleanOp::Union ? _L("Union") :
+                           op == SolidEdit::BooleanOp::Subtract ? _L("Subtract") : _L("Intersect");
+    auto fail = [&title](const std::string &msg) {
+        wxMessageBox(from_u8(msg) + "\n\n" + _L("Nothing was changed."), title, wxICON_WARNING | wxOK);
+    };
+    const std::string paint_msg = _u8L("Custom supports, seams and multimaterial painting were removed after the boolean operation.");
+
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    Plater *plater = wxGetApp().plater();
+    wxBusyCursor wait;
+
+    if (m_objects_model->GetItemType(sels[0]) & itVolume) {
+        // Parts of one object. The first selected part is the base.
+        const int obj_idx = m_objects_model->GetIdByItem(m_objects_model->GetTopParent(sels[0]));
+        std::vector<size_t> vol_idxs;
+        for (const wxDataViewItem &item : sels)
+            vol_idxs.emplace_back(size_t(m_objects_model->GetVolumeIdByItem(item)));
+        ModelObject *mo = (*m_objects)[obj_idx];
+
+        // Try on a copy first, so a failed operation changes neither the scene nor the undo history.
+        {
+            Model trial_model;
+            ModelObject &trial = *trial_model.add_object(*mo);
+            SolidEdit::Result r = SolidEdit::boolean_volumes(trial, op, vol_idxs);
+            if (! r.ok) {
+                fail(r.error);
+                return;
+            }
+        }
+
+        Plater::TakeSnapshot snapshot(plater, title);
+        plater->clear_before_change_mesh(obj_idx, paint_msg);
+        SolidEdit::boolean_volumes(*mo, op, vol_idxs);
+        add_volumes_to_object_in_list(obj_idx);
+        changed_object(obj_idx);
+        plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
+        update_info_items(obj_idx);
+        select_item(m_objects_model->GetItemById(obj_idx));
+        update_selections_on_canvas();
+    } else {
+        // Whole objects. The first selected object is the base.
+        std::vector<size_t> obj_idxs;
+        for (const wxDataViewItem &item : sels)
+            obj_idxs.emplace_back(size_t(m_objects_model->GetIdByItem(item)));
+
+        {
+            Model scratch;
+            std::vector<size_t> scratch_idxs;
+            for (size_t idx : obj_idxs) {
+                scratch_idxs.emplace_back(scratch.objects.size());
+                scratch.add_object(*(*m_objects)[idx]);
+            }
+            SolidEdit::Result r = SolidEdit::boolean_objects(scratch, op, scratch_idxs);
+            if (! r.ok) {
+                fail(r.error);
+                return;
+            }
+        }
+
+        Plater::TakeSnapshot snapshot(plater, title);
+        Model *model = (*m_objects)[0]->get_model();
+        SolidEdit::boolean_objects(*model, op, obj_idxs);
+
+        // Remove the operands (they are still selected) and show the result.
+        remove();
+        add_object_to_list(m_objects->size() - 1);
+        select_item(m_objects_model->GetItemById(m_objects->size() - 1));
+        update_selections_on_canvas();
+        plater->canvas3D()->update_instance_printable_state_for_object(int(model->objects.size()) - 1);
+    }
+}
+
+static bool object_has_negative_volume(const ModelObject &object)
+{
+    return std::any_of(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *v) { return v->is_negative_volume(); });
+}
+
+bool ObjectList::can_apply_negative_volumes() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    for (const wxDataViewItem &item : sels) {
+        const ItemType type = m_objects_model->GetItemType(item);
+        const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(item) :
+                            type & itVolume ? m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item)) : -1;
+        if (obj_idx >= 0 && ! (*m_objects)[obj_idx]->is_cut() && object_has_negative_volume(*(*m_objects)[obj_idx]))
+            return true;
+    }
+    return false;
+}
+
+void ObjectList::apply_negative_volumes()
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    std::set<int> obj_idxs;
+    for (const wxDataViewItem &item : sels) {
+        const ItemType type = m_objects_model->GetItemType(item);
+        const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(item) :
+                            type & itVolume ? m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item)) : -1;
+        if (obj_idx >= 0 && ! (*m_objects)[obj_idx]->is_cut() && object_has_negative_volume(*(*m_objects)[obj_idx]))
+            obj_idxs.insert(obj_idx);
+    }
+    if (obj_idxs.empty())
+        return;
+
+    const wxString title = _L("Apply negative volumes");
+    wxBusyCursor wait;
+    for (int obj_idx : obj_idxs) {
+        Model trial_model;
+        ModelObject &trial = *trial_model.add_object(*(*m_objects)[obj_idx]);
+        SolidEdit::Result r = SolidEdit::apply_negative_volumes(trial);
+        if (! r.ok) {
+            wxMessageBox(from_u8((*m_objects)[obj_idx]->name + ": " + r.error) + "\n\n" + _L("Nothing was changed."),
+                         title, wxICON_WARNING | wxOK);
+            return;
+        }
+    }
+
+    Plater *plater = wxGetApp().plater();
+    Plater::TakeSnapshot snapshot(plater, title);
+    for (int obj_idx : obj_idxs) {
+        plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after applying negative volumes."));
+        SolidEdit::apply_negative_volumes(*(*m_objects)[obj_idx]);
+        add_volumes_to_object_in_list(obj_idx);
+        changed_object(obj_idx);
+        plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
+        update_info_items(obj_idx);
+    }
+    select_item(m_objects_model->GetItemById(*obj_idxs.begin()));
+    update_selections_on_canvas();
+}
+
+bool ObjectList::can_subtract_channel() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.GetCount() != 1)
+        return false;
+    const ItemType type = m_objects_model->GetItemType(sels[0]);
+    const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(sels[0]) :
+                        type & itVolume ? m_objects_model->GetIdByItem(m_objects_model->GetTopParent(sels[0])) : -1;
+    if (obj_idx < 0 || (*m_objects)[obj_idx]->is_cut())
+        return false;
+    const auto &volumes = (*m_objects)[obj_idx]->volumes;
+    return std::any_of(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return v->is_model_part(); });
+}
+
+void ObjectList::subtract_channel()
+{
+    if (! can_subtract_channel())
+        return;
+    const wxDataViewItem item = GetSelection();
+    const ItemType type = m_objects_model->GetItemType(item);
+    const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(item) :
+                        m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item));
+    ModelObject *mo = (*m_objects)[obj_idx];
+
+    // Suggest a straight channel through the middle of the object along X, in bed coordinates.
+    const BoundingBoxf3 bb = mo->instance_bounding_box(0);
+    const Vec3d c = bb.center();
+    const double margin = 0.1 * bb.size().x();
+    const std::string defaults = format("%1$.2f %2$.2f %3$.2f\n%4$.2f %2$.2f %3$.2f\n",
+                                        bb.min.x() + margin, c.y(), c.z(), bb.max.x() - margin);
+
+    ChannelDialog dlg(this, defaults);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const wxString title = _L("Subtract channel");
+    std::vector<Vec3d> path;
+    std::string error;
+    if (! dlg.get_path(path, error)) {
+        wxMessageBox(from_u8(error), title, wxICON_WARNING | wxOK);
+        return;
+    }
+    const SolidEdit::ChannelParams params = dlg.get_params();
+
+    wxBusyCursor wait;
+    {
+        Model trial_model;
+        ModelObject &trial = *trial_model.add_object(*mo);
+        SolidEdit::Result r = SolidEdit::subtract_channel(trial, 0, path, params);
+        if (! r.ok) {
+            wxMessageBox(from_u8(r.error) + "\n\n" + _L("Nothing was changed."), title, wxICON_WARNING | wxOK);
+            return;
+        }
+    }
+
+    Plater *plater = wxGetApp().plater();
+    Plater::TakeSnapshot snapshot(plater, title);
+    plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after cutting a channel."));
+    SolidEdit::subtract_channel(*mo, 0, path, params);
+    add_volumes_to_object_in_list(obj_idx);
+    changed_object(obj_idx);
+    plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
+    update_info_items(obj_idx);
+    select_item(m_objects_model->GetItemById(obj_idx));
+    update_selections_on_canvas();
 }
 
 wxPoint ObjectList::get_mouse_position_in_control() const

@@ -698,3 +698,29 @@ BIOSLICER_OVERRIDE PARAM=droplet_nl_per_us EXTRUDER=8 VALUE=0.04
 The comment line is read by the preview, which shows each droplet as a step of the moves slider and counts the
 settle time and the drops in the time estimate. After the droplets the nozzle returns to the layer height, and
 the tool of the next extrusions is selected again.
+
+## Solid Editing: Booleans, Negative Volumes and Channels
+
+BioSlicer can combine and cut solids exactly, so designs such as perfusable tissue blocks can be built
+inside the slicer. All lengths are in millimetres. The operations use the CGAL mesh boolean backend and
+work only on closed, non-self-intersecting solids. If an input is not valid, or the operation fails, a plain
+message is shown and the scene is left unchanged. Every operation is one undo step.
+
+- **Union, Subtract, Intersect.** Select two or more whole objects, or two or more solid parts of one
+  object, then use *Edit > Solids* or the right-click menu. The first selected item is the base: Subtract
+  removes the other items from it. The result keeps the name, extruder and settings of the base. For whole
+  objects the result is a new object in bed coordinates and the originals are removed.
+  Modifiers, negative volumes and support blockers cannot be combined.
+- **Apply negative volumes.** Right-click an object (or use *Edit > Apply negative volumes*) to cut every
+  negative volume out of every solid part and remove the negative volumes. Each part keeps its own
+  material; a part that is cut away completely is removed, and if nothing would be left the operation is
+  refused.
+- **Subtract channel.** Select one object and choose *Subtract channel...*. Enter the path as one point per
+  line (X Y Z in bed coordinates), the channel diameter, and optional inlet and outlet port lengths. A port
+  prolongs the channel past its first or last point along the first or last segment, so a port that reaches
+  past the surface opens the channel to the outside; a length of 0 leaves a closed end. A straight channel
+  is a prism whose polygon has the same area as the circle, so its volume is pi * (diameter / 2)^2 * length.
+  Bends are rounded with spheres and are not exact.
+
+Painted supports, seams and multi-material painting on a changed part are removed, because they refer to
+the old surface. The behaviour is covered by `tests/libslic3r/test_solid_edit.cpp`.

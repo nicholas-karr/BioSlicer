@@ -18,6 +18,7 @@
 #include "ObjectDataViewModel.hpp"
 
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/SolidEdit.hpp"
 
 class wxBoxSizer;
 class wxBitmapComboBox;
@@ -273,6 +274,9 @@ public:
     void                del_info_item(const int obj_idx, InfoItemType type);
     void                split();
     void                merge(bool to_multipart_object);
+    void                boolean_operation(SolidEdit::BooleanOp op);
+    void                apply_negative_volumes();
+    void                subtract_channel();
     void                layers_editing();
 
     wxDataViewItem      add_layer_root_item(const wxDataViewItem obj_item);
@@ -290,6 +294,9 @@ public:
     void                delete_all_connectors_for_object(int obj_idx);
     bool                can_merge_to_multipart_object() const;
     bool                can_merge_to_single_object() const;
+    bool                can_boolean_operation() const;
+    bool                can_apply_negative_volumes() const;
+    bool                can_subtract_channel() const;
 
     wxPoint             get_mouse_position_in_control() const;
     wxBoxSizer*         get_sizer() {return  m_sizer;}
