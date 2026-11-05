@@ -698,3 +698,31 @@ BIOSLICER_OVERRIDE PARAM=droplet_nl_per_us EXTRUDER=8 VALUE=0.04
 The comment line is read by the preview, which shows each droplet as a step of the moves slider and counts the
 settle time and the drops in the time estimate. After the droplets the nozzle returns to the layer height, and
 the tool of the next extrusions is selected again.
+
+## Vessel Tree Generator
+
+*File > Generate Vessel Tree* makes a branching tree of tubes (blood vessels, perfusion channels) as one watertight
+object. Select a tree it made and use the same menu entry to edit it. Every length is in millimetres.
+
+| Field | Meaning |
+|-------|---------|
+| Root vessel radius, length | Radius and length of the first tube. |
+| Number of branching levels | Levels of bifurcations. A tree with *n* levels has 2^(n+1) - 1 tubes and 2^n ends (fewer if a limit below stops growth). |
+| Child length / parent length | Length of each child tube relative to its parent. |
+| Radius of child vessels | *Murray's law*: parent^3 = child A^3 + child B^3, with the flow share of the first child setting how the radii divide (0.5 gives two children of 0.794 times the parent radius). *Fixed ratio* gives both children the same fraction of the parent radius. |
+| Branching angles | *Murray optimal* uses the angles that minimise pumping power, cos(a) = (rp^4 + ra^4 - rb^4) / (2 rp^2 ra^2), which is 37.5 degrees per child for equal children. *Fixed angle* sets the angle between the two children, shared in inverse proportion to their radii. |
+| Random angle / length variation | Limits of a random change of each branching angle and length. The branching plane of every bifurcation is also chosen at random. |
+| Stop below this radius | Branches that would be thinner than this are not grown. |
+| Random seed | The same settings and seed always give the same tree. |
+| Wall thickness | 0 makes a solid tree with round ends. A larger value makes a hollow tree whose root and ends are open; the wall is at least this thick everywhere, also at the junctions. It must be smaller than the radius of the thinnest tube. |
+| Detail | Corners per cross section. The cross section is a regular polygon inscribed in the true circle, so the volume is low by 0.16 percent at 64 corners and 0.7 percent at 32. |
+| Keep the vessels inside this object | Tubes that would leave the chosen object are shortened to end one radius before its surface, or left out. The root start (X, Y, Z in bed coordinates) must be inside the object. The tubes can still touch the surface of the object where they run close to it at a shallow angle. |
+
+Tubes are straight and meet in ball shaped junctions whose radius is 1.1 times that of the tube entering them. The
+preview uses 12 corners and no wall; the object added to the bed uses the settings as given. Adding or editing a
+tree is one undo step. The settings are stored in the 3mf project (`Metadata/BioSlicer_vessel_trees.txt`), so a
+saved project can be edited later, and the tree can be regenerated from them.
+
+The same code can sweep a single tube along a path of points (straight or Catmull-Rom spline with a sample spacing in
+mm, a radius at every point, round or elliptical section, round or flat ends, optional hollow lumen); it lives in
+`src/libslic3r/Vessel` and is covered by `tests/libslic3r/test_vessel.cpp`.
