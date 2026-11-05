@@ -54,6 +54,14 @@ add_executable(${_TEST_NAME}_tests
      test_custom_parameters_handling.cpp
  )
 
+if (SLIC3R_ENABLE_FORMAT_STEP)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_step.cpp)
+    # Format/STEP.cpp loads the wrapper from the directory of the executable.
+    add_dependencies(${_TEST_NAME}_tests OCCTWrapper)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:OCCTWrapper> $<TARGET_FILE_DIR:${_TEST_NAME}_tests>)
+endif()
+
 if (TARGET OpenVDB::openvdb)
     target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
 endif()
