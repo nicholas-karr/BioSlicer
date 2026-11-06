@@ -64,6 +64,30 @@ double min_curvature_margin(const std::vector<PathPoint> &pts)
     return margin;
 }
 
+// How far the mitre joint at an interior point of a polyline reaches along the axis beyond the
+// perpendicular cross section: the tube radius times the tangent of half the turn angle.
+double mitre_extent(const std::vector<PathPoint> &pts, size_t i)
+{
+    if (i == 0 || i + 1 >= pts.size())
+        return 0.;
+    const Vec3d  t_in  = (pts[i].pos - pts[i - 1].pos).normalized();
+    const Vec3d  t_out = (pts[i + 1].pos - pts[i].pos).normalized();
+    const double c     = std::clamp(t_in.dot(t_out), -1., 1.);
+    // tan(theta / 2) = sqrt((1 - cos) / (1 + cos))
+    if (1. + c < 1e-12)
+        return std::numeric_limits<double>::infinity();
+    return pts[i].radius * std::sqrt((1. - c) / (1. + c));
+}
+
+// Index of the first straight piece of a polyline whose two mitre joints cut into each other, or -1.
+int mitre_conflict(const std::vector<PathPoint> &pts)
+{
+    for (size_t i = 0; i + 1 < pts.size(); ++i)
+        if (mitre_extent(pts, i) + mitre_extent(pts, i + 1) >= (pts[i + 1].pos - pts[i].pos).norm() * (1. - 1e-9))
+            return int(i);
+    return -1;
+}
+
 struct Ring
 {
     Vec3d  center;
@@ -71,6 +95,10 @@ struct Ring
     Vec3d  binormal;
     double a; // semi-axis along normal
     double b; // semi-axis along binormal
+    // Mitre joint: the section is stretched by `stretch` along the unit vector `stretch_dir`,
+    // which lies in the plane of the ring. 1 for a section perpendicular to a straight piece.
+    Vec3d  stretch_dir;
+    double stretch;
 };
 
 Vec3d initial_normal(const Vec3d &tangent)
@@ -121,6 +149,25 @@ void compute_frames(const std::vector<PathPoint> &pts, std::vector<Vec3d> &tange
         r = r - r.dot(tangents[i + 1]) * tangents[i + 1];
         normals[i + 1] = r.normalized();
     }
+}
+
+// Stretch of the cross section at an interior point so that it becomes the mitre cut of the two straight
+// pieces that meet there: the circle in the bisecting plane becomes the ellipse in which both pieces cut
+// that plane, with the vertices on the generators of the pieces.
+void mitre_stretch(const std::vector<PathPoint> &pts, size_t i, Vec3d &dir, double &stretch)
+{
+    dir     = Vec3d::UnitX();
+    stretch = 1.;
+    if (i == 0 || i + 1 >= pts.size())
+        return;
+    const Vec3d t_in  = (pts[i].pos - pts[i - 1].pos).normalized();
+    const Vec3d t_out = (pts[i + 1].pos - pts[i].pos).normalized();
+    const Vec3d u     = t_in - t_out;
+    const double half_cos = 0.5 * (t_in + t_out).norm();
+    if (u.norm() < 1e-9 || half_cos < 1e-9)
+        return;
+    dir     = u.normalized();
+    stretch = 1. / half_cos;
 }
 
 } // namespace
@@ -201,11 +248,20 @@ std::string validate_tube(const std::vector<PathPoint> &control, const TubeParam
         return "The wall thickness must be smaller than the smallest radius (the minor radius for an elliptical section).";
 
     if (control.size() > 1) {
-        const std::vector<PathPoint> pts = sample_centreline(control, params.spline, params.sample_spacing);
-        if (pts.size() < 2)
-            return "The path points coincide, the path has no length.";
-        if (min_curvature_margin(pts) < 1.)
-            return "The path bends more sharply than the tube radius allows. Use a smaller radius or a gentler path.";
+        if (params.spline) {
+            const std::vector<PathPoint> pts = sample_centreline(control, true, params.sample_spacing);
+            if (pts.size() < 2)
+                return "The path points coincide, the path has no length.";
+            if (min_curvature_margin(pts) < 1.)
+                return "The path bends more sharply than the tube radius allows. Use a smaller radius or a gentler path.";
+        } else {
+            const std::vector<PathPoint> pts = remove_duplicates(control);
+            if (pts.size() < 2)
+                return "The path points coincide, the path has no length.";
+            if (const int piece = mitre_conflict(pts); piece >= 0)
+                return "The path turns more sharply than the tube radius allows between points " + std::to_string(piece + 1) + " and " +
+                       std::to_string(piece + 2) + ". Use a smaller radius, a gentler turn or points further apart.";
+        }
     }
     return {};
 }
@@ -222,7 +278,8 @@ indexed_triangle_set make_tube(const std::vector<PathPoint> &control, const Tube
         params.wall_thickness = 0.;
     }
 
-    const std::vector<PathPoint> pts = ball ? control : sample_centreline(control, params.spline, params.sample_spacing);
+    const std::vector<PathPoint> pts = ball ? control :
+                                       params.spline ? sample_centreline(control, true, params.sample_spacing) : remove_duplicates(control);
     std::vector<Vec3d> tangents, normals;
     compute_frames(pts, tangents, normals);
 
@@ -235,7 +292,10 @@ indexed_triangle_set make_tube(const std::vector<PathPoint> &control, const Tube
         auto body_ring = [&](size_t i, const Vec3d &center, double scale) {
             const double a = pts[i].radius - inset;
             const double b = pts[i].radius * params.aspect - inset;
-            return Ring{center, normals[i], tangents[i].cross(normals[i]), a * scale, b * scale};
+            Ring         r{center, normals[i], tangents[i].cross(normals[i]), a * scale, b * scale, Vec3d::UnitX(), 1.};
+            if (!params.spline)
+                mitre_stretch(pts, i, r.stretch_dir, r.stretch);
+            return r;
         };
         const size_t last = pts.size() - 1;
         if (with_caps && params.cap_start == CapStyle::Round)
@@ -258,8 +318,11 @@ indexed_triangle_set make_tube(const std::vector<PathPoint> &control, const Tube
         const int first = int(its.vertices.size());
         for (const Ring &r : rings)
             for (int j = 0; j < sides; ++j) {
-                const double th = 2. * PI * double(j) / sides;
-                its.vertices.emplace_back((r.center + r.a * std::cos(th) * r.normal + r.b * std::sin(th) * r.binormal).cast<float>());
+                const double th = 2. * PI * double(j) / sides + params.ring_offset;
+                Vec3d        v  = r.a * std::cos(th) * r.normal + r.b * std::sin(th) * r.binormal;
+                if (r.stretch != 1.)
+                    v += (r.stretch - 1.) * v.dot(r.stretch_dir) * r.stretch_dir;
+                its.vertices.emplace_back((r.center + v).cast<float>());
             }
         return first;
     };

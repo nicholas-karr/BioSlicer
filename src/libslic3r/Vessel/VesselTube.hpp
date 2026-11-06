@@ -30,13 +30,17 @@ enum class CapStyle {
 
 struct TubeParams
 {
-    // Interpolate the control points with a centripetal Catmull-Rom spline.
-    // When false the control points are joined by straight segments.
+    // Interpolate the control points with a centripetal Catmull-Rom spline, sampled every `sample_spacing` mm.
+    // When false the control points are joined by straight pieces that meet in exact mitre joints, and only the
+    // control points carry a cross section.
     bool     spline         = true;
-    // Maximum distance in mm between neighbouring cross sections along the centreline.
+    // Maximum distance in mm between neighbouring cross sections along a spline centreline.
     double   sample_spacing = 0.5;
     // Number of vertices of each cross section.
     int      sides          = 48;
+    // Rotation of the cross section vertices around the centreline, in radians. The pieces of a tree are given
+    // different offsets so that no two pieces share a vertex.
+    double   ring_offset    = 0.;
     // Minor semi-axis divided by the major semi-axis, 1 for a round section.
     double   aspect         = 1.;
     // Wall thickness in mm. Zero makes a solid tube. A positive value makes a
@@ -57,7 +61,8 @@ std::vector<PathPoint> sample_centreline(const std::vector<PathPoint> &control, 
 double polyline_length(const std::vector<PathPoint> &points);
 
 // Empty string if the tube can be built, otherwise a plain-language reason why not.
-// A path is rejected when it bends more sharply than its radius allows, which would make the surface fold into itself.
+// A spline path is rejected when it bends more sharply than its radius allows, a path of straight pieces when
+// two mitre joints would cut into each other; both would make the surface fold into itself.
 std::string validate_tube(const std::vector<PathPoint> &control, const TubeParams &params);
 
 // Triangle mesh of the tube: watertight, outward facing triangles (counter-clockwise seen from outside).

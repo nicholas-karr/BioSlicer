@@ -49,18 +49,38 @@ PrintabilityReport check_channel_printability(const Skeleton &sk, double min_fea
     if (!(min_feature_size >= 0.) || inset < 0.)
         throw InvalidArgument("The minimum feature size and the wall thickness cannot be negative.");
 
-    std::vector<double> radius(n);
+    // Channel radius at every centreline point, and the widest and narrowest of each branch.
+    std::vector<std::vector<double>> radius(n);
+    std::vector<double>              widest(n, 0.);
     for (size_t i = 0; i < n; ++i) {
-        radius[i] = sk.branches[i].radius - inset;
-        if (!(radius[i] > 0.))
-            throw InvalidArgument("The wall thickness must be smaller than the radius of every branch.");
-        const double diameter = 2. * radius[i];
+        const Branch &br = sk.branches[i];
+        double        narrowest = PrintabilityReport::NONE;
+        for (const PathPoint &pt : br.path) {
+            const double r = pt.radius - inset;
+            if (!(r > 0.))
+                throw InvalidArgument("The wall thickness must be smaller than the radius of every branch.");
+            radius[i].push_back(r);
+            narrowest = std::min(narrowest, r);
+            widest[i] = std::max(widest[i], r);
+        }
+        const double diameter = 2. * narrowest;
         if (diameter < rep.min_channel_diameter) {
             rep.min_channel_diameter = diameter;
             rep.narrowest_branch     = int(i);
         }
         if (diameter < min_feature_size)
             rep.narrow_branches.push_back(int(i));
+    }
+
+    // Bounding sphere of every branch, for a cheap rejection of pairs that are far apart.
+    std::vector<Vec3d>  centre(n);
+    std::vector<double> reach(n, 0.);
+    for (size_t i = 0; i < n; ++i) {
+        const auto &path = sk.branches[i].path;
+        centre[i]        = 0.5 * (path.front().pos + path.back().pos);
+        for (const PathPoint &pt : path)
+            reach[i] = std::max(reach[i], (pt.pos - centre[i]).norm());
+        reach[i] += widest[i];
     }
 
     auto neighbours = [&](size_t i, size_t j) {
@@ -71,13 +91,17 @@ PrintabilityReport check_channel_printability(const Skeleton &sk, double min_fea
         for (size_t j = i + 1; j < n; ++j) {
             if (neighbours(i, j))
                 continue;
-            const Branch &a = sk.branches[i], &b = sk.branches[j];
-            // Cheap rejection: bounding spheres of the two vessels that are farther apart than any wall that would matter.
             const double limit = std::max(min_feature_size, rep.min_wall_between_channels);
-            const double apart = (0.5 * (a.start + a.end) - 0.5 * (b.start + b.end)).norm() - 0.5 * a.length() - 0.5 * b.length() - radius[i] - radius[j];
-            if (std::isfinite(limit) && apart > limit)
+            if (std::isfinite(limit) && (centre[i] - centre[j]).norm() - reach[i] - reach[j] > limit)
                 continue;
-            const double wall = segment_distance(a.start, a.end, b.start, b.end) - radius[i] - radius[j];
+            const auto &pa = sk.branches[i].path, &pb = sk.branches[j].path;
+            double      wall = PrintabilityReport::NONE;
+            // Each piece is taken at the larger radius of its two ends, so a tapered wall is never overestimated.
+            for (size_t ka = 0; ka + 1 < pa.size(); ++ka)
+                for (size_t kb = 0; kb + 1 < pb.size(); ++kb)
+                    wall = std::min(wall, segment_distance(pa[ka].pos, pa[ka + 1].pos, pb[kb].pos, pb[kb + 1].pos) -
+                                              std::max(radius[i][ka], radius[i][ka + 1]) -
+                                              std::max(radius[j][kb], radius[j][kb + 1]));
             if (wall < rep.min_wall_between_channels) {
                 rep.min_wall_between_channels = wall;
                 rep.wall_branch_a = int(i);
@@ -91,22 +115,30 @@ PrintabilityReport check_channel_printability(const Skeleton &sk, double min_fea
         const auto tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(block->vertices, block->indices);
         constexpr int DIRECTIONS = 48;
         for (size_t i = 0; i < n; ++i) {
-            const Branch &b      = sk.branches[i];
-            const double  length = b.length();
-            const double  step   = std::max(0.5 * radius[i], 0.02);
-            const int     count  = std::max(1, int(std::ceil(length / step)));
-            const Vec3d   dir    = (b.end - b.start) / length;
-            const Vec3d   u      = dir.cross(std::abs(dir.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY()).normalized();
-            const Vec3d   v      = dir.cross(u);
-            double        thinnest = PrintabilityReport::NONE;
-            for (int k = 0; k <= count; ++k) {
-                const Vec3d p = b.start + dir * (length * double(k) / count);
-                for (int d = 0; d < DIRECTIONS; ++d) {
-                    // Sideways from the axis: the end of a channel that opens through a face is then not mistaken for a thin wall.
-                    const double a = 2. * PI * (double(d) + 0.5) / DIRECTIONS;
-                    igl::Hit     hit;
-                    if (AABBTreeIndirect::intersect_ray_first_hit(block->vertices, block->indices, tree, p, Vec3d(u * std::cos(a) + v * std::sin(a)), hit))
-                        thinnest = std::min(thinnest, double(hit.t) - radius[i]);
+            const auto &path     = sk.branches[i].path;
+            double      thinnest = PrintabilityReport::NONE;
+            for (size_t k = 0; k + 1 < path.size(); ++k) {
+                const Vec3d  p0 = path[k].pos, p1 = path[k + 1].pos;
+                const double length = (p1 - p0).norm();
+                if (!(length > 0.))
+                    continue;
+                const double r0 = radius[i][k], r1 = radius[i][k + 1];
+                const double step  = std::max(0.5 * std::min(r0, r1), 0.02);
+                const int    count = std::max(1, int(std::ceil(length / step)));
+                const Vec3d  dir   = (p1 - p0) / length;
+                const Vec3d  u     = dir.cross(std::abs(dir.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY()).normalized();
+                const Vec3d  v     = dir.cross(u);
+                for (int s = 0; s <= count; ++s) {
+                    const double f = double(s) / count;
+                    const Vec3d  p = p0 + (p1 - p0) * f;
+                    const double r = r0 + (r1 - r0) * f;
+                    for (int d = 0; d < DIRECTIONS; ++d) {
+                        // Sideways from the axis: the end of a channel that opens through a face is then not mistaken for a thin wall.
+                        const double a = 2. * PI * (double(d) + 0.5) / DIRECTIONS;
+                        igl::Hit     hit;
+                        if (AABBTreeIndirect::intersect_ray_first_hit(block->vertices, block->indices, tree, p, Vec3d(u * std::cos(a) + v * std::sin(a)), hit))
+                            thinnest = std::min(thinnest, double(hit.t) - r);
+                    }
                 }
             }
             if (thinnest < rep.min_wall_to_surface) {

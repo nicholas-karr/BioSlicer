@@ -17,9 +17,7 @@ Branch make_branch(int parent, const Vec3d &start, const Vec3d &end, double radi
 {
     Branch b;
     b.parent = parent;
-    b.start  = start;
-    b.end    = end;
-    b.radius = radius;
+    b.path   = {{start, radius}, {end, radius}};
     return b;
 }
 
@@ -65,8 +63,8 @@ TEST_CASE("Channel printability: diameters, walls between channels and walls to 
         sk.branches.push_back(make_branch(Branch::NONE, Vec3d(0, 0, 0), Vec3d(10, 0, 0), 1.));
         sk.branches.push_back(make_branch(0, Vec3d(10, 0, 0), Vec3d(10, 3, 0), 1.));
         sk.branches.push_back(make_branch(1, Vec3d(10, 3, 0), Vec3d(0, 3, 0), 1.));
-        sk.branches[0].child_a = 1;
-        sk.branches[1].child_a = 2;
+        sk.branches[0].children = {1};
+        sk.branches[1].children = {2};
         const auto rep = check_channel_printability(sk, 0.5);
         REQUIRE(rep.min_wall_between_channels == Approx(1.).margin(1e-9));
         REQUIRE(rep.wall_branch_a == 0);
@@ -77,9 +75,9 @@ TEST_CASE("Channel printability: diameters, walls between channels and walls to 
         REQUIRE(thin.thin_walls.size() == 1);
         REQUIRE(thin.thin_walls[0].wall == Approx(1.).margin(1e-9));
         // Channels that overlap have a wall of zero or less.
-        sk.branches[2].start = Vec3d(10, 1.5, 0);
-        sk.branches[2].end   = Vec3d(0, 1.5, 0);
-        sk.branches[1].end   = Vec3d(10, 1.5, 0);
+        sk.branches[2].path.front().pos = Vec3d(10, 1.5, 0);
+        sk.branches[2].path.back().pos  = Vec3d(0, 1.5, 0);
+        sk.branches[1].path.back().pos  = Vec3d(10, 1.5, 0);
         const auto touching = check_channel_printability(sk, 0.5);
         REQUIRE(touching.min_wall_between_channels == Approx(-0.5).margin(1e-9));
         const auto words = printability_warnings(touching, 0.5);
@@ -124,7 +122,8 @@ TEST_CASE("Channel printability: diameters, walls between channels and walls to 
         const Skeleton sk = generate_tree(tp);
         double smallest = 1e9;
         for (const Branch &b : sk.branches)
-            smallest = std::min(smallest, 2. * b.radius);
+            for (const PathPoint &pt : b.path)
+                smallest = std::min(smallest, 2. * pt.radius);
         const auto a = check_channel_printability(sk, 0.2), b = check_channel_printability(sk, 1.0), c = check_channel_printability(sk, 5.);
         REQUIRE(a.min_channel_diameter == Approx(smallest));
         // The leaves of this tree have a radius of 1.2 * 2^(-4/3) = 0.476 mm.

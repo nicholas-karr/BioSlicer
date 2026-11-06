@@ -878,9 +878,9 @@ SCENARIO("Vessel tree parameters of an object survive a 3mf file cycle", "[3mf][
                 REQUIRE(vessel::skeleton_to_csv(a) == vessel::skeleton_to_csv(b));
                 REQUIRE(a.branches.size() == b.branches.size());
                 for (size_t i = 0; i < a.branches.size(); ++i) {
-                    REQUIRE(a.branches[i].start == b.branches[i].start);
-                    REQUIRE(a.branches[i].end == b.branches[i].end);
-                    REQUIRE(a.branches[i].radius == b.branches[i].radius);
+                    REQUIRE(a.branches[i].start() == b.branches[i].start());
+                    REQUIRE(a.branches[i].end() == b.branches[i].end());
+                    REQUIRE(a.branches[i].start_radius() == b.branches[i].start_radius());
                 }
                 // So is the mesh made from it.
                 vessel::VesselMeshParams small_mesh = spec.mesh;
