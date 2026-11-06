@@ -180,6 +180,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/ShapeGenDialog.hpp
     GUI/VesselTreeDialog.cpp
     GUI/VesselTreeDialog.hpp
+    GUI/LatticeDialog.cpp
+    GUI/LatticeDialog.hpp
+    GUI/ParamDialog.cpp
+    GUI/ParameterSweepDialog.cpp
+    GUI/ParameterSweepDialog.hpp
+    GUI/ParamDialog.hpp
+    GUI/TestCouponDialog.cpp
+    GUI/TestCouponDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
     GUI/GUI_ObjectManipulation.hpp
     GUI/GUI_ObjectSettings.cpp

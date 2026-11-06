@@ -870,3 +870,123 @@ pieces are turned slightly and combined again if it fails). The same code can sw
 points (straight or Catmull-Rom spline with a sample spacing in mm, a radius at every point, round or elliptical
 section, round or flat ends, optional hollow lumen); it lives in `src/libslic3r/Vessel` and is covered by
 `tests/libslic3r/test_vessel*.cpp`.
+
+## Test coupons
+
+**File > Generate Test Coupon** places a small calibration object on the bed. Every length is in millimetres
+and every angle in degrees. The window shows the unit next to each number. A coupon is one object and goes
+into undo like any other action.
+
+| Coupon | What it shows | Features |
+|---|---|---|
+| Wall thickness | the thinnest free-standing wall that prints | walls of growing thickness on a base plate |
+| Channel width | the narrowest channel that stays open | round or square channels of growing width through a block |
+| Overhang | the steepest overhang that prints without support | arms leaning away from posts at growing angles from the vertical (0 is a wall, 90 is a bridge) |
+| Resolution | the smallest pin and hole that print | a row of round pins on a plate and a row of round holes through it, getting smaller |
+| Droplet volume | the droplet that fills a well without overflowing | a row of round SLA wells, well A1, A2, ... each with one droplet of a growing volume in nL (needs a droplet channel) |
+
+*First feature* is the size of the first wall, channel, angle or diameter, and *Change per feature* is added for
+each next one (for the resolution coupon it is taken away). The defaults are 6 walls from 0.4 mm in steps of
+0.2 mm, 6 channels from 0.6 mm in steps of 0.2 mm with 1.5 mm of solid around them, 6 arms from 20 to 70
+degrees, and 8 pins from 1.0 mm down in steps of 0.1 mm. The generators are in `src/libslic3r/TestCoupon.hpp`.
+
+The defaults for the droplet volume coupon are 6 wells from 10 nL in steps of 10 nL. Each well is 6 mm wide inside,
+with 0.8 mm walls and a 0.4 mm floor, and holds its droplet in the middle. Round features are regular polygons of
+64 sides inscribed in the nominal circle, so a hole is up to 0.2 % smaller than its nominal diameter.
+
+A coupon that cannot exist is refused with the reason in the window: a wall thinner than 0.05 mm, an angle of 0
+or more than 85 degrees, features that do not get smaller, a droplet below 0.1 nL, or droplets that would not
+fit the volume of their well. Choosing another coupon in the window loads that coupon's own defaults and limits.
+
+### Reading a printed coupon
+
+Features are in the order of the table above, left to right on the bed, from the first value to the last. Write
+down the value of the last feature that is complete: the last wall that stands, the narrowest channel you can
+pass a thread or liquid through, the steepest arm that is not drooping or curled, the smallest pin that is
+upright and hole that is open, or the largest droplet that stays in its well. The values are the numbers in the
+window: with the defaults, wall 1 is 0.4 mm and each next wall is 0.2 mm thicker, so the sixth wall is 1.4 mm.
+The sweep below does the same for one copy per value and also saves a table, which is easier to match to a
+print of many pieces.
+
+## Parameter sweeps
+
+**File > Generate Parameter Sweep** makes numbered copies of a small test piece with one value stepped, and
+arranges them in rows on the bed. Use it for dose-response and tolerance studies: one print answers which
+value works.
+
+| Vary | The piece | Unit |
+|---|---|---|
+| Wall thickness | one wall on a base plate | mm |
+| Channel diameter | a block with one round channel | mm |
+| Distance between two channels | a block with two round channels, centre to centre | mm |
+| Droplet volume | a round SLA well with one droplet (needs a droplet channel) | nL |
+| Layer height of each copy | a 1 mm wall on a base plate, every copy with its own layer height as a setting of its object | mm |
+
+The first copy has the *value of the first copy*, and each next copy adds *change per copy*. Every copy is its
+own object, named for example `Sweep 3 of 6: channel diameter 1.00 mm`, so it can be moved, deleted or given
+its own settings. With *Engrave the number of each copy* a label strip with the number of the copy, cut 0.6 mm
+into a 1.5 mm strip, stands in front of the piece. The window refuses a sweep whose copies do not fit the bed,
+and says how much room they need.
+
+With *Save a table of the copies* the window asks for a CSV file after placing. It has one line per copy, with
+a decimal point and `\n` line ends, and these columns:
+
+| Column | Meaning |
+|---|---|
+| `index`, `label` | number of the copy, from 1, as engraved |
+| `subject`, `parameter`, `value`, `unit` | what was varied and its value (3 decimals) |
+| `x_mm`, `y_mm` | centre of the copy on the bed, from the bed's lower left corner |
+| `width_mm`, `depth_mm`, `height_mm` | size of the copy including its label |
+| `volume_mm3` | volume of the copy |
+| `droplets` | number of droplets on the copy |
+| `layer_height_mm` | layer height of the copy, empty unless the layer height was stepped |
+
+Process settings are written where the printer reads them. The volume of every droplet is in the `BIOSLICER_DROPLET`
+line of the G-code (`VOLUME_NL`), and a copy with its own layer height is sliced with it, so its layers are at its
+own heights in the G-code. The exposure time of an SLA material is not a choice: it is a setting of the printer's
+extruder, and a layer is exposed once for all objects with one frame, so two copies cannot have different exposure
+times in one print. To compare exposure times, print the same sweep once for each exposure time and keep the
+experiment record of each print (below).
+
+The positions are those the copies are placed at; they change if the objects are moved afterwards. The
+generator is in `src/libslic3r/ParameterSweep.hpp`. Stepping a print setting of an arbitrary object is not
+part of the sweep.
+
+## Lattices
+
+**File > Generate Lattice** makes a block of a triply periodic lattice, the repeating porous structures used for
+tissue scaffolds. Lengths are in millimetres.
+
+- **Schwarz P**: the solid is where `cos x + cos y + cos z` is at most a threshold. It has straight channels in
+  the three axis directions.
+- **Diamond**: the solid is where `sin x sin y sin z + sin x cos y cos z + cos x sin y cos z + cos x cos y sin z`
+  is at most a threshold. Its channels branch.
+
+*Length of one repeat* is the period of the lattice in every direction. *Solid share of the volume* (2 % to
+98 %) is converted into the threshold from the distribution of the function over one repeat, so the share holds
+for the block and not only near the surface. The block is closed by flat faces on all six sides.
+
+With *Change the density along an axis* the solid share goes linearly from the first value at the start of the
+axis to *Solid share at the far end*, for a scaffold that gets denser in one direction.
+
+The share of a block is reached within 2 % when each side is a whole number of repeats; other sizes are
+approximate. The surface is sampled at a twentieth of the repeat, so a block of 100 mm with a repeat of 2 mm is
+refused because it needs too many samples. The generator is in `src/libslic3r/TPMS.hpp`.
+
+## Experiment record
+
+With **Print Settings > Output options > Write an experiment record** on, exporting G-code also writes a JSON
+file next to it, `name.experiment.json` for `name.gcode`. It holds what is needed to make the same print again:
+
+| Key | Content |
+|---|---|
+| `bioslicer_version` | the version of BioSlicer that sliced the print |
+| `presets` | the names of the print, filament and printer presets |
+| `settings_changed_from_default` | every setting whose value differs from the built-in default, as the strings the configuration files use, so the values of the presets and of the user's changes are there |
+| `objects` | for each object: `name`, `input_file`, `settings` (the object's own overrides, for example `layer_height` in mm), `instances` (offset in mm, rotation in radians, scale), `volumes` (name, type, size in mm and the part's own overrides) |
+| `droplets` | every droplet as it is dispensed, in bed coordinates: x, y and z in mm, volume in nL, drop count, extruder, and the index of the object it belongs to (-1 for the project) |
+
+A droplet has its position in mm, its volume in nL and its drop count. The names of objects made by a parameter
+sweep say which value they have, for example `Sweep 3 of 6: channel diameter 1.00 mm`, so the record maps each
+printed copy to its values. The file is written only when the G-code is exported, and the G-code itself is not
+changed. The writer is in `src/libslic3r/ExperimentRecord.hpp`.

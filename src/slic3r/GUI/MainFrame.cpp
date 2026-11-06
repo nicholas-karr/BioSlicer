@@ -65,6 +65,9 @@
 #include "DropletGenDialog.hpp"
 #include "ShapeGenDialog.hpp"
 #include "VesselTreeDialog.hpp"
+#include "TestCouponDialog.hpp"
+#include "ParameterSweepDialog.hpp"
+#include "LatticeDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
@@ -1559,6 +1562,30 @@ void MainFrame::init_menubar_as_editor()
             _L("Generate a droplet series: a grid or line of droplets, or an array of wells with their droplets"),
             [this](wxCommandEvent&) {
                 DropletGenDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate Test &Coupon") + dots,
+            _L("Generate a coupon to find the thinnest wall, narrowest channel, steepest overhang or smallest feature that prints"),
+            [this](wxCommandEvent&) {
+                TestCouponDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate Parameter &Sweep") + dots,
+            _L("Generate numbered copies of a test piece with one value stepped, and save a table of the copies"),
+            [this](wxCommandEvent&) {
+                ParameterSweepDialog dlg(this);
+                dlg.ShowModal();
+            }, "shape_gallery", nullptr, []() { return true; }, this);
+
+        append_menu_item(fileMenu, wxID_ANY,
+            _L("Generate &Lattice") + dots,
+            _L("Generate a Schwarz P or diamond lattice block with a chosen solid share, optionally graded"),
+            [this](wxCommandEvent&) {
+                LatticeDialog dlg(this);
                 dlg.ShowModal();
             }, "shape_gallery", nullptr, []() { return true; }, this);
 

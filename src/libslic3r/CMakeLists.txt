@@ -351,7 +351,17 @@ set(SLIC3R_SOURCES
     PNGReadWrite.cpp
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
+    ExperimentRecord.cpp
+    ExperimentRecord.hpp
+    ParameterSweep.cpp
+    ParameterSweep.hpp
     Semver.cpp
+    ShapeGen.cpp
+    ShapeGen.hpp
+    TestCoupon.cpp
+    TestCoupon.hpp
+    TPMS.cpp
+    TPMS.hpp
     ShortEdgeCollapse.cpp
     ShortEdgeCollapse.hpp
     ShortestPath.cpp

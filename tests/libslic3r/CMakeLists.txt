@@ -13,17 +13,22 @@ add_executable(${_TEST_NAME}_tests
 	test_clipper_utils.cpp
 	test_color.cpp
 	test_config.cpp
+	test_coupon.cpp
+	test_csgmesh.cpp
 	test_curve_fitting.cpp
 	test_cut_surface.cpp
 	test_elephant_foot_compensation.cpp
 	test_expolygon.cpp
 	test_geometry.cpp
+	test_measure.cpp
+	test_parameter_sweep.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
 	test_polyline.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
 	test_stl.cpp
+	test_tpms.cpp
 	test_meshboolean.cpp
 	test_solid_edit.cpp
 	test_mesh_primitives.cpp
@@ -34,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
 	test_marchingsquares.cpp
     test_multiple_beds.cpp
 	test_region_expansion.cpp
+	test_shape_gen.cpp
 	test_sla_material.cpp
 	test_timeutils.cpp
 	test_utils.cpp
@@ -61,6 +67,14 @@ add_executable(${_TEST_NAME}_tests
      test_static_map.cpp
      test_custom_parameters_handling.cpp
  )
+
+if (SLIC3R_ENABLE_FORMAT_STEP)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_step.cpp)
+    # Format/STEP.cpp loads the wrapper from the directory of the executable.
+    add_dependencies(${_TEST_NAME}_tests OCCTWrapper)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:OCCTWrapper> $<TARGET_FILE_DIR:${_TEST_NAME}_tests>)
+endif()
 
 if (TARGET OpenVDB::openvdb)
     target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)

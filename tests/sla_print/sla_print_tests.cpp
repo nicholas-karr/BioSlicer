@@ -103,21 +103,21 @@ TEST_CASE("DefaultSupports::FloorSupportsDoNotPierceModel", "[SLASupportGenerati
         test_support_model_collision(fname, supportcfg);
 }
 
-//TEST_CASE("BranchingSupports::ElevatedSupportGeometryIsValid", "[SLASupportGeneration][Branching]") {
-//    sla::SupportTreeConfig supportcfg;
-//    supportcfg.object_elevation_mm = 10.;
-//    supportcfg.tree_type = sla::SupportTreeType::Branching;
+TEST_CASE("BranchingSupports::ElevatedSupportGeometryIsValid", "[SLASupportGeneration][Branching]") {
+    sla::SupportTreeConfig supportcfg;
+    supportcfg.object_elevation_mm = 10.;
+    supportcfg.tree_type = sla::SupportTreeType::Branching;
 
-//    for (auto fname : SUPPORT_TEST_MODELS) test_supports(fname, supportcfg);
-//}
+    for (auto fname : SUPPORT_TEST_MODELS) test_supports(fname, supportcfg);
+}
 
-//TEST_CASE("BranchingSupports::FloorSupportGeometryIsValid", "[SLASupportGeneration][Branching]") {
-//    sla::SupportTreeConfig supportcfg;
-//    supportcfg.object_elevation_mm = 0;
-//    supportcfg.tree_type = sla::SupportTreeType::Branching;
+TEST_CASE("BranchingSupports::FloorSupportGeometryIsValid", "[SLASupportGeneration][Branching]") {
+    sla::SupportTreeConfig supportcfg;
+    supportcfg.object_elevation_mm = 0;
+    supportcfg.tree_type = sla::SupportTreeType::Branching;
 
-//    for (auto &fname: SUPPORT_TEST_MODELS) test_supports(fname, supportcfg);
-//}
+    for (auto &fname: SUPPORT_TEST_MODELS) test_supports(fname, supportcfg);
+}
 
 
 TEST_CASE("BranchingSupports::ElevatedSupportsDoNotPierceModel", "[SLASupportGeneration][Branching]") {

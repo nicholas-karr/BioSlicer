@@ -122,7 +122,7 @@ void perform_csgmesh_booleans(MeshBoolean::cgal::CGALMeshPtr &cgalm,
 
         Frame *top = &opstack.top();
 
-        perform_csg(get_operation(csgpart), top->cgalptr, cgalptr);
+        perform_csg(op, top->cgalptr, cgalptr);
 
         if (get_stack_operation(csgpart) == CSGStackOp::Pop) {
             CGALMeshPtr src = std::move(top->cgalptr);
