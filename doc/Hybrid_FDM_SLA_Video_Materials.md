@@ -824,6 +824,27 @@ every vessel, with the columns `branch,parent,depth,point,x_mm,y_mm,z_mm,radius_
 for the end, `parent` is -1 for the root, and the numbers read back as exactly the values the tree was built from.
 Positions are relative to the root start (0, 0, 0) unless a bounding object is chosen, then they are bed coordinates.
 
+*Import Points (CSV)* reads a table with those columns, from this export or from other software or imaging, and uses it
+instead of growing a tree (*Grow a Tree Instead* goes back). The columns may be in any order and `depth` is optional.
+Every branch is a straight vessel with a start (`point` 0) and an end (`point` 1); `parent` is the number of the branch
+it grows out of and exactly one branch has parent -1. A branch must start where its parent ends (up to 0.01 mm, then it
+is moved onto it) and has at most two children. A branch with different radii at its two points gets the mean radius,
+with a warning. Up to 1000 branches are accepted. Errors name the line or the branch. The table is kept in the 3mf
+project with the other settings, and the growth settings are not used while it is in effect.
+
+*Smallest feature your printer can make* sets the limit for the printability warnings that appear in red under the
+preview. The tree is taken as the channel in a block (a hollow tree, as the channel its lumen). The warnings say
+- how many channels are narrower than the limit, and the narrowest diameter (2 x radius, so the cross section polygon is
+  not taken into account);
+- how many walls between two channels are thinner than the limit, the thinnest, and between which vessels (a vessel and
+  its parent, or two siblings, are joined on purpose and not compared; a wall of zero or less means the channels touch);
+- if the vessels are kept inside an object, how many channels come closer to its outside than the limit. This wall is
+  measured sideways from the axis of each vessel, so a channel that opens through a face of the block is not reported
+  there; the material in front of the closed end of a vessel is not measured. The value can be too large by up to
+  0.3 percent of the distance from the axis to the surface.
+
+The dialog only checks; it does not subtract the tree from a block.
+
 Tubes are straight and meet in ball shaped junctions whose radius is 1.1 times that of the tube entering them. The
 preview uses 12 corners and no wall; the object added to the bed uses the settings as given. Adding or editing a
 tree is one undo step. The settings are stored in the 3mf project (`Metadata/BioSlicer_vessel_trees.txt`), so a

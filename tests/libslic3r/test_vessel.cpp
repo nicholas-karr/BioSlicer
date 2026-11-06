@@ -949,3 +949,242 @@ TEST_CASE("Centreline CSV lists every branch end with its radius", "[Vessel]")
         REQUIRE(skeleton_to_csv(generate_tree(out_spec.tree)) == csv);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review regressions, CSV import and printability
+// ---------------------------------------------------------------------------------------------------------------------
+
+#include <libslic3r/Vessel/VesselIO.hpp>
+
+namespace {
+
+// Everything about a branch that does not depend on the numbering of branches, as text, sorted.
+std::vector<std::string> branch_signatures(const Skeleton &sk)
+{
+    std::vector<std::string> sig;
+    for (const Branch &b : sk.branches) {
+        std::ostringstream o;
+        o.precision(17);
+        o << b.depth << ' ' << b.start.transpose() << ' ' << b.end.transpose() << ' ' << b.radius << ' ' << b.is_leaf();
+        sig.push_back(o.str());
+    }
+    std::sort(sig.begin(), sig.end());
+    return sig;
+}
+
+const char *CSV_HEADER = "branch,parent,depth,point,x_mm,y_mm,z_mm,radius_mm\n";
+
+} // namespace
+
+TEST_CASE("The root start is never moved, also when branches are clipped", "[Vessel]")
+{
+    indexed_triangle_set bounds = its_make_sphere(18., PI / 24.);
+    for (Vec3f &v : bounds.vertices)
+        v += Vec3f(1.f, 2.f, 3.f);
+    TreeParams tp;
+    tp.root_position = Vec3d(1.5, 2.5, -4.25);
+    tp.root_length   = 10.;
+    tp.length_ratio  = 1.;
+    tp.depth         = 4;
+    const Skeleton sk = generate_tree(tp, &bounds);
+    REQUIRE(sk.clipped_by_bounds > 0);
+    REQUIRE(sk.branches.front().start == tp.root_position);
+    REQUIRE(sk.branches.front().parent == Branch::NONE);
+    // The first row of the table is therefore the root start, as the dialog tells the user.
+    std::istringstream rows(skeleton_to_csv(sk));
+    std::string        header, first;
+    std::getline(rows, header);
+    std::getline(rows, first);
+    REQUIRE(first.rfind("0,-1,0,0,1.5,2.5,-4.25,", 0) == 0);
+}
+
+TEST_CASE("Damaged parameter text is rejected instead of giving random numbers", "[Vessel]")
+{
+    VesselSpec good;
+    const std::string text = spec_to_text(good);
+    VesselSpec out;
+    REQUIRE(spec_from_text(text, out));
+
+    auto with = [&](const std::string &key, const std::string &value) {
+        std::string t;
+        std::istringstream in(text);
+        for (std::string line; std::getline(in, line);)
+            t += (line.rfind(key + " =", 0) == 0 ? key + " = " + value : line) + "\n";
+        return t;
+    };
+    VesselSpec sentinel;
+    sentinel.tree.root_radius = 123.;
+    for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>>{
+             {"seed", "abc"}, {"seed", "-3"}, {"seed", "99999999999"}, {"seed", "1.5"}, {"depth", "1e30"}, {"depth", "x"},
+             {"depth", "2.5"}, {"root_radius", "two"}, {"root_radius", "nan"}, {"root_radius", "2 mm"}, {"root_position", "1 2"},
+             {"root_position", "1 2 3 4"}, {"root_direction", "a b c"}, {"sides", "inf"}, {"min_feature_size", ""}}) {
+        INFO(key << " = " << value);
+        VesselSpec target = sentinel;
+        REQUIRE_FALSE(spec_from_text(with(key, value), target));
+        REQUIRE(target.tree.root_radius == 123.); // untouched
+    }
+    // A key that is missing keeps its default.
+    VesselSpec partial;
+    REQUIRE(spec_from_text("vessel_tree_version = 1\nroot_radius = 3\n", partial));
+    REQUIRE(partial.tree.root_radius == 3.);
+    REQUIRE(partial.tree.depth == TreeParams().depth);
+
+    // Too many corners are refused before any memory is spent on them.
+    const Skeleton sk = generate_tree(TreeParams());
+    VesselMeshParams mp;
+    mp.sides = 100000;
+    REQUIRE_FALSE(validate_mesh_params(sk, mp).empty());
+    REQUIRE_THROWS_AS(make_tree_mesh(sk, mp), InvalidArgument);
+}
+
+TEST_CASE("Imported table round trips through the parameter text", "[Vessel]")
+{
+    TreeParams tp;
+    tp.depth = 2;
+    tp.seed  = 5;
+    VesselSpec spec;
+    spec.min_feature_size = 0.35;
+    spec.imported_csv     = skeleton_to_csv(generate_tree(tp));
+    VesselSpec out;
+    REQUIRE(spec_from_text(spec_to_text(spec), out));
+    REQUIRE(out.imported_csv == spec.imported_csv);
+    REQUIRE(out.min_feature_size == 0.35);
+    // The settings above the table are still read.
+    REQUIRE(out.tree.depth == spec.tree.depth);
+    // build_skeleton uses the table, not the growth settings.
+    spec.tree.depth = 7;
+    REQUIRE(build_skeleton(spec).branches.size() == 7);
+    spec.imported_csv = "nonsense";
+    REQUIRE_THROWS_AS(build_skeleton(spec), InvalidArgument);
+}
+
+TEST_CASE("CSV import reads back what the export writes", "[Vessel]")
+{
+    for (uint32_t seed : {1u, 2u, 3u}) {
+        TreeParams tp;
+        tp.depth         = 3;
+        tp.angle_jitter  = 8.;
+        tp.length_jitter = 0.2;
+        tp.seed          = seed;
+        const Skeleton original = generate_tree(tp);
+        const SkeletonImport imported = skeleton_from_csv(skeleton_to_csv(original));
+        INFO(imported.error);
+        REQUIRE(imported.ok());
+        REQUIRE(imported.warnings.empty());
+        const Skeleton &sk = imported.skeleton;
+        REQUIRE(sk.branches.size() == original.branches.size());
+        REQUIRE(sk.leaf_count() == original.leaf_count());
+        REQUIRE(sk.branches.front().parent == Branch::NONE);
+        // The same vessels, to the last bit, whatever their numbers.
+        REQUIRE(branch_signatures(sk) == branch_signatures(original));
+        // Parents come first.
+        for (size_t i = 1; i < sk.branches.size(); ++i)
+            REQUIRE(sk.branches[i].parent < int(i));
+
+        // The mesh of the imported tree has the same volume as the grown one.
+        VesselMeshParams mp;
+        mp.sides = 12;
+        const auto a = make_tree_mesh(original, mp), b = make_tree_mesh(sk, mp);
+        REQUIRE(check_mesh(b).watertight());
+        REQUIRE(check_mesh(b).volume == Approx(check_mesh(a).volume).epsilon(1e-4));
+    }
+}
+
+TEST_CASE("CSV import accepts tables from other software", "[Vessel]")
+{
+    // Different column order, other upper/lower case, spaces, Windows line ends, branch numbers that are not 0..n-1
+    // and a child listed before its parent.
+    const std::string csv =
+        "Radius_mm, X_mm,Y_mm , Z_mm,Point,Parent,Branch\r\n"
+        "0.5, 5,0,0, 0, 40, 7\r\n"
+        "0.5, 5,3,0, 1, 40, 7\r\n"
+        "1.0, 0,0,0, 0, -1, 40\r\n"
+        "1.0, 5,0,0, 1, -1, 40\r\n"
+        "\r\n"
+        "0.5, 5,0,0, 0, 40, 9\r\n"
+        "0.5, 5,-3,0, 1, 40, 9\r\n";
+    const SkeletonImport r = skeleton_from_csv(csv);
+    INFO(r.error);
+    REQUIRE(r.ok());
+    REQUIRE(r.skeleton.branches.size() == 3);
+    const Branch &root = r.skeleton.branches[0];
+    REQUIRE(root.parent == Branch::NONE);
+    REQUIRE(root.radius == 1.);
+    REQUIRE(root.end == Vec3d(5, 0, 0));
+    REQUIRE(root.child_a != Branch::NONE);
+    REQUIRE(root.child_b != Branch::NONE);
+    REQUIRE(r.skeleton.branches[root.child_a].depth == 1);
+    REQUIRE(r.skeleton.leaf_count() == 2);
+    // It can be meshed like any other tree.
+    VesselMeshParams mp;
+    mp.sides = 16;
+    REQUIRE(check_mesh(make_tree_mesh(r.skeleton, mp)).watertight());
+
+    SECTION("a radius that differs between the two points gives the mean and a warning")
+    {
+        const SkeletonImport t = skeleton_from_csv(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,2\n0,-1,0,1,10,0,0,1\n");
+        REQUIRE(t.ok());
+        REQUIRE(t.skeleton.branches[0].radius == 1.5);
+        REQUIRE(t.warnings.size() == 1);
+        REQUIRE(t.warnings[0].find("mean") != std::string::npos);
+    }
+    SECTION("a child that starts a hair away from the end of its parent is moved onto it")
+    {
+        const SkeletonImport t = skeleton_from_csv(std::string(CSV_HEADER) +
+                                                   "0,-1,0,0,0,0,0,1\n0,-1,0,1,10,0,0,1\n1,0,1,0,10.004,0,0,1\n1,0,1,1,20,0,0,1\n");
+        REQUIRE(t.ok());
+        REQUIRE(t.skeleton.branches[1].start == t.skeleton.branches[0].end);
+    }
+}
+
+TEST_CASE("CSV import explains what is wrong", "[Vessel]")
+{
+    auto error_of = [](const std::string &text) {
+        const SkeletonImport r = skeleton_from_csv(text);
+        REQUIRE_FALSE(r.ok());
+        REQUIRE(r.skeleton.branches.empty());
+        return r.error;
+    };
+    auto contains = [](const std::string &s, const char *part) { return s.find(part) != std::string::npos; };
+    const std::string root = "0,-1,0,0,0,0,0,1\n0,-1,0,1,10,0,0,1\n";
+
+    REQUIRE(contains(error_of(""), "first line"));
+    REQUIRE(contains(error_of("branch,parent,point,x_mm,y_mm,z_mm\n"), "radius_mm"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER)), "no vessels"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,a,0,0,1\n"), "Line 2"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,1,2\n"), "fewer values"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,2,0,0,0,1\n"), "point must be 0"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,0\n"), "larger than 0"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,-2\n"), "larger than 0"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0.5,-1,0,0,0,0,0,1\n"), "whole number"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,1\n0,-1,0,0,1,0,0,1\n"), "twice"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,1\n"), "both a start"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,-1,0,0,0,0,0,1\n0,-1,0,1,0,0,0,1\n"), "same start and end"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,-1,0,0,0,0,0,1\n1,-1,0,1,0,5,0,1\n"), "more than one root"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,3,0,0,0,0,0,1\n0,3,0,1,10,0,0,1\n"), "not in the file"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + "0,1,0,0,0,0,0,1\n0,1,0,1,5,0,0,1\n1,0,0,0,5,0,0,1\n1,0,0,1,9,0,0,1\n"), "no root"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,9,0,0,10,0,0,1\n1,9,0,1,20,0,0,1\n"), "not in the file"));
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,1,0,0,10,0,0,1\n1,1,0,1,20,0,0,1\n"), "own parent"));
+    // A loop that is cut off from the root.
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,2,0,0,10,0,0,1\n1,2,0,1,20,0,0,1\n2,1,0,0,20,0,0,1\n2,1,0,1,30,0,0,1\n"),
+                     "not connected to the root"));
+    // Three children.
+    std::string three = std::string(CSV_HEADER) + root;
+    for (int c = 1; c <= 3; ++c)
+        three += std::to_string(c) + ",0,0,0,10,0,0,1\n" + std::to_string(c) + ",0,0,1,10," + std::to_string(c) + ",0,1\n";
+    REQUIRE(contains(error_of(three), "At most 2"));
+    // A gap between the end of the parent and the start of the child.
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,0,0,0,11,0,0,1\n1,0,0,1,20,0,0,1\n"), "starts 1.000 mm away"));
+    // Two parents for one branch.
+    REQUIRE(contains(error_of(std::string(CSV_HEADER) + root + "1,0,0,0,10,0,0,1\n1,1,0,1,20,0,0,1\n"), "two different parents"));
+
+    SECTION("too many branches")
+    {
+        std::string big = CSV_HEADER;
+        for (size_t i = 0; i <= MAX_IMPORTED_BRANCHES; ++i) {
+            const std::string id = std::to_string(i), parent = i == 0 ? "-1" : std::to_string(i - 1);
+            big += id + "," + parent + ",0,0," + std::to_string(i) + ",0,0,1\n" + id + "," + parent + ",0,1," + std::to_string(i + 1) + ",0,0,1\n";
+        }
+        REQUIRE(contains(error_of(big), "more than"));
+    }
+}

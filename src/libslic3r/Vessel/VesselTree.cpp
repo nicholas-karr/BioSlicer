@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include "VesselBoolean.hpp"
+#include "VesselIO.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -19,6 +20,11 @@
 namespace Slic3r { namespace vessel {
 
 namespace {
+
+// Starts the imported table in the text of a spec.
+constexpr const char *CSV_MARKER = "centreline_csv:";
+// Largest number of corners of a cross section.
+constexpr int MAX_SIDES = 256;
 
 // Rotates v around the unit axis k by `angle` radians (Rodrigues' formula).
 Vec3d rotate_about(const Vec3d &v, const Vec3d &k, double angle)
@@ -280,8 +286,8 @@ std::string validate_mesh_params(const Skeleton &skeleton, const VesselMeshParam
 {
     if (skeleton.branches.empty())
         return "The tree has no branches.";
-    if (params.sides < 3)
-        return "A cross section needs at least 3 sides.";
+    if (params.sides < 3 || params.sides > MAX_SIDES)
+        return "A cross section needs between 3 and " + std::to_string(MAX_SIDES) + " sides.";
     if (params.cap_rings < 1)
         return "A round cap needs at least 1 ring.";
     if (params.joint_scale < 1.02)
@@ -411,41 +417,63 @@ std::string spec_to_text(const VesselSpec &s)
     o << "cap_rings = " << s.mesh.cap_rings << "\n";
     o << "joint_scale = " << num(s.mesh.joint_scale) << "\n";
     o << "bounds_object = " << s.bounds_object << "\n";
+    o << "min_feature_size = " << num(s.min_feature_size) << "\n";
+    if (!s.imported_csv.empty()) {
+        // The table goes last, after a line that no setting can start with.
+        o << CSV_MARKER << "\n" << s.imported_csv;
+        if (s.imported_csv.back() != '\n')
+            o << "\n";
+    }
     return o.str();
 }
 
-bool spec_from_text(const std::string &text, VesselSpec &spec)
+bool spec_from_text(const std::string &full_text, VesselSpec &spec)
 {
+    std::string text = full_text, csv;
+    if (const size_t marker = full_text.find(std::string(CSV_MARKER) + "\n"); marker != std::string::npos && (marker == 0 || full_text[marker - 1] == '\n')) {
+        text = full_text.substr(0, marker);
+        csv  = full_text.substr(marker + std::string(CSV_MARKER).size() + 1);
+    }
+
     std::map<std::string, std::string> kv;
     std::istringstream                 in(text);
+    auto trim = [](const std::string &s) {
+        const size_t a = s.find_first_not_of(" \t\r");
+        const size_t b = s.find_last_not_of(" \t\r");
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    };
     for (std::string line; std::getline(in, line);) {
         const size_t eq = line.find('=');
-        if (eq == std::string::npos)
-            continue;
-        auto trim = [](std::string s) {
-            const size_t a = s.find_first_not_of(" \t\r");
-            const size_t b = s.find_last_not_of(" \t\r");
-            return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
-        };
-        kv[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
+        if (eq != std::string::npos)
+            kv[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
     }
     if (kv.find("vessel_tree_version") == kv.end())
         return false;
 
+    // Any value that is present but not a proper number rejects the whole text instead of giving a random value.
+    bool valid = true;
     auto get_double = [&](const char *key, double &out) {
-        if (auto it = kv.find(key); it != kv.end())
-            out = string_to_double_decimal_point(it->second);
+        if (auto it = kv.find(key); it != kv.end() && !parse_number(it->second, out))
+            valid = false;
     };
     auto get_int = [&](const char *key, int &out) {
-        if (auto it = kv.find(key); it != kv.end())
-            out = int(string_to_double_decimal_point(it->second));
+        double v = 0.;
+        if (auto it = kv.find(key); it != kv.end()) {
+            if (!parse_number(it->second, v) || v != std::floor(v) || std::abs(v) > 1e9)
+                valid = false;
+            else
+                out = int(v);
+        }
     };
     auto get_vec = [&](const char *key, Vec3d &out) {
         if (auto it = kv.find(key); it != kv.end()) {
             std::istringstream v(it->second);
-            std::string        a, b, c;
-            if (v >> a >> b >> c)
-                out = Vec3d(string_to_double_decimal_point(a), string_to_double_decimal_point(b), string_to_double_decimal_point(c));
+            std::string        a, b, c, extra;
+            double             x = 0., y = 0., z = 0.;
+            if (v >> a >> b >> c && !(v >> extra) && parse_number(a, x) && parse_number(b, y) && parse_number(c, z))
+                out = Vec3d(x, y, z);
+            else
+                valid = false;
         }
     };
 
@@ -468,18 +496,37 @@ bool spec_from_text(const std::string &text, VesselSpec &spec)
         t.rule.radius_rule = it->second == "fixed_ratio" ? RadiusRule::FixedRatio : RadiusRule::Murray;
     if (auto it = kv.find("angle_rule"); it != kv.end())
         t.rule.angle_rule = it->second == "fixed" ? AngleRule::Fixed : AngleRule::MurrayOptimal;
-    if (auto it = kv.find("seed"); it != kv.end())
-        t.seed = uint32_t(std::stoull(it->second));
+    if (auto it = kv.find("seed"); it != kv.end()) {
+        double seed = 0.;
+        if (parse_number(it->second, seed) && seed >= 0. && seed <= 4294967295. && seed == std::floor(seed))
+            t.seed = uint32_t(seed);
+        else
+            valid = false;
+    }
     get_int("sides", r.mesh.sides);
     get_double("wall_thickness", r.mesh.wall_thickness);
     get_int("cap_rings", r.mesh.cap_rings);
     get_double("joint_scale", r.mesh.joint_scale);
+    get_double("min_feature_size", r.min_feature_size);
     if (auto it = kv.find("caps"); it != kv.end())
         r.mesh.caps = it->second == "flat" ? CapStyle::Flat : CapStyle::Round;
     if (auto it = kv.find("bounds_object"); it != kv.end())
         r.bounds_object = it->second;
+    r.imported_csv = std::move(csv);
+    if (!valid)
+        return false;
     spec = std::move(r);
     return true;
+}
+
+Skeleton build_skeleton(const VesselSpec &spec, const indexed_triangle_set *bounds)
+{
+    if (spec.imported_csv.empty())
+        return generate_tree(spec.tree, bounds);
+    SkeletonImport imported = skeleton_from_csv(spec.imported_csv);
+    if (!imported.ok())
+        throw InvalidArgument("The imported vessel table cannot be used. " + imported.error);
+    return std::move(imported.skeleton);
 }
 
 }} // namespace Slic3r::vessel

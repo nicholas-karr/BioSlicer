@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <string>
 
+#include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/filedlg.h>
+#include <wx/filename.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
@@ -18,6 +20,8 @@
 #include "Plater.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Vessel/VesselIO.hpp"
+#include "libslic3r/Vessel/VesselPrintability.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -109,6 +113,9 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
     add_row(_L("Wall thickness (mm, 0 = solid):"), m_wall);
     m_sides = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 8, 128, 32);
     add_row(_L("Detail (corners per cross section):"), m_sides);
+    m_min_feature = make_spin(this, 0., 5., 0.4, 0.05, 2);
+    m_min_feature->SetToolTip(_L("Channels narrower than this, and walls thinner than this, are reported as a warning"));
+    add_row(_L("Smallest feature your printer can make (mm):"), m_min_feature);
 
     m_bounds = new wxChoice(this, wxID_ANY);
     m_bounds->Append(_L("Nothing"));
@@ -127,17 +134,29 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
     m_root_y_label = add_row(_L("Root start Y on the bed (mm):"), m_root_y);
     m_root_z = make_spin(this, -2000., 2000., 0., 1., 1);
     m_root_z_label = add_row(_L("Root start height Z (mm):"), m_root_z);
+    m_growth_controls = {m_root_radius, m_root_length, m_levels, m_length_ratio, m_radius_rule, m_flow_split, m_radius_ratio, m_angle_rule,
+                         m_total_angle, m_angle_jitter, m_length_jitter, m_min_radius, m_seed, m_bounds, m_root_x, m_root_y, m_root_z};
 
     outer->Add(grid, 0, wxEXPAND | wxALL, 8);
+    m_import_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    outer->Add(m_import_note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
     m_status = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_NO_AUTORESIZE);
     outer->Add(m_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    m_warnings = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    m_warnings->SetForegroundColour(wxColour(170, 0, 0));
+    outer->Add(m_warnings, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
     m_btn_place      = new wxButton(this, wxID_OK, m_edit_object_idx >= 0 ? _L("Apply") : _L("Add to Bed"));
     auto *btn_cancel = new wxButton(this, wxID_CANCEL, _L("Cancel"));
     auto *btn_csv    = new wxButton(this, wxID_ANY, _L("Export Points (CSV)..."));
     btn_csv->SetToolTip(_L("Save the start and end point of every vessel with its radius, in mm, as a table for experiments"));
     auto *btn_row    = new wxBoxSizer(wxHORIZONTAL);
-    btn_row->Add(btn_csv, 0);
+    auto *btn_import = new wxButton(this, wxID_ANY, _L("Import Points (CSV)..."));
+    btn_import->SetToolTip(_L("Use a table of vessels (start and end point and radius in mm, as written by Export Points) instead of growing a tree"));
+    m_btn_clear_import = new wxButton(this, wxID_ANY, _L("Grow a Tree Instead"));
+    btn_row->Add(btn_csv, 0, wxRIGHT, 6);
+    btn_row->Add(btn_import, 0, wxRIGHT, 6);
+    btn_row->Add(m_btn_clear_import, 0);
     btn_row->AddStretchSpacer();
     btn_row->Add(m_btn_place, 0, wxRIGHT, 6);
     btn_row->Add(btn_cancel, 0);
@@ -153,6 +172,7 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
     }
 
     auto on_change = [this](auto &) { refresh_controls(); rebuild_preview(); };
+    m_min_feature->Bind(wxEVT_SPINCTRLDOUBLE, on_change);
     for (wxSpinCtrlDouble *c : {m_root_radius, m_root_length, m_length_ratio, m_flow_split, m_radius_ratio, m_total_angle, m_angle_jitter,
                                 m_length_jitter, m_min_radius, m_wall, m_root_x, m_root_y, m_root_z})
         c->Bind(wxEVT_SPINCTRLDOUBLE, on_change);
@@ -177,6 +197,13 @@ VesselTreeDialog::VesselTreeDialog(wxWindow *parent, int edit_object_idx)
     m_btn_place->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_place, this);
     btn_cancel->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_cancel, this);
     btn_csv->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_export_csv, this);
+    btn_import->Bind(wxEVT_BUTTON, &VesselTreeDialog::on_import_csv, this);
+    m_btn_clear_import->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        m_imported_csv.clear();
+        update_import_state();
+        refresh_controls();
+        rebuild_preview();
+    });
 
     write_controls(s_spec);
     refresh_controls();
@@ -224,6 +251,8 @@ vessel::VesselSpec VesselTreeDialog::read_controls() const
     s.tree.seed          = uint32_t(m_seed->GetValue());
     s.mesh.wall_thickness = m_wall->GetValue();
     s.mesh.sides          = m_sides->GetValue();
+    s.min_feature_size    = m_min_feature->GetValue();
+    s.imported_csv        = m_imported_csv;
     const int bounds_sel  = m_bounds->GetSelection();
     if (bounds_sel > 0) {
         s.bounds_object      = m_bounds_names[bounds_sel];
@@ -249,6 +278,10 @@ void VesselTreeDialog::write_controls(const vessel::VesselSpec &s)
     m_seed->SetValue(int(s.tree.seed));
     m_wall->SetValue(s.mesh.wall_thickness);
     m_sides->SetValue(s.mesh.sides);
+    m_min_feature->SetValue(s.min_feature_size);
+    m_imported_csv = s.imported_csv;
+    m_missing_bounds.clear();
+    update_import_state();
     m_bounds->SetSelection(0);
     for (size_t i = 1; i < m_bounds_names.size(); ++i)
         if (m_bounds_names[i] == s.bounds_object && !s.bounds_object.empty()) {
@@ -257,6 +290,27 @@ void VesselTreeDialog::write_controls(const vessel::VesselSpec &s)
             m_root_y->SetValue(s.tree.root_position.y());
             m_root_z->SetValue(s.tree.root_position.z());
         }
+    if (!s.bounds_object.empty() && m_bounds->GetSelection() == 0 && s.imported_csv.empty())
+        m_missing_bounds = s.bounds_object;
+}
+
+void VesselTreeDialog::update_import_state()
+{
+    const bool imported = !m_imported_csv.empty();
+    for (wxWindow *w : m_growth_controls)
+        w->Enable(!imported);
+    m_btn_clear_import->Show(imported);
+    if (imported) {
+        const vessel::SkeletonImport table = vessel::skeleton_from_csv(m_imported_csv);
+        m_import_note->SetLabel(table.ok() ? wxString::Format(_L("The tree comes from an imported table of %d vessels. The growth settings above are not used."),
+                                                              int(table.skeleton.branches.size()))
+                                           : from_u8(table.error));
+    } else {
+        m_import_note->SetLabel(wxEmptyString);
+    }
+    m_import_note->Show(imported);
+    Layout();
+    Fit();
 }
 
 bool VesselTreeDialog::bounds_mesh(const std::string &object_name, indexed_triangle_set &out) const
@@ -290,7 +344,7 @@ namespace {
 // The object keeps the spec so that it can be edited and regenerated later.
 std::unique_ptr<Model> build_model(const vessel::VesselSpec &spec, const indexed_triangle_set *bounds, vessel::Skeleton &skeleton)
 {
-    skeleton = vessel::generate_tree(spec.tree, bounds);
+    skeleton = vessel::build_skeleton(spec, bounds);
     indexed_triangle_set its = vessel::make_tree_mesh(skeleton, spec.mesh);
 
     auto model = std::make_unique<Model>();
@@ -299,7 +353,7 @@ std::unique_ptr<Model> build_model(const vessel::VesselSpec &spec, const indexed
     ModelVolume *vol = obj->add_volume(TriangleMesh(std::move(its)));
     vol->name = "Vessel";
     obj->vessel_tree_spec = vessel::spec_to_text(spec);
-    if (bounds != nullptr) {
+    if (bounds != nullptr || !spec.imported_csv.empty()) {
         // The mesh is already in bed coordinates: keep it where it is.
         obj->center_around_origin();
         obj->add_instance()->set_offset(-obj->origin_translation);
@@ -319,9 +373,10 @@ void VesselTreeDialog::rebuild_preview()
     Plater::SuppressSnapshots suppress(wxGetApp().plater());
     remove_temp_objects();
 
+    wxString warnings;
     try {
         indexed_triangle_set bounds;
-        const bool bounded = bounds_mesh(preview.bounds_object, bounds);
+        const bool bounded = s_spec.imported_csv.empty() && bounds_mesh(preview.bounds_object, bounds);
         vessel::Skeleton skeleton;
         std::unique_ptr<Model> model = build_model(preview, bounded ? &bounds : nullptr, skeleton);
         m_temp_obj_idxs = wxGetApp().plater()->add_model_objects(model->objects);
@@ -333,10 +388,22 @@ void VesselTreeDialog::rebuild_preview()
             text += wxString::Format(_L(". %d vessels were shortened to stay inside the object"), int(skeleton.clipped_by_bounds));
         if (s_spec.mesh.wall_thickness > 0.)
             text += _L(". The preview is solid; the hollow wall is made when the tree is added");
+        if (!m_missing_bounds.empty())
+            text += _L(". The object this tree had to stay inside is no longer in the scene: ") + from_u8(m_missing_bounds);
         m_status->SetLabel(text);
+
+        // Can the printer make it? The tree is the channel in a block (the chosen object), or the lumen if it is hollow.
+        const vessel::PrintabilityReport report =
+            vessel::check_channel_printability(skeleton, s_spec.min_feature_size, s_spec.mesh.wall_thickness, bounded ? &bounds : nullptr);
+        for (const std::string &line : vessel::printability_warnings(report, s_spec.min_feature_size))
+            warnings += (warnings.empty() ? wxString() : wxString("\n")) + from_u8(line);
     } catch (const std::exception &e) {
         m_status->SetLabel(from_u8(e.what()));
+    } catch (...) {
+        m_status->SetLabel(_L("The vessel tree could not be made."));
     }
+    m_warnings->SetLabel(warnings);
+    m_warnings->Wrap(std::max(300, GetClientSize().x - 24));
     Layout();
     wxGetApp().plater()->canvas3D()->force_repaint();
 }
@@ -347,7 +414,7 @@ void VesselTreeDialog::on_place(wxCommandEvent &)
     Plater *plater = wxGetApp().plater();
     try {
         indexed_triangle_set bounds;
-        const bool bounded = bounds_mesh(s_spec.bounds_object, bounds);
+        const bool bounded = s_spec.imported_csv.empty() && bounds_mesh(s_spec.bounds_object, bounds);
         vessel::Skeleton skeleton;
         // Build before touching the scene so that a failure leaves the preview as it was.
         std::unique_ptr<Model> model = build_model(s_spec, bounded ? &bounds : nullptr, skeleton);
@@ -365,30 +432,101 @@ void VesselTreeDialog::on_place(wxCommandEvent &)
     } catch (const std::exception &e) {
         m_status->SetLabel(from_u8(e.what()));
         Layout();
+    } catch (...) {
+        m_status->SetLabel(_L("The vessel tree could not be made."));
+        Layout();
     }
 }
 
 void VesselTreeDialog::on_export_csv(wxCommandEvent &)
 {
     try {
-        const vessel::VesselSpec spec = read_controls();
+        // Keep the remembered settings in step with what is exported.
+        s_spec = read_controls();
         indexed_triangle_set bounds;
-        const bool bounded = bounds_mesh(spec.bounds_object, bounds);
-        const std::string csv = vessel::skeleton_to_csv(vessel::generate_tree(spec.tree, bounded ? &bounds : nullptr));
+        const bool bounded = s_spec.imported_csv.empty() && bounds_mesh(s_spec.bounds_object, bounds);
+        const vessel::Skeleton skeleton = vessel::build_skeleton(s_spec, bounded ? &bounds : nullptr);
+        const std::string csv = vessel::skeleton_to_csv(skeleton);
 
         wxFileDialog file_dialog(this, _L("Export vessel points and radii"), wxEmptyString, "vessel_tree.csv",
                                  _L("CSV files") + " (*.csv)|*.csv", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (file_dialog.ShowModal() != wxID_OK)
             return;
-        boost::nowide::ofstream out(into_u8(file_dialog.GetPath()), std::ios::binary);
-        out << csv;
-        out.close();
-        m_status->SetLabel(out ? _L("Saved the points and radii (mm). The root starts at the position of the first row.")
-                               : _L("The file could not be written."));
+        // Some systems do not add the extension that the file type promises.
+        wxFileName name(file_dialog.GetPath());
+        if (name.GetExt().IsEmpty())
+            name.SetExt("csv");
+        const std::string path = into_u8(name.GetFullPath());
+
+        // Write beside the target and move it into place, so a failed write cannot destroy an existing file.
+        const std::string temp = path + ".tmp";
+        bool written = false;
+        {
+            boost::nowide::ofstream out(temp, std::ios::binary);
+            out << csv;
+            out.close();
+            written = bool(out);
+        }
+        boost::system::error_code ec;
+        if (written)
+            boost::filesystem::rename(temp, path, ec);
+        if (!written || ec) {
+            boost::filesystem::remove(temp, ec);
+            m_status->SetLabel(_L("The file could not be written. An existing file with that name was left as it was."));
+        } else {
+            m_status->SetLabel(wxString::Format(_L("Saved %d vessels (start and end point and radius in mm) to %s"), int(skeleton.branches.size()), name.GetFullName()));
+        }
     } catch (const std::exception &e) {
         m_status->SetLabel(from_u8(e.what()));
+    } catch (...) {
+        m_status->SetLabel(_L("The points could not be exported."));
     }
     Layout();
+}
+
+void VesselTreeDialog::on_import_csv(wxCommandEvent &)
+{
+    try {
+        wxFileDialog file_dialog(this, _L("Import vessel points and radii"), wxEmptyString, wxEmptyString, _L("CSV files") + " (*.csv)|*.csv|" + _L("All files") + " (*.*)|*.*",
+                                 wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (file_dialog.ShowModal() != wxID_OK)
+            return;
+        const std::string path = into_u8(file_dialog.GetPath());
+        boost::system::error_code ec;
+        const uintmax_t size = boost::filesystem::file_size(path, ec);
+        if (ec || size > 20 * 1024 * 1024) {
+            m_status->SetLabel(_L("The file cannot be read or is larger than 20 MB."));
+            Layout();
+            return;
+        }
+        boost::nowide::ifstream in(path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const vessel::SkeletonImport table = vessel::skeleton_from_csv(text);
+        if (!table.ok()) {
+            m_status->SetLabel(from_u8(table.error));
+            Layout();
+            return;
+        }
+        // Keep the cleaned up table: parents numbered before their children, children moved onto the end of their parent.
+        m_imported_csv = vessel::skeleton_to_csv(table.skeleton);
+        update_import_state();
+        refresh_controls();
+        rebuild_preview();
+        if (!table.warnings.empty()) {
+            wxString notes;
+            for (const std::string &w : table.warnings)
+                notes += (notes.empty() ? wxString() : wxString("\n")) + from_u8(w);
+            m_warnings->SetLabel(m_warnings->GetLabel() + (m_warnings->GetLabel().empty() ? wxString() : wxString("\n")) + notes);
+            m_warnings->Wrap(std::max(300, GetClientSize().x - 24));
+            Layout();
+        }
+    } catch (const std::exception &e) {
+        m_status->SetLabel(from_u8(e.what()));
+        Layout();
+    } catch (...) {
+        m_status->SetLabel(_L("The points could not be imported."));
+        Layout();
+    }
 }
 
 void VesselTreeDialog::on_cancel(wxCommandEvent &)
