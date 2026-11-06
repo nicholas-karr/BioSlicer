@@ -267,6 +267,7 @@ public:
     void                offset_selected_surface();
     void                make_hollow_shell();
     void                analyze_wall_thickness();
+    void                show_dimensions_report();
     void                load_shape_object_from_gallery();
     void                load_shape_object_from_gallery(const wxArrayString& input_files);
     void                load_mesh_object(const TriangleMesh &mesh, const std::string &name, bool center = true);

@@ -1942,6 +1942,21 @@ void ObjectList::analyze_wall_thickness()
               _L("Wall thickness"));
 }
 
+void ObjectList::show_dimensions_report()
+{
+    const int obj_idx = get_selected_obj_idx();
+    ModelObject* obj = obj_idx < 0 ? nullptr : object(obj_idx);
+    if (obj == nullptr || obj->instances.empty())
+        return;
+    std::vector<DimensionsReport> reports;
+    {
+        wxBusyCursor wait;
+        for (size_t i = 0; i < obj->instances.size(); ++i)
+            reports.push_back(make_dimensions_report(*obj, i));
+    }
+    show_dimensions_report_dialog(wxGetApp().plater(), reports);
+}
+
 void ObjectList::load_shape_object_from_gallery()
 {
     if (wxGetApp().plater()->canvas3D()->get_selection().get_object_idx() != -1)

@@ -781,6 +781,19 @@ Each operation is one undo step. Offsets are voxel based; the voxel size is the 
 1/500 of the model size, so the surface error is a fraction of a voxel. Tests: a sphere shell stays within 1 % of
 `4/3 pi (R^3 - r^3)` and its measured minimum wall is within 0.1 mm of the requested thickness.
 
+### Dimensions report
+
+**Shell and thickness tools, Dimensions report** lists, for the selected object as placed on the bed: size and bounding
+box (mm), volume (mm3 and ml), surface area (mm2), the thinnest wall with its position, the triangle count and the
+number of open edges (0 means a closed surface; otherwise volume and thickness may be wrong). **Save as CSV** writes one
+line per instance with units in the column names, a `.` decimal separator and 6 decimals, so an experiment can record
+exactly what was printed. Only model parts count; modifiers and negative volumes are ignored.
+
+### Export precision
+
+Tests export a part with typed dimensions placed at 150 mm and re-read it. Binary and ASCII STL, OBJ and 3MF (also with a
+rotated, scaled instance) agree with the original within 0.001 mm (one micron) in size and vertex position.
+
 ### Typed size, position and rotation
 
 The object info panel accepts exact size, position and rotation. In code, `apply_numeric_transform` sets the size along

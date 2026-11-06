@@ -3,6 +3,7 @@
 
 #include <vector>
 
+#include "libslic3r/DimensionsReport.hpp"
 #include "libslic3r/MeshPrimitives.hpp"
 
 class wxWindow;
@@ -20,6 +21,9 @@ bool show_offset_dialog(wxWindow *parent, double &distance_mm);
 
 // ports: 0 = closed cavity, 1 = one opening on top, 2 = openings on top and bottom.
 bool show_shell_dialog(wxWindow *parent, double &wall_thickness_mm, int &ports, double &port_radius_mm);
+
+// Shows the numbers with their units and offers to save them as a CSV file.
+void show_dimensions_report_dialog(wxWindow *parent, const std::vector<DimensionsReport> &reports);
 
 } // namespace GUI
 } // namespace Slic3r
