@@ -448,9 +448,13 @@ void VesselTreeDialog::rebuild_preview()
     } catch (const std::exception &e) {
         m_status->SetLabel(from_u8(e.what()));
     }
+    const bool warnings_changed = m_warnings->GetLabel() != warnings;
     m_warnings->SetLabel(warnings);
     m_warnings->Wrap(std::max(300, GetClientSize().x - 24));
     Layout();
+    // The warning lines change the height the dialog needs; grow or shrink it so they do not run under the buttons.
+    if (warnings_changed)
+        Fit();
     wxGetApp().plater()->canvas3D()->force_repaint();
 }
 
