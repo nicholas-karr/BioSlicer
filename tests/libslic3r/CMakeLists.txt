@@ -35,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
 	test_dimensions_report.cpp
 	test_export_precision.cpp
 	test_mesh_shell.cpp
+	test_mesh_offset_robustness.cpp
 	test_mesh_thickness.cpp
 	test_marchingsquares.cpp
     test_multiple_beds.cpp
