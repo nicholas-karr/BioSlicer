@@ -331,9 +331,11 @@ public:
     void boolean_operation(SolidEdit::BooleanOp op);
     void apply_negative_volumes();
     void subtract_channel();
+    void edit_boolean_history();
     bool can_boolean_operation() const;
     bool can_apply_negative_volumes() const;
     bool can_subtract_channel() const;
+    bool can_edit_boolean_history() const;
 
     bool can_delete() const;
     bool can_delete_all() const;

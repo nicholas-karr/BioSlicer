@@ -718,9 +718,20 @@ message is shown and the scene is left unchanged. Every operation is one undo st
 - **Subtract channel.** Select one object and choose *Subtract channel...*. Enter the path as one point per
   line (X Y Z in bed coordinates), the channel diameter, and optional inlet and outlet port lengths. A port
   prolongs the channel past its first or last point along the first or last segment, so a port that reaches
-  past the surface opens the channel to the outside; a length of 0 leaves a closed end. A straight channel
-  is a prism whose polygon has the same area as the circle, so its volume is pi * (diameter / 2)^2 * length.
-  Bends are rounded with spheres and are not exact.
+  past the surface opens the channel to the outside; a length of 0 leaves a closed end. The channel is one
+  swept tube with mitred bends, and the polygon has the area of the circle, so its volume is exactly
+  pi * (diameter / 2)^2 * path length, bends included. Bends sharper than 150 degrees, or segments too short
+  for the diameter, are refused. The tube is cut in bed coordinates, so it stays round on scaled or rotated
+  objects. Objects with several instances must be split into separate objects first, because the instances
+  share one shape.
+- **Result size.** After every operation a notification shows the volume in mm3 and ml and the bounding box
+  (size and corners, mm) of the result in bed coordinates.
+- **Boolean history.** A part made by Union, Subtract, Intersect, Apply negative volumes or Subtract channel
+  remembers its chain (base, then each step). Choose *Boolean history...* to see it, switch steps off,
+  change a step to another operation, and rebuild the part. The chain is stored in the part's own
+  coordinates, so moving, rotating or scaling the part keeps it valid, and it is saved in the 3MF file and
+  in undo snapshots. The shapes of the steps are stored copies: changing another part later does not
+  change them. A step that fails on rebuild is named in the message and the part is left unchanged.
 
 Painted supports, seams and multi-material painting on a changed part are removed, because they refer to
 the old surface. The behaviour is covered by `tests/libslic3r/test_solid_edit.cpp`.

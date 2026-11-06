@@ -37,6 +37,7 @@
 #include "format.hpp"
 #include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
+#include "BooleanHistoryDialog.hpp"
 #include "ChannelDialog.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -2779,6 +2780,16 @@ bool ObjectList::can_merge_to_single_object() const
     return (*m_objects)[obj_idx]->volumes.size() > 1;
 }
 
+// Shows the size of the result of a solid editing operation in a notification.
+static void show_measurement(const SolidEdit::Result &result, const wxString &title)
+{
+    if (! result.measurement.valid)
+        return;
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification, NotificationManager::NotificationLevel::PrintInfoNotificationLevel,
+        into_u8(title) + ": " + result.measurement.text());
+}
+
 bool ObjectList::can_boolean_operation() const
 {
     wxDataViewItemArray sels;
@@ -2845,13 +2856,14 @@ void ObjectList::boolean_operation(SolidEdit::BooleanOp op)
 
         Plater::TakeSnapshot snapshot(plater, title);
         plater->clear_before_change_mesh(obj_idx, paint_msg);
-        SolidEdit::boolean_volumes(*mo, op, vol_idxs);
+        const SolidEdit::Result done = SolidEdit::boolean_volumes(*mo, op, vol_idxs);
         add_volumes_to_object_in_list(obj_idx);
         changed_object(obj_idx);
         plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
         update_info_items(obj_idx);
         select_item(m_objects_model->GetItemById(obj_idx));
         update_selections_on_canvas();
+        show_measurement(done, title);
     } else {
         // Whole objects. The first selected object is the base.
         std::vector<size_t> obj_idxs;
@@ -2874,7 +2886,7 @@ void ObjectList::boolean_operation(SolidEdit::BooleanOp op)
 
         Plater::TakeSnapshot snapshot(plater, title);
         Model *model = (*m_objects)[0]->get_model();
-        SolidEdit::boolean_objects(*model, op, obj_idxs);
+        const SolidEdit::Result done = SolidEdit::boolean_objects(*model, op, obj_idxs);
 
         // Remove the operands (they are still selected) and show the result.
         remove();
@@ -2882,6 +2894,7 @@ void ObjectList::boolean_operation(SolidEdit::BooleanOp op)
         select_item(m_objects_model->GetItemById(m_objects->size() - 1));
         update_selections_on_canvas();
         plater->canvas3D()->update_instance_printable_state_for_object(int(model->objects.size()) - 1);
+        show_measurement(done, title);
     }
 }
 
@@ -2936,11 +2949,12 @@ void ObjectList::apply_negative_volumes()
     Plater::TakeSnapshot snapshot(plater, title);
     for (int obj_idx : obj_idxs) {
         plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after applying negative volumes."));
-        SolidEdit::apply_negative_volumes(*(*m_objects)[obj_idx]);
+        const SolidEdit::Result done = SolidEdit::apply_negative_volumes(*(*m_objects)[obj_idx]);
         add_volumes_to_object_in_list(obj_idx);
         changed_object(obj_idx);
         plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
         update_info_items(obj_idx);
+        show_measurement(done, title);
     }
     select_item(m_objects_model->GetItemById(*obj_idxs.begin()));
     update_selections_on_canvas();
@@ -3004,13 +3018,92 @@ void ObjectList::subtract_channel()
     Plater *plater = wxGetApp().plater();
     Plater::TakeSnapshot snapshot(plater, title);
     plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after cutting a channel."));
-    SolidEdit::subtract_channel(*mo, 0, path, params);
+    const SolidEdit::Result done = SolidEdit::subtract_channel(*mo, 0, path, params);
     add_volumes_to_object_in_list(obj_idx);
     changed_object(obj_idx);
     plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
     update_info_items(obj_idx);
     select_item(m_objects_model->GetItemById(obj_idx));
     update_selections_on_canvas();
+    show_measurement(done, title);
+}
+
+// The part whose boolean history is shown: the selected part, or the first part with a history of the selected object.
+static ModelVolume *volume_with_history(const ModelObject &object, int selected_volume_idx, int &volume_idx)
+{
+    SolidEdit::History h;
+    for (size_t i = 0; i < object.volumes.size(); ++ i) {
+        if (selected_volume_idx >= 0 && int(i) != selected_volume_idx)
+            continue;
+        if (object.volumes[i]->is_model_part() && SolidEdit::get_history(*object.volumes[i], h)) {
+            volume_idx = int(i);
+            return object.volumes[i];
+        }
+    }
+    return nullptr;
+}
+
+bool ObjectList::can_edit_boolean_history() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.GetCount() != 1)
+        return false;
+    const ItemType type = m_objects_model->GetItemType(sels[0]);
+    int obj_idx = -1, vol_idx = -1;
+    if (type & itObject)
+        obj_idx = m_objects_model->GetIdByItem(sels[0]);
+    else if (type & itVolume) {
+        obj_idx = m_objects_model->GetIdByItem(m_objects_model->GetTopParent(sels[0]));
+        vol_idx = m_objects_model->GetVolumeIdByItem(sels[0]);
+    }
+    int found = -1;
+    return obj_idx >= 0 && volume_with_history(*(*m_objects)[obj_idx], vol_idx, found) != nullptr;
+}
+
+void ObjectList::edit_boolean_history()
+{
+    if (! can_edit_boolean_history())
+        return;
+    const wxDataViewItem item = GetSelection();
+    const ItemType type = m_objects_model->GetItemType(item);
+    const int obj_idx = type & itObject ? m_objects_model->GetIdByItem(item) :
+                        m_objects_model->GetIdByItem(m_objects_model->GetTopParent(item));
+    ModelObject *mo = (*m_objects)[obj_idx];
+    int volume_idx = -1;
+    ModelVolume *volume = volume_with_history(*mo, type & itVolume ? m_objects_model->GetVolumeIdByItem(item) : -1, volume_idx);
+    SolidEdit::History history;
+    if (volume == nullptr || ! SolidEdit::get_history(*volume, history))
+        return;
+
+    BooleanHistoryDialog dlg(this, history);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    history = dlg.get_history();
+
+    const wxString title = _L("Rebuild from boolean history");
+    wxBusyCursor wait;
+    {
+        Model trial_model;
+        ModelObject &trial = *trial_model.add_object(*mo);
+        SolidEdit::Result r = SolidEdit::regenerate_volume(trial, size_t(volume_idx), history);
+        if (! r.ok) {
+            wxMessageBox(from_u8(r.error) + "\n\n" + _L("Nothing was changed."), title, wxICON_WARNING | wxOK);
+            return;
+        }
+    }
+
+    Plater *plater = wxGetApp().plater();
+    Plater::TakeSnapshot snapshot(plater, title);
+    plater->clear_before_change_mesh(obj_idx, _u8L("Custom supports, seams and multimaterial painting were removed after rebuilding the part."));
+    const SolidEdit::Result done = SolidEdit::regenerate_volume(*mo, size_t(volume_idx), history);
+    add_volumes_to_object_in_list(obj_idx);
+    changed_object(obj_idx);
+    plater->canvas3D()->update_instance_printable_state_for_object(obj_idx);
+    update_info_items(obj_idx);
+    select_item(m_objects_model->GetItemById(obj_idx));
+    update_selections_on_canvas();
+    show_measurement(done, title);
 }
 
 wxPoint ObjectList::get_mouse_position_in_control() const

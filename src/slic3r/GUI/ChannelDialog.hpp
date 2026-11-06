@@ -21,7 +21,7 @@ class ChannelDialog : public wxDialog
 public:
     ChannelDialog(wxWindow *parent, const std::string &default_points);
 
-    // Parses the point list. Returns false and sets error if a line is not three numbers.
+    // Parses the point list. Returns false and sets a plain message if a line is not three numbers.
     bool get_path(std::vector<Vec3d> &path, std::string &error) const;
     SolidEdit::ChannelParams get_params() const;
 

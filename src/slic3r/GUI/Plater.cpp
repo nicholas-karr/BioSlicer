@@ -7520,9 +7520,11 @@ void Plater::split_volume()         { p->split_volume(); }
 void Plater::boolean_operation(SolidEdit::BooleanOp op) { wxGetApp().obj_list()->boolean_operation(op); }
 void Plater::apply_negative_volumes() { wxGetApp().obj_list()->apply_negative_volumes(); }
 void Plater::subtract_channel()     { wxGetApp().obj_list()->subtract_channel(); }
+void Plater::edit_boolean_history() { wxGetApp().obj_list()->edit_boolean_history(); }
 bool Plater::can_boolean_operation() const { return wxGetApp().obj_list()->can_boolean_operation(); }
 bool Plater::can_apply_negative_volumes() const { return wxGetApp().obj_list()->can_apply_negative_volumes(); }
 bool Plater::can_subtract_channel() const { return wxGetApp().obj_list()->can_subtract_channel(); }
+bool Plater::can_edit_boolean_history() const { return wxGetApp().obj_list()->can_edit_boolean_history(); }
 void Plater::update_menus()         { p->menus.update(); }
 void Plater::show_action_buttons(const bool ready_to_slice) const   { p->show_action_buttons(ready_to_slice); }
 void Plater::show_action_buttons() const                            { p->show_action_buttons(p->ready_to_slice); }

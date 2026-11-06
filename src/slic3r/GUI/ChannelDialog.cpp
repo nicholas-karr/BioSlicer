@@ -3,9 +3,6 @@
 #include "I18N.hpp"
 #include "GUI_App.hpp"
 #include "GUI.hpp"
-#include "format.hpp"
-
-#include <sstream>
 
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
@@ -50,31 +47,7 @@ ChannelDialog::ChannelDialog(wxWindow *parent, const std::string &default_points
 
 bool ChannelDialog::get_path(std::vector<Vec3d> &path, std::string &error) const
 {
-    path.clear();
-    std::istringstream lines(into_u8(m_points->GetValue()));
-    std::string line;
-    int line_no = 0;
-    while (std::getline(lines, line)) {
-        ++ line_no;
-        for (char &c : line)
-            if (c == ',' || c == ';' || c == '\t')
-                c = ' ';
-        std::istringstream fields(line);
-        double x, y, z;
-        std::string rest;
-        if (! (fields >> x)) // blank line
-            continue;
-        if (! (fields >> y >> z) || (fields >> rest)) {
-            error = format("Line %1% is not three numbers (X Y Z in mm).", line_no);
-            return false;
-        }
-        path.emplace_back(x, y, z);
-    }
-    if (path.size() < 2) {
-        error = "A channel needs at least two points.";
-        return false;
-    }
-    return true;
+    return SolidEdit::parse_points(into_u8(m_points->GetValue()), path, error);
 }
 
 SolidEdit::ChannelParams ChannelDialog::get_params() const

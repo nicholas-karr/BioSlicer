@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <set>
+#include <sstream>
 
 namespace Slic3r {
 namespace SolidEdit {
@@ -27,6 +30,18 @@ std::string quote_name(const std::string &name)
     return "'" + name + "'";
 }
 
+TriangleMesh transformed(const TriangleMesh &mesh, const Transform3d &trafo)
+{
+    TriangleMesh out = mesh;
+    out.transform(trafo, true);
+    return out;
+}
+
+const char *op_name(BooleanOp op)
+{
+    return op == BooleanOp::Union ? "Union" : op == BooleanOp::Subtract ? "Subtract" : "Intersect";
+}
+
 Result boolean_impl(BooleanOp op, const TriangleMesh &base, const std::vector<TriangleMesh> &tools, bool allow_empty)
 {
     if (tools.empty())
@@ -41,13 +56,14 @@ Result boolean_impl(BooleanOp op, const TriangleMesh &base, const std::vector<Tr
     TriangleMesh acc = base;
     try {
         for (const TriangleMesh &tool : tools) {
+            // Nothing is left to operate on; Union can never get here.
+            if (acc.its.indices.empty())
+                break;
             switch (op) {
             case BooleanOp::Union:     MeshBoolean::cgal::plus(acc, tool);      break;
             case BooleanOp::Subtract:  MeshBoolean::cgal::minus(acc, tool);     break;
             case BooleanOp::Intersect: MeshBoolean::cgal::intersect(acc, tool); break;
             }
-            if (acc.its.indices.empty() && op == BooleanOp::Intersect)
-                break;
         }
     } catch (const std::exception &) {
         return Result::failure("The boolean operation failed. The shapes may touch each other in a way that cannot be resolved. "
@@ -70,7 +86,8 @@ Result boolean_impl(BooleanOp op, const TriangleMesh &base, const std::vector<Tr
     return out;
 }
 
-// Replaces the geometry of a volume with a mesh given in object coordinates.
+// Replaces the geometry of a volume with a mesh given in object coordinates. Any stored boolean history is
+// dropped, callers that keep a history store it again afterwards.
 void replace_volume_mesh(ModelVolume &volume, TriangleMesh &&mesh_in_object)
 {
     volume.set_mesh(std::move(mesh_in_object));
@@ -84,6 +101,7 @@ void replace_volume_mesh(ModelVolume &volume, TriangleMesh &&mesh_in_object)
     volume.fuzzy_skin_facets.reset();
     volume.text_configuration.reset();
     volume.emboss_shape.reset();
+    volume.csg_history.clear();
     if (ModelObject *object = volume.get_object(); object != nullptr) {
         object->input_file.clear();
         object->invalidate_bounding_box();
@@ -97,16 +115,50 @@ void delete_volumes(ModelObject &object, std::vector<size_t> idxs)
         object.delete_volume(idx);
 }
 
+// The state of a volume before it is modified, enough to start or continue its history afterwards.
+struct Before
+{
+    Transform3d  matrix;
+    TriangleMesh local_mesh;
+    std::string  name;
+    std::string  history;
+
+    explicit Before(const ModelVolume &v) : matrix(v.get_matrix()), local_mesh(v.mesh()), name(v.name), history(v.csg_history) {}
+
+    // History in object coordinates: the stored one, or a new one starting at the volume as it was.
+    History in_object_coords() const
+    {
+        History h;
+        if (history_from_text(history, h)) {
+            h.base.transform(matrix, true);
+            for (HistoryStep &s : h.steps)
+                s.mesh.transform(matrix, true);
+        } else {
+            h = History();
+            h.base_name = name;
+            h.base = transformed(local_mesh, matrix);
+        }
+        return h;
+    }
+};
+
+// Stores a history given in object coordinates on a volume, converted to the local coordinates of the volume.
+void store_history(ModelVolume &volume, History history)
+{
+    const Transform3d to_local = volume.get_matrix().inverse();
+    history.base.transform(to_local, true);
+    for (HistoryStep &s : history.steps)
+        s.mesh.transform(to_local, true);
+    volume.csg_history = history_to_text(history);
+}
+
 // Union of all solid parts of an object, transformed by trafo.
 Result object_solid(const ModelObject &object, const Transform3d &trafo)
 {
     std::vector<TriangleMesh> meshes;
     for (const ModelVolume *v : object.volumes)
-        if (v->is_model_part()) {
-            TriangleMesh m = v->mesh();
-            m.transform(trafo * v->get_matrix(), true);
-            meshes.emplace_back(std::move(m));
-        }
+        if (v->is_model_part())
+            meshes.emplace_back(transformed(v->mesh(), trafo * v->get_matrix()));
     if (meshes.empty())
         return Result::failure("The object " + quote_name(object.name) + " has no solid parts.");
     Result out;
@@ -122,36 +174,124 @@ Result object_solid(const ModelObject &object, const Transform3d &trafo)
     return boolean_impl(BooleanOp::Union, first, meshes, false);
 }
 
-// Closed prism between two points, ring radius r with n sides. Outward facing triangles.
-void add_prism(indexed_triangle_set &its, const Vec3d &a, const Vec3d &b, double r, int n)
+std::string encode_name(const std::string &name)
 {
-    const Vec3d d = (b - a).normalized();
-    const Vec3d helper = std::abs(d.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY();
-    const Vec3d u = d.cross(helper).normalized();
-    const Vec3d v = d.cross(u);
-
-    const int base = int(its.vertices.size());
-    for (int end = 0; end < 2; ++ end)
-        for (int i = 0; i < n; ++ i) {
-            const double t = 2. * M_PI * double(i) / double(n);
-            its.vertices.emplace_back(((end == 0 ? a : b) + r * (std::cos(t) * u + std::sin(t) * v)).cast<float>());
+    std::string out;
+    char buf[4];
+    for (unsigned char c : name)
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.')
+            out += char(c);
+        else {
+            std::snprintf(buf, sizeof(buf), "%%%02X", unsigned(c));
+            out += buf;
         }
-    const int ca = int(its.vertices.size());
-    its.vertices.emplace_back(a.cast<float>());
-    const int cb = int(its.vertices.size());
-    its.vertices.emplace_back(b.cast<float>());
+    return out;
+}
 
-    for (int i = 0; i < n; ++ i) {
-        const int j = (i + 1) % n;
-        const int a_i = base + i, a_j = base + j, b_i = base + n + i, b_j = base + n + j;
-        its.indices.emplace_back(a_i, a_j, b_j);
-        its.indices.emplace_back(a_i, b_j, b_i);
-        its.indices.emplace_back(ca, a_j, a_i);
-        its.indices.emplace_back(cb, b_i, b_j);
-    }
+std::string decode_name(const std::string &text)
+{
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++ i)
+        if (text[i] == '%' && i + 2 < text.size() + 0 && std::isxdigit((unsigned char)text[i + 1]) && std::isxdigit((unsigned char)text[i + 2])) {
+            out += char(std::strtol(text.substr(i + 1, 2).c_str(), nullptr, 16));
+            i += 2;
+        } else
+            out += text[i];
+    return out;
+}
+
+void mesh_to_text(std::string &out, const TriangleMesh &mesh)
+{
+    char buf[40];
+    out += std::to_string(mesh.its.vertices.size()) + " " + std::to_string(mesh.its.indices.size());
+    for (const stl_vertex &v : mesh.its.vertices)
+        for (int i = 0; i < 3; ++ i) {
+            std::snprintf(buf, sizeof(buf), " %.9g", double(v(i)));
+            out += buf;
+        }
+    for (const stl_triangle_vertex_indices &f : mesh.its.indices)
+        for (int i = 0; i < 3; ++ i)
+            out += " " + std::to_string(f(i));
+}
+
+bool mesh_from_text(const std::string &text, TriangleMesh &mesh)
+{
+    std::istringstream in(text);
+    in.imbue(std::locale::classic());
+    size_t nv = 0, ni = 0;
+    if (! (in >> nv >> ni) || nv > 100000000 || ni > 100000000)
+        return false;
+    indexed_triangle_set its;
+    its.vertices.resize(nv);
+    its.indices.resize(ni);
+    for (stl_vertex &v : its.vertices)
+        for (int i = 0; i < 3; ++ i) {
+            double d;
+            if (! (in >> d))
+                return false;
+            v(i) = float(d);
+        }
+    for (stl_triangle_vertex_indices &f : its.indices)
+        for (int i = 0; i < 3; ++ i) {
+            long idx;
+            if (! (in >> idx) || idx < 0 || size_t(idx) >= nv)
+                return false;
+            f(i) = int(idx);
+        }
+    mesh = TriangleMesh(std::move(its));
+    return true;
 }
 
 } // namespace
+
+std::string Measurement::text() const
+{
+    if (! valid)
+        return {};
+    const Vec3d size = bbox.size();
+    char buf[400];
+    std::snprintf(buf, sizeof(buf),
+        "Volume %.2f mm3 (%.3f ml). Size %.2f x %.2f x %.2f mm, from (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f) mm.",
+        volume_mm3, volume_ml, size.x(), size.y(), size.z(),
+        bbox.min.x(), bbox.min.y(), bbox.min.z(), bbox.max.x(), bbox.max.y(), bbox.max.z());
+    return buf;
+}
+
+Measurement measure(const TriangleMesh &mesh, const Transform3d &trafo)
+{
+    Measurement m;
+    if (mesh.its.indices.empty())
+        return m;
+    const TriangleMesh t = transformed(mesh, trafo);
+    m.valid      = true;
+    m.volume_mm3 = double(its_volume(t.its));
+    m.volume_ml  = m.volume_mm3 / 1000.;
+    m.bbox       = t.bounding_box();
+    return m;
+}
+
+Measurement measure(const ModelObject &object, size_t instance_idx)
+{
+    Measurement total;
+    if (instance_idx >= object.instances.size())
+        return total;
+    const Transform3d inst = object.instances[instance_idx]->get_matrix();
+    for (const ModelVolume *v : object.volumes) {
+        if (! v->is_model_part())
+            continue;
+        const Measurement m = measure(v->mesh(), inst * v->get_matrix());
+        if (! m.valid)
+            continue;
+        total.volume_mm3 += m.volume_mm3;
+        if (total.valid)
+            total.bbox.merge(m.bbox);
+        else
+            total.bbox = m.bbox;
+        total.valid = true;
+    }
+    total.volume_ml = total.volume_mm3 / 1000.;
+    return total;
+}
 
 std::string check_solid(const TriangleMesh &mesh, const std::string &label)
 {
@@ -172,7 +312,10 @@ std::string check_solid(const TriangleMesh &mesh, const std::string &label)
 
 Result boolean(BooleanOp op, const TriangleMesh &base, const std::vector<TriangleMesh> &tools)
 {
-    return boolean_impl(op, base, tools, false);
+    Result r = boolean_impl(op, base, tools, false);
+    if (r.ok)
+        r.measurement = measure(r.mesh);
+    return r;
 }
 
 Result boolean_volumes(ModelObject &object, BooleanOp op, const std::vector<size_t> &volume_idxs)
@@ -198,8 +341,19 @@ Result boolean_volumes(ModelObject &object, BooleanOp op, const std::vector<size
         return result;
 
     ModelVolume *base = object.volumes[volume_idxs.front()];
+    History history = Before(*base).in_object_coords();
+    for (size_t i = 1; i < volume_idxs.size(); ++ i) {
+        HistoryStep step;
+        step.op   = op;
+        step.name = object.volumes[volume_idxs[i]]->name;
+        step.mesh = tools[i - 1];
+        history.steps.emplace_back(std::move(step));
+    }
+
     replace_volume_mesh(*base, TriangleMesh(result.mesh));
+    store_history(*base, std::move(history));
     delete_volumes(object, std::vector<size_t>(volume_idxs.begin() + 1, volume_idxs.end()));
+    result.measurement = measure(object);
     return result;
 }
 
@@ -209,9 +363,13 @@ Result boolean_objects(Model &model, BooleanOp op, const std::vector<size_t> &ob
         return Result::failure("Select at least two objects.");
     if (std::set<size_t>(obj_idxs.begin(), obj_idxs.end()).size() != obj_idxs.size())
         return Result::failure("The same object was selected twice.");
-    for (size_t idx : obj_idxs)
+    for (size_t idx : obj_idxs) {
         if (idx >= model.objects.size() || model.objects[idx]->instances.empty())
             return Result::failure("A selected object does not exist.");
+        if (model.objects[idx]->instances.size() > 1)
+            return Result::failure("The object " + quote_name(model.objects[idx]->name) + " has several instances. "
+                                   "Make them separate objects first.");
+    }
 
     std::vector<TriangleMesh> solids;
     for (size_t idx : obj_idxs) {
@@ -236,27 +394,45 @@ Result boolean_objects(Model &model, BooleanOp op, const std::vector<size_t> &ob
         }
 
     ModelObject *obj = model.add_object(base_obj);
-    while (obj->instances.size() > 1)
-        obj->delete_instance(obj->instances.size() - 1);
     for (ModelVolume *v : obj->volumes)
         delete v;
     obj->volumes.clear();
     obj->layer_config_ranges.clear();
 
-    TriangleMesh local = result.mesh;
-    local.transform(base_obj.instances.front()->get_matrix().inverse(), true);
-    ModelVolume *nv = obj->add_volume(std::move(local), ModelVolumeType::MODEL_PART);
+    const Transform3d base_inst = base_obj.instances.front()->get_matrix();
+    ModelVolume *nv = obj->add_volume(transformed(result.mesh, base_inst.inverse()), ModelVolumeType::MODEL_PART);
     if (tpl != nullptr) {
         nv->name = tpl->name;
         nv->config.assign_config(tpl->config);
     }
     obj->input_file.clear();
-    obj->center_around_origin();
-    obj->translate_instances(-obj->origin_translation);
+
+    // Center the object around its origin without moving it on the bed. The shift is in object coordinates,
+    // so the instance offset changes by the linear part of the instance transformation applied to it.
     obj->origin_translation = Vec3d::Zero();
+    const Vec3d shift = -obj->raw_mesh_bounding_box().center();
+    obj->translate(shift);
+    ModelInstance *inst = obj->instances.front();
+    inst->set_offset(inst->get_offset() - inst->get_matrix().linear() * shift);
     obj->invalidate_bounding_box();
 
-    result.object = obj;
+    // The history is kept in the coordinates of the new object, which are the bed coordinates mapped
+    // through the inverse of its instance transformation.
+    const Transform3d to_object = inst->get_matrix().inverse();
+    History history;
+    history.base_name = base_obj.name;
+    history.base      = transformed(base, to_object);
+    for (size_t i = 1; i < obj_idxs.size(); ++ i) {
+        HistoryStep step;
+        step.op   = op;
+        step.name = model.objects[obj_idxs[i]]->name;
+        step.mesh = transformed(solids[i - 1], to_object);
+        history.steps.emplace_back(std::move(step));
+    }
+    store_history(*nv, std::move(history));
+
+    result.object      = obj;
+    result.measurement = measure(*obj);
     return result;
 }
 
@@ -283,21 +459,32 @@ Result apply_negative_volumes(ModelObject &object)
         neg_boxes.emplace_back(neg_meshes.back().bounding_box());
     }
 
-    struct Change { size_t idx; bool vanished; TriangleMesh mesh; };
+    struct Change { size_t idx; bool vanished; TriangleMesh mesh; History history; };
     std::vector<Change> changes;
     for (size_t idx : parts) {
         TriangleMesh part = volume_mesh_in_object(*object.volumes[idx]);
         const BoundingBoxf3 box = part.bounding_box();
         std::vector<TriangleMesh> tools;
+        std::vector<std::string> tool_names;
         for (size_t i = 0; i < neg_meshes.size(); ++ i)
-            if (box.intersects(neg_boxes[i]))
+            if (box.intersects(neg_boxes[i])) {
                 tools.push_back(neg_meshes[i]);
+                tool_names.push_back(object.volumes[negatives[i]]->name);
+            }
         if (tools.empty())
             continue;
         Result r = boolean_impl(BooleanOp::Subtract, part, tools, true);
         if (! r.ok)
             return Result::failure("Part " + quote_name(object.volumes[idx]->name) + ": " + r.error);
-        changes.push_back({ idx, r.mesh.its.indices.empty(), std::move(r.mesh) });
+        History history = Before(*object.volumes[idx]).in_object_coords();
+        for (size_t i = 0; i < tools.size(); ++ i) {
+            HistoryStep step;
+            step.op   = BooleanOp::Subtract;
+            step.name = tool_names[i];
+            step.mesh = tools[i];
+            history.steps.emplace_back(std::move(step));
+        }
+        changes.push_back({ idx, r.mesh.its.indices.empty(), std::move(r.mesh), std::move(history) });
     }
 
     const size_t vanished = std::count_if(changes.begin(), changes.end(), [](const Change &c) { return c.vanished; });
@@ -308,13 +495,16 @@ Result apply_negative_volumes(ModelObject &object)
     for (Change &c : changes) {
         if (c.vanished)
             to_delete.push_back(c.idx);
-        else
+        else {
             replace_volume_mesh(*object.volumes[c.idx], std::move(c.mesh));
+            store_history(*object.volumes[c.idx], std::move(c.history));
+        }
     }
     delete_volumes(object, to_delete);
 
     Result out;
     out.ok = true;
+    out.measurement = measure(object);
     return out;
 }
 
@@ -336,34 +526,71 @@ Result make_channel_tool(const std::vector<Vec3d> &path, const ChannelParams &pa
     pts.front() -= (path[1] - path[0]).normalized() * params.inlet_extension;
     pts.back()  += (path.back() - path[path.size() - 2]).normalized() * params.outlet_extension;
 
-    // The polygon has the area of the circle, so the straight channel volume is exactly pi r^2 L.
+    const size_t m = pts.size() - 1; // number of segments
+    std::vector<Vec3d> dirs(m);
+    for (size_t i = 0; i < m; ++ i)
+        dirs[i] = (pts[i + 1] - pts[i]).normalized();
+    // Bends sharper than 150 degrees would need mitres several diameters long.
+    for (size_t i = 0; i + 1 < m; ++ i)
+        if (dirs[i].dot(dirs[i + 1]) < std::cos(M_PI * 150. / 180.))
+            return Result::failure("The channel turns back on itself too sharply at point " + std::to_string(i + 2) +
+                                   ". Use a gentler bend (less than 150 degrees).");
+
+    // The tube is one swept surface: a ring of n points at every path point, lying in the plane that bisects
+    // the two neighbouring segments (perpendicular to the segment at the ends). Each ring is the previous ring
+    // moved along the segment onto the next plane, so neighbouring segments share their ring exactly, the
+    // surface is watertight without any boolean, and the volume is exactly the circle area times the length of
+    // the path, bends included. The polygon has the area of the circle.
     const int    n      = params.sides;
     const double r      = 0.5 * params.diameter;
     const double r_poly = r * std::sqrt(2. * M_PI / (double(n) * std::sin(2. * M_PI / double(n))));
 
-    TriangleMesh tool;
-    try {
-        for (size_t i = 0; i + 1 < pts.size(); ++ i) {
-            indexed_triangle_set prism;
-            add_prism(prism, pts[i], pts[i + 1], r_poly, n);
-            if (i == 0)
-                tool = TriangleMesh(std::move(prism));
-            else
-                MeshBoolean::cgal::plus(tool, TriangleMesh(std::move(prism)));
+    const Vec3d helper = std::abs(dirs[0].x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY();
+    const Vec3d u = dirs[0].cross(helper).normalized();
+    const Vec3d v = dirs[0].cross(u);
+
+    std::vector<std::vector<Vec3d>> rings(m + 1, std::vector<Vec3d>(size_t(n)));
+    for (int j = 0; j < n; ++ j) {
+        const double t = 2. * M_PI * double(j) / double(n);
+        rings[0][size_t(j)] = pts[0] + r_poly * (std::cos(t) * u + std::sin(t) * v);
+    }
+    for (size_t k = 1; k <= m; ++ k) {
+        const Vec3d plane_normal = k == m ? Vec3d(dirs[m - 1]) : Vec3d((dirs[k - 1] + dirs[k]).normalized());
+        for (int j = 0; j < n; ++ j) {
+            const Vec3d &from = rings[k - 1][size_t(j)];
+            const double dist = plane_normal.dot(pts[k] - from) / plane_normal.dot(dirs[k - 1]);
+            rings[k][size_t(j)] = from + dist * dirs[k - 1];
         }
-        // Spheres round the bends.
-        for (size_t i = 1; i + 1 < pts.size(); ++ i) {
-            TriangleMesh ball(its_make_sphere(r, 2. * M_PI / double(n)));
-            ball.translate(pts[i].cast<float>());
-            MeshBoolean::cgal::plus(tool, ball);
+    }
+
+    indexed_triangle_set its;
+    its.vertices.reserve((m + 1) * size_t(n) + 2);
+    for (const std::vector<Vec3d> &ring : rings)
+        for (const Vec3d &p : ring)
+            its.vertices.emplace_back(p.cast<float>());
+    const int first_center = int(its.vertices.size());
+    its.vertices.emplace_back(pts.front().cast<float>());
+    its.vertices.emplace_back(pts.back().cast<float>());
+    for (size_t k = 0; k < m; ++ k)
+        for (int j = 0; j < n; ++ j) {
+            const int jn = (j + 1) % n;
+            const int a_j = int(k) * n + j, a_n = int(k) * n + jn, b_j = int(k + 1) * n + j, b_n = int(k + 1) * n + jn;
+            its.indices.emplace_back(a_j, a_n, b_n);
+            its.indices.emplace_back(a_j, b_n, b_j);
         }
-    } catch (...) {
-        return Result::failure("The channel could not be built. Check that its points do not fold back on themselves.");
+    for (int j = 0; j < n; ++ j) {
+        const int jn = (j + 1) % n;
+        its.indices.emplace_back(first_center, jn, j);
+        its.indices.emplace_back(first_center + 1, int(m) * n + j, int(m) * n + jn);
     }
 
     Result out;
+    out.mesh = TriangleMesh(std::move(its));
+    if (! check_solid(out.mesh, "The channel").empty())
+        return Result::failure("The channel path bends too sharply or its segments are too short for this diameter. "
+                               "Use longer segments or a smaller diameter.");
     out.ok = true;
-    out.mesh = std::move(tool);
+    out.measurement = measure(out.mesh);
     return out;
 }
 
@@ -372,13 +599,21 @@ Result subtract_channel(const TriangleMesh &solid, const std::vector<Vec3d> &pat
     Result tool = make_channel_tool(path, params);
     if (! tool.ok)
         return tool;
-    return boolean_impl(BooleanOp::Subtract, solid, { tool.mesh }, false);
+    Result r = boolean_impl(BooleanOp::Subtract, solid, { tool.mesh }, false);
+    if (r.ok)
+        r.measurement = measure(r.mesh);
+    return r;
 }
 
 Result subtract_channel(ModelObject &object, size_t instance_idx, const std::vector<Vec3d> &path, const ChannelParams &params)
 {
     if (instance_idx >= object.instances.size())
         return Result::failure("The object has no such instance.");
+    // The parts are shared by all instances, so a channel placed through one instance would show up in the
+    // wrong place on the others.
+    if (object.instances.size() > 1)
+        return Result::failure("This object has several instances, which share one shape. Make them separate "
+                               "objects before cutting a channel.");
 
     // The tube is built and cut in bed coordinates, so its diameter stays round and exact even when the
     // instance is scaled or rotated. The cut parts are mapped back to object coordinates afterwards.
@@ -390,22 +625,30 @@ Result subtract_channel(ModelObject &object, size_t instance_idx, const std::vec
         return tool;
     const BoundingBoxf3 tool_box = tool.mesh.bounding_box();
 
-    struct Change { size_t idx; bool vanished; TriangleMesh mesh; };
+    char tool_label[64];
+    std::snprintf(tool_label, sizeof(tool_label), "Channel %.3g mm", params.diameter);
+
+    struct Change { size_t idx; bool vanished; TriangleMesh mesh; History history; };
     std::vector<Change> changes;
     bool any_part = false;
     for (size_t i = 0; i < object.volumes.size(); ++ i) {
         if (! object.volumes[i]->is_model_part())
             continue;
         any_part = true;
-        TriangleMesh part = object.volumes[i]->mesh();
-        part.transform(instance_trafo * object.volumes[i]->get_matrix(), true);
+        TriangleMesh part = transformed(object.volumes[i]->mesh(), instance_trafo * object.volumes[i]->get_matrix());
         if (! part.bounding_box().intersects(tool_box))
             continue;
         Result r = boolean_impl(BooleanOp::Subtract, part, { tool.mesh }, true);
         if (! r.ok)
             return Result::failure("Part " + quote_name(object.volumes[i]->name) + ": " + r.error);
         r.mesh.transform(to_object, true);
-        changes.push_back({ i, r.mesh.its.indices.empty(), std::move(r.mesh) });
+        History history = Before(*object.volumes[i]).in_object_coords();
+        HistoryStep step;
+        step.op   = BooleanOp::Subtract;
+        step.name = tool_label;
+        step.mesh = transformed(tool.mesh, to_object);
+        history.steps.emplace_back(std::move(step));
+        changes.push_back({ i, r.mesh.its.indices.empty(), std::move(r.mesh), std::move(history) });
     }
     if (! any_part)
         return Result::failure("The object has no solid parts.");
@@ -422,14 +665,157 @@ Result subtract_channel(ModelObject &object, size_t instance_idx, const std::vec
     for (Change &c : changes) {
         if (c.vanished)
             to_delete.push_back(c.idx);
-        else
+        else {
             replace_volume_mesh(*object.volumes[c.idx], std::move(c.mesh));
+            store_history(*object.volumes[c.idx], std::move(c.history));
+        }
     }
     delete_volumes(object, to_delete);
 
     Result out;
     out.ok = true;
+    out.measurement = measure(object, instance_idx);
     return out;
+}
+
+std::vector<std::string> History::describe() const
+{
+    std::vector<std::string> lines;
+    lines.emplace_back("Base: " + base_name);
+    for (const HistoryStep &s : steps)
+        lines.emplace_back(std::string(op_name(s.op)) + ": " + s.name + (s.enabled ? "" : " (off)"));
+    return lines;
+}
+
+std::string history_to_text(const History &history)
+{
+    std::string out = "csg1;" + encode_name(history.base_name) + ";";
+    mesh_to_text(out, history.base);
+    out += ";" + std::to_string(history.steps.size());
+    for (const HistoryStep &s : history.steps) {
+        out += ";" + std::to_string(int(s.op)) + ";" + (s.enabled ? "1" : "0") + ";" + encode_name(s.name) + ";";
+        mesh_to_text(out, s.mesh);
+    }
+    return out;
+}
+
+bool history_from_text(const std::string &text, History &history)
+{
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (true) {
+        const size_t end = text.find(';', start);
+        fields.emplace_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    if (fields.size() < 4 || fields[0] != "csg1")
+        return false;
+    History h;
+    h.base_name = decode_name(fields[1]);
+    if (! mesh_from_text(fields[2], h.base))
+        return false;
+    const long count = std::strtol(fields[3].c_str(), nullptr, 10);
+    if (count < 0 || fields.size() != size_t(4 + 4 * count))
+        return false;
+    for (long i = 0; i < count; ++ i) {
+        const size_t f = size_t(4 + 4 * i);
+        HistoryStep s;
+        const long op = std::strtol(fields[f].c_str(), nullptr, 10);
+        if (op < 0 || op > 2)
+            return false;
+        s.op      = BooleanOp(op);
+        s.enabled = fields[f + 1] == "1";
+        s.name    = decode_name(fields[f + 2]);
+        if (! mesh_from_text(fields[f + 3], s.mesh))
+            return false;
+        h.steps.emplace_back(std::move(s));
+    }
+    history = std::move(h);
+    return true;
+}
+
+Result regenerate(const History &history)
+{
+    if (history.empty())
+        return Result::failure("There is no boolean history.");
+    TriangleMesh acc = history.base;
+    if (std::string err = check_solid(acc, "The base shape " + quote_name(history.base_name)); ! err.empty())
+        return Result::failure(err);
+    size_t number = 0;
+    for (const HistoryStep &s : history.steps) {
+        ++ number;
+        if (! s.enabled)
+            continue;
+        Result r = boolean_impl(s.op, acc, { s.mesh }, false);
+        if (! r.ok)
+            return Result::failure("Step " + std::to_string(number) + " (" + op_name(s.op) + " " + quote_name(s.name) + "): " + r.error);
+        acc = std::move(r.mesh);
+    }
+    Result out;
+    out.ok = true;
+    out.mesh = std::move(acc);
+    out.measurement = measure(out.mesh);
+    return out;
+}
+
+Result regenerate_volume(ModelObject &object, size_t volume_idx, const History &history)
+{
+    if (volume_idx >= object.volumes.size() || ! object.volumes[volume_idx]->is_model_part())
+        return Result::failure("The selected part does not exist or is not a solid part.");
+    Result r = regenerate(history);
+    if (! r.ok)
+        return r;
+
+    ModelVolume &v = *object.volumes[volume_idx];
+    v.set_mesh(TriangleMesh(r.mesh));
+    v.calculate_convex_hull();
+    v.supported_facets.reset();
+    v.seam_facets.reset();
+    v.mm_segmentation_facets.reset();
+    v.fuzzy_skin_facets.reset();
+    v.csg_history = history_to_text(history);
+    object.input_file.clear();
+    object.invalidate_bounding_box();
+    r.measurement = measure(object);
+    return r;
+}
+
+bool get_history(const ModelVolume &volume, History &history)
+{
+    return ! volume.csg_history.empty() && history_from_text(volume.csg_history, history);
+}
+
+bool parse_points(const std::string &text, std::vector<Vec3d> &points, std::string &error)
+{
+    points.clear();
+    std::istringstream lines(text);
+    std::string line;
+    int line_no = 0;
+    while (std::getline(lines, line)) {
+        ++ line_no;
+        for (char &c : line)
+            if (c == ',' || c == ';' || c == '\t' || c == '\r')
+                c = ' ';
+        if (line.find_first_not_of(' ') == std::string::npos)
+            continue;
+        std::istringstream fields(line);
+        fields.imbue(std::locale::classic());
+        double x, y, z;
+        std::string rest;
+        if (! (fields >> x >> y >> z) || (fields >> rest)) {
+            error = "Line " + std::to_string(line_no) + " is not three numbers (X Y Z in mm).";
+            points.clear();
+            return false;
+        }
+        points.emplace_back(x, y, z);
+    }
+    if (points.size() < 2) {
+        error = "A channel needs at least two points.";
+        return false;
+    }
+    return true;
 }
 
 } // namespace SolidEdit

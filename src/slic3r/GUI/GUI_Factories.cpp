@@ -1108,7 +1108,7 @@ void MenuFactory::append_menu_item_merge_to_multipart_object(wxMenu* menu)
         [](wxCommandEvent&) { obj_list()->merge(true); }, "", menu,
         []() { return obj_list()->can_merge_to_multipart_object(); }, m_parent);
 }
-void MenuFactory::append_menu_items_solid_editing(wxMenu* menu, bool booleans, bool negative_volumes, bool channel)
+void MenuFactory::append_menu_items_solid_editing(wxMenu* menu, bool booleans, bool negative_volumes, bool channel, bool history)
 {
     menu->AppendSeparator();
     if (booleans) {
@@ -1130,6 +1130,10 @@ void MenuFactory::append_menu_items_solid_editing(wxMenu* menu, bool booleans, b
         append_menu_item(menu, wxID_ANY, _L("Subtract channel") + dots, _L("Cut a round channel of a given diameter (mm) along a path of points"),
             [](wxCommandEvent&) { plater()->subtract_channel(); }, "", menu,
             []() { return plater()->can_subtract_channel(); }, m_parent);
+    if (history)
+        append_menu_item(menu, wxID_ANY, _L("Boolean history") + dots, _L("Show the steps that built this part, switch steps off or change them, and rebuild the part"),
+            [](wxCommandEvent&) { plater()->edit_boolean_history(); }, "", menu,
+            []() { return plater()->can_edit_boolean_history(); }, m_parent);
 }
 
 /*

@@ -168,6 +168,7 @@ static constexpr const char* VOLUME_TYPE_KEY = "volume_type";
 static constexpr const char* MATRIX_KEY      = "matrix";
 static constexpr const char* SOURCE_FILE_KEY              = "source_file";
 static constexpr const char* SOURCE_OBJECT_ID_KEY         = "source_object_id";
+static constexpr const char* CSG_HISTORY_KEY              = "bioslicer_csg_history";
 static constexpr const char* SOURCE_VOLUME_ID_KEY         = "source_volume_id";
 static constexpr const char* SOURCE_OFFSET_X_KEY          = "source_offset_x";
 static constexpr const char* SOURCE_OFFSET_Y_KEY          = "source_offset_y";
@@ -3159,6 +3160,8 @@ namespace Slic3r {
                     volume->set_type(ModelVolume::type_from_string(metadata.value));
                 else if (metadata.key == SOURCE_FILE_KEY)
                     volume->source.input_file = metadata.value;
+                else if (metadata.key == CSG_HISTORY_KEY)
+                    volume->csg_history = metadata.value;
                 else if (metadata.key == SOURCE_OBJECT_ID_KEY)
                     volume->source.object_idx = ::atoi(metadata.value.c_str());
                 else if (metadata.key == SOURCE_VOLUME_ID_KEY)
@@ -4296,6 +4299,8 @@ namespace Slic3r {
                         add_metadata(stream, 3, MetadataType::volume, MODIFIER_KEY, "1");
                     // stores volume's type (overrides the modifier field above)
                     add_metadata(stream, 3, MetadataType::volume, VOLUME_TYPE_KEY, ModelVolume::type_to_string(volume->type()));
+                    if (! volume->csg_history.empty())
+                        add_metadata(stream, 3, MetadataType::volume, CSG_HISTORY_KEY, volume->csg_history);
 
                     // stores volume's local matrix
                     stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MATRIX_KEY << "\" " << VALUE_ATTR << "=\"";

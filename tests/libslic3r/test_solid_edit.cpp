@@ -2,9 +2,12 @@
 #include <catch2/catch_approx.hpp>
 #include <test_utils.hpp>
 
+#include <libslic3r/Format/3mf.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/SolidEdit.hpp>
 #include <libslic3r/TriangleMesh.hpp>
+
+#include <boost/filesystem/operations.hpp>
 
 #include <cmath>
 #include <set>
@@ -456,20 +459,59 @@ TEST_CASE("Straight channel volume", "[SolidEdit]")
     }
 }
 
-TEST_CASE("Bent channel volume is bounded", "[SolidEdit]")
+TEST_CASE("Bent channel volume is exact", "[SolidEdit]")
 {
     ChannelParams p;
     p.diameter = 2.;
-    const double r = 1.;
     TriangleMesh box = cube(20, 20, 20);
-    Result res = subtract_channel(box, { Vec3d(5, 5, 10), Vec3d(15, 5, 10), Vec3d(15, 15, 10) }, p);
-    REQUIRE(res.ok);
-    CHECK(is_watertight(res.mesh));
-    const double removed = 8000. - volume_of(res.mesh);
-    // Two legs of 10 mm overlap in a quarter of a Steinmetz solid (4/3 r^3) at the corner, and the sphere
-    // adds at most its own volume.
-    CHECK(removed >= circle_area(2.) * 20. - 4. / 3. * r * r * r - 1e-3);
-    CHECK(removed <= circle_area(2.) * 20. + 4. / 3. * PI * r * r * r);
+
+    SECTION("right angle bend: tool volume is pi r^2 times the path length")
+    {
+        const std::vector<Vec3d> path { Vec3d(5, 5, 10), Vec3d(15, 5, 10), Vec3d(15, 15, 10) };
+        Result tool = make_channel_tool(path, p);
+        REQUIRE(tool.ok);
+        CHECK(is_watertight(tool.mesh));
+        CHECK(volume_of(tool.mesh) == Approx(circle_area(2.) * 20.).epsilon(rel_tol));
+        INFO(tool.error);
+        Result res = subtract_channel(box, path, p);
+        INFO(res.error);
+        REQUIRE(res.ok);
+        CHECK(is_watertight(res.mesh));
+        CHECK(volume_of(res.mesh) == Approx(8000. - circle_area(2.) * 20.).epsilon(rel_tol));
+        CHECK(its_split(res.mesh.its).size() == 2);
+    }
+    SECTION("three dimensional path with several bends")
+    {
+        const std::vector<Vec3d> path { Vec3d(4, 4, 4), Vec3d(12, 5, 6), Vec3d(15, 12, 9), Vec3d(8, 15, 15), Vec3d(5, 8, 16) };
+        double length = 0.;
+        for (size_t i = 1; i < path.size(); ++ i)
+            length += (path[i] - path[i - 1]).norm();
+        Result res = subtract_channel(box, path, p);
+        INFO(res.error);
+        REQUIRE(res.ok);
+        CHECK(is_watertight(res.mesh));
+        CHECK(volume_of(res.mesh) == Approx(8000. - circle_area(2.) * length).epsilon(rel_tol));
+    }
+    SECTION("collinear middle point does not change the volume")
+    {
+        Result res = subtract_channel(box, { Vec3d(5, 10, 10), Vec3d(10, 10, 10), Vec3d(15, 10, 10) }, p);
+        REQUIRE(res.ok);
+        CHECK(volume_of(res.mesh) == Approx(8000. - circle_area(2.) * 10.).epsilon(rel_tol));
+    }
+    SECTION("bends that fold back are refused with a plain message")
+    {
+        Result res = make_channel_tool({ Vec3d(0, 0, 0), Vec3d(10, 0, 0), Vec3d(0, 1, 0) }, p);
+        CHECK(! res.ok);
+        CHECK(res.error.find("too sharply") != std::string::npos);
+    }
+    SECTION("segments much shorter than the diameter are refused instead of producing a broken solid")
+    {
+        ChannelParams fat;
+        fat.diameter = 10.;
+        Result res = make_channel_tool({ Vec3d(0, 0, 0), Vec3d(1, 0, 0), Vec3d(1, 1, 0), Vec3d(2, 1, 0) }, fat);
+        CHECK(! res.ok);
+        CHECK(! res.error.empty());
+    }
 }
 
 TEST_CASE("Channel in an object uses bed coordinates and keeps materials", "[SolidEdit]")
@@ -685,4 +727,268 @@ TEST_CASE("Non-manifold and inverted input is rejected with a plain message", "[
         CHECK(! r.ok);
         CHECK(r.error.find("Shape 3") != std::string::npos);
     }
+}
+
+TEST_CASE("Whole object boolean keeps the world position with rotated and scaled instances", "[SolidEdit]")
+{
+    // Regression: the recentering shift is in object coordinates and the base object may carry an
+    // origin translation from loading.
+    Model model;
+    ModelObject *a = make_object(model, cube(10, 10, 10), Vec3d(50, 20, 0));
+    a->instances.front()->set_rotation(Z, PI / 2.);
+    a->instances.front()->set_scaling_factor(Vec3d(2., 1., 1.));
+    a->origin_translation = Vec3d(3., 4., 5.);
+
+    const BoundingBoxf3 a_world = a->volumes.front()->mesh().transformed_bounding_box(
+        a->instances.front()->get_matrix() * a->volumes.front()->get_matrix());
+    // A big box that covers the part of A with x above its center.
+    const double cx = a_world.center().x();
+    ModelObject *b = make_object(model, cube(100, 100, 100, Vec3d(0, 0, 0)));
+    b->instances.front()->set_offset(Vec3d(cx, -50, -50) - Vec3d(50, 50, 50) + Vec3d(50, 50, 50));
+    const BoundingBoxf3 b_world = b->volumes.front()->mesh().transformed_bounding_box(
+        b->instances.front()->get_matrix() * b->volumes.front()->get_matrix());
+    REQUIRE(b_world.min.x() == Approx(cx).margin(1e-4));
+
+    Result r = boolean_objects(model, BooleanOp::Intersect, { 0, 1 });
+    REQUIRE(r.ok);
+    const ModelObject &res = *r.object;
+    const BoundingBoxf3 bb = res.volumes.front()->mesh().transformed_bounding_box(
+        res.instances.front()->get_matrix() * res.volumes.front()->get_matrix());
+    CHECK(bb.min.x() == Approx(cx).margin(1e-3));
+    CHECK(bb.max.x() == Approx(a_world.max.x()).margin(1e-3));
+    CHECK(bb.min.y() == Approx(a_world.min.y()).margin(1e-3));
+    CHECK(bb.max.y() == Approx(a_world.max.y()).margin(1e-3));
+    CHECK(bb.min.z() == Approx(a_world.min.z()).margin(1e-3));
+    CHECK(bb.max.z() == Approx(a_world.max.z()).margin(1e-3));
+    CHECK(res.origin_translation.norm() == Approx(0.).margin(1e-9));
+    // Half of the stretched box: 2000 / 2 mm3.
+    CHECK(r.measurement.volume_mm3 == Approx(1000.).epsilon(rel_tol));
+}
+
+TEST_CASE("Objects with several instances are refused", "[SolidEdit]")
+{
+    Model model;
+    ModelObject *a = make_object(model, cube(10, 10, 10));
+    a->add_instance()->set_offset(Vec3d(100, 0, 0));
+    make_object(model, cube(10, 10, 10), Vec3d(5, 0, 0));
+    const size_t objects = model.objects.size();
+
+    Result r = boolean_objects(model, BooleanOp::Union, { 0, 1 });
+    CHECK(! r.ok);
+    CHECK(r.error.find("several instances") != std::string::npos);
+    CHECK(model.objects.size() == objects);
+
+    ChannelParams p;
+    p.diameter = 1.;
+    Result c = subtract_channel(*a, 0, { Vec3d(1, 5, 5), Vec3d(9, 5, 5) }, p);
+    CHECK(! c.ok);
+    CHECK(c.error.find("several instances") != std::string::npos);
+    CHECK(part_volume(*a->volumes.front()) == Approx(1000.).epsilon(rel_tol));
+}
+
+TEST_CASE("Point list parsing is strict", "[SolidEdit]")
+{
+    std::vector<Vec3d> pts;
+    std::string err;
+    CHECK(parse_points("1 2 3\n4,5,6\n\n  7;8;9  \n", pts, err));
+    REQUIRE(pts.size() == 3);
+    CHECK(pts[1].isApprox(Vec3d(4, 5, 6)));
+    CHECK(pts[2].isApprox(Vec3d(7, 8, 9)));
+    // Regression: a mistyped line must be reported, not skipped as if it were blank.
+    CHECK(! parse_points("1 2 3\nabc 1 2\n4 5 6", pts, err));
+    CHECK(err.find("Line 2") != std::string::npos);
+    CHECK(! parse_points("1 2 3\n1O 5 5\n4 5 6", pts, err));
+    CHECK(err.find("Line 2") != std::string::npos);
+    CHECK(! parse_points("1 2 3\n4 5\n", pts, err));
+    CHECK(! parse_points("1 2 3 4\n5 6 7", pts, err));
+    CHECK(! parse_points("1 2 3", pts, err));
+    CHECK(err.find("at least two") != std::string::npos);
+}
+
+TEST_CASE("Subtracting several tools stops when nothing is left", "[SolidEdit]")
+{
+    // Regression: the second tool was applied to an empty mesh and the failure was reported as a touching problem.
+    Result r = boolean(BooleanOp::Subtract, cube(10, 10, 10), { cube(20, 20, 20, Vec3d(-5, -5, -5)), cube(2, 2, 2) });
+    CHECK(! r.ok);
+    CHECK(r.error.find("result would be empty") != std::string::npos);
+}
+
+TEST_CASE("Measurement reports volume, millilitres and bounding box", "[SolidEdit]")
+{
+    // 20 x 20 x 10 mm = 4000 mm3 = 4 ml.
+    Measurement m = measure(cube(20, 20, 10), Transform3d(Eigen::Translation3d(100., 50., 5.)));
+    REQUIRE(m.valid);
+    CHECK(m.volume_mm3 == Approx(4000.).epsilon(1e-6));
+    CHECK(m.volume_ml == Approx(4.).epsilon(1e-6));
+    CHECK(m.bbox.min.isApprox(Vec3d(100, 50, 5), 1e-5));
+    CHECK(m.bbox.max.isApprox(Vec3d(120, 70, 15), 1e-5));
+    CHECK(m.text() == "Volume 4000.00 mm3 (4.000 ml). Size 20.00 x 20.00 x 10.00 mm, from (100.00, 50.00, 5.00) to (120.00, 70.00, 15.00) mm.");
+    CHECK(! measure(TriangleMesh()).valid);
+
+    SECTION("every operation on a model reports it in bed coordinates")
+    {
+        Model model;
+        ModelObject *a = make_object(model, cube(20, 20, 10), Vec3d(100, 50, 5));
+        make_object(model, cube(10, 20, 10), Vec3d(110, 50, 5));
+        Result r = boolean_objects(model, BooleanOp::Subtract, { 0, 1 });
+        REQUIRE(r.ok);
+        CHECK(r.measurement.volume_mm3 == Approx(2000.).epsilon(rel_tol));
+        CHECK(r.measurement.volume_ml == Approx(2.).epsilon(rel_tol));
+        CHECK(r.measurement.bbox.min.x() == Approx(100.).margin(1e-3));
+        CHECK(r.measurement.bbox.max.x() == Approx(110.).margin(1e-3));
+        (void)a;
+
+        Model m2;
+        ModelObject *o = make_object(m2, cube(20, 20, 20), Vec3d(90, 40, 0));
+        ChannelParams p;
+        p.diameter = 2.;
+        Result c = subtract_channel(*o, 0, { Vec3d(95, 50, 10), Vec3d(105, 50, 10) }, p);
+        REQUIRE(c.ok);
+        CHECK(c.measurement.volume_mm3 == Approx(8000. - circle_area(2.) * 10.).epsilon(rel_tol));
+        CHECK(c.measurement.bbox.min.x() == Approx(90.).margin(1e-3));
+        CHECK(c.measurement.bbox.max.z() == Approx(20.).margin(1e-3));
+    }
+}
+
+TEST_CASE("Boolean history is recorded, regenerated and edited", "[SolidEdit]")
+{
+    Model model;
+    ModelObject *obj = make_object(model, cube(10, 10, 10));
+    obj->volumes.front()->name = "block";
+    ModelVolume *cut = obj->add_volume(cube(10, 10, 10, Vec3d(5, 0, 0)));
+    cut->name = "cut";
+    ModelVolume *add = obj->add_volume(cube(10, 10, 10, Vec3d(0, 0, 10)));
+    add->name = "lid";
+    REQUIRE(boolean_volumes(*obj, BooleanOp::Subtract, { 0, 1 }).ok);
+    REQUIRE(obj->volumes.size() == 2);
+    // The lid was selected after the first operation; continue the chain on the result.
+    REQUIRE(boolean_volumes(*obj, BooleanOp::Union, { 0, 1 }).ok);
+    REQUIRE(obj->volumes.size() == 1);
+    CHECK(part_volume(*obj->volumes.front()) == Approx(500. + 1000.).epsilon(rel_tol));
+
+    History h;
+    REQUIRE(get_history(*obj->volumes.front(), h));
+    REQUIRE(h.describe().size() == 3);
+    CHECK(h.describe()[0] == "Base: block");
+    CHECK(h.describe()[1] == "Subtract: cut");
+    CHECK(h.describe()[2] == "Union: lid");
+
+    SECTION("regenerating reproduces the part")
+    {
+        Result r = regenerate_volume(*obj, 0, h);
+        REQUIRE(r.ok);
+        CHECK(part_volume(*obj->volumes.front()) == Approx(1500.).epsilon(rel_tol));
+        CHECK(r.measurement.volume_mm3 == Approx(1500.).epsilon(rel_tol));
+    }
+    SECTION("switching a step off and changing an operation re-edits the chain")
+    {
+        h.steps[0].enabled = false;
+        Result off = regenerate_volume(*obj, 0, h);
+        REQUIRE(off.ok);
+        CHECK(h.describe()[1] == "Subtract: cut (off)");
+        // Block plus lid, without the cut.
+        CHECK(part_volume(*obj->volumes.front()) == Approx(2000.).epsilon(rel_tol));
+
+        h.steps[0].enabled = true;
+        h.steps[0].op = BooleanOp::Intersect;
+        h.steps[1].enabled = false;
+        Result isect = regenerate_volume(*obj, 0, h);
+        REQUIRE(isect.ok);
+        CHECK(part_volume(*obj->volumes.front()) == Approx(500.).epsilon(rel_tol));
+        History stored;
+        REQUIRE(get_history(*obj->volumes.front(), stored));
+        CHECK(stored.describe()[1] == "Intersect: cut");
+        CHECK(stored.describe()[2] == "Union: lid (off)");
+    }
+    SECTION("a failing step leaves the part unchanged and says which step failed")
+    {
+        h.steps[0].op = BooleanOp::Intersect;
+        h.steps[1].op = BooleanOp::Intersect; // the lid does not overlap the intersection
+        const double before = part_volume(*obj->volumes.front());
+        Result r = regenerate_volume(*obj, 0, h);
+        CHECK(! r.ok);
+        CHECK(r.error.find("Step 2") != std::string::npos);
+        CHECK(part_volume(*obj->volumes.front()) == Approx(before).epsilon(1e-9));
+    }
+    SECTION("moving the part does not break the chain")
+    {
+        obj->volumes.front()->set_offset(obj->volumes.front()->get_offset() + Vec3d(100., 0., 0.));
+        const double min_x_before = part_bbox(*obj->volumes.front()).min.x();
+        h.steps[1].enabled = false;
+        REQUIRE(regenerate_volume(*obj, 0, h).ok);
+        CHECK(part_volume(*obj->volumes.front()) == Approx(500.).epsilon(rel_tol));
+        CHECK(part_bbox(*obj->volumes.front()).min.x() == Approx(min_x_before).margin(1e-3));
+    }
+    SECTION("text form round trips")
+    {
+        History back;
+        REQUIRE(history_from_text(history_to_text(h), back));
+        CHECK(back.describe() == h.describe());
+        REQUIRE(back.steps.size() == h.steps.size());
+        CHECK(volume_of(back.steps[0].mesh) == Approx(volume_of(h.steps[0].mesh)).epsilon(1e-6));
+        CHECK(! history_from_text("garbage", back));
+        CHECK(! history_from_text("csg1;a;1 0 0 0;5", back));
+    }
+    SECTION("names with unusual characters survive")
+    {
+        h.steps[0].name = "tool; \"A\" <1> & 100%";
+        History back;
+        REQUIRE(history_from_text(history_to_text(h), back));
+        CHECK(back.steps[0].name == h.steps[0].name);
+        CHECK(history_to_text(h).find_first_of("<>&\"'\n") == std::string::npos);
+    }
+    SECTION("history is saved in the 3mf file and survives copying the object")
+    {
+        const std::string file = std::string(TEST_DATA_DIR) + "/test_3mf/solid_edit_history.3mf";
+        REQUIRE(store_3mf(file.c_str(), &model, nullptr, false));
+        Model loaded;
+        DynamicPrintConfig config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+        boost::optional<Semver> version;
+        const bool ok = load_3mf(file.c_str(), config, ctxt, &loaded, false, version);
+        boost::filesystem::remove(file);
+        REQUIRE(ok);
+        REQUIRE(loaded.objects.size() == 1);
+        History back;
+        REQUIRE(get_history(*loaded.objects.front()->volumes.front(), back));
+        CHECK(back.describe() == h.describe());
+
+        // Regenerating after loading gives the same dimensions.
+        REQUIRE(regenerate_volume(*loaded.objects.front(), 0, back).ok);
+        CHECK(part_volume(*loaded.objects.front()->volumes.front()) == Approx(1500.).epsilon(rel_tol));
+
+        Model copy = model;
+        CHECK(copy.objects.front()->volumes.front()->csg_history == obj->volumes.front()->csg_history);
+    }
+}
+
+TEST_CASE("History continues through negative volumes and channels", "[SolidEdit]")
+{
+    Model model;
+    ModelObject *obj = make_object(model, cube(20, 20, 10));
+    obj->volumes.front()->name = "slab";
+    TriangleMesh cyl = make_cylinder(3., 14., 2. * PI / 64.);
+    cyl.translate(10.f, 10.f, -2.f);
+    obj->add_volume(std::move(cyl), ModelVolumeType::NEGATIVE_VOLUME)->name = "hole";
+    REQUIRE(apply_negative_volumes(*obj).ok);
+    ChannelParams p;
+    p.diameter = 1.;
+    p.inlet_extension = 20.;
+    // Object space is 0..20 / 0..20 / 0..10 and the instance is at the origin.
+    REQUIRE(subtract_channel(*obj, 0, { Vec3d(2, 2, 5), Vec3d(6, 2, 5) }, p).ok);
+
+    History h;
+    REQUIRE(get_history(*obj->volumes.front(), h));
+    REQUIRE(h.describe().size() == 3);
+    CHECK(h.describe()[0] == "Base: slab");
+    CHECK(h.describe()[1] == "Subtract: hole");
+    CHECK(h.describe()[2] == "Subtract: Channel 1 mm");
+
+    const double expected = part_volume(*obj->volumes.front());
+    // Switching off the channel gives the plate with only the hole.
+    h.steps[1].enabled = false;
+    REQUIRE(regenerate_volume(*obj, 0, h).ok);
+    CHECK(part_volume(*obj->volumes.front()) > expected + 1.);
+    const double hole_only = 4000. - cylinder_volume(3., 10., 2. * PI / 64.);
+    CHECK(part_volume(*obj->volumes.front()) == Approx(hole_only).epsilon(rel_tol));
 }

@@ -163,6 +163,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Factories.hpp
     GUI/GUI_ObjectList.cpp
     GUI/GUI_ObjectList.hpp
+    GUI/BooleanHistoryDialog.cpp
+    GUI/BooleanHistoryDialog.hpp
     GUI/ChannelDialog.cpp
     GUI/ChannelDialog.hpp
     GUI/GalleryDialog.cpp

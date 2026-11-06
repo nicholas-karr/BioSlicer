@@ -284,6 +284,7 @@ public:
     void                boolean_operation(SolidEdit::BooleanOp op);
     void                apply_negative_volumes();
     void                subtract_channel();
+    void                edit_boolean_history();
     void                layers_editing();
 
     wxDataViewItem      add_layer_root_item(const wxDataViewItem obj_item);
@@ -304,6 +305,7 @@ public:
     bool                can_boolean_operation() const;
     bool                can_apply_negative_volumes() const;
     bool                can_subtract_channel() const;
+    bool                can_edit_boolean_history() const;
 
     wxPoint             get_mouse_position_in_control() const;
     wxBoxSizer*         get_sizer() {return  m_sizer;}
