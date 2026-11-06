@@ -32,6 +32,12 @@ WallThicknessResult analyze_wall_thickness(const indexed_triangle_set &its, doub
                 igl::Hit    hit;
                 if (!AABBTreeIndirect::intersect_ray_first_hit(its.vertices, its.indices, tree, origin, Vec3d(-n), hit))
                     continue;
+                // The ray must leave the material through the surface it meets. If it enters it instead, the sample
+                // started in empty space, for example where a triangle cuts across a sharp edge, and measures nothing.
+                const Vec3i &h  = its.indices[hit.id];
+                const Vec3d  hn = (its.vertices[h[1]] - its.vertices[h[0]]).cast<double>().cross((its.vertices[h[2]] - its.vertices[h[0]]).cast<double>());
+                if (hn.dot(n) >= 0.)
+                    continue;
                 const double t = double(hit.t) + 1e-4;
                 ++acc.samples;
                 if (t < threshold_mm)

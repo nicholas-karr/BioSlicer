@@ -30,6 +30,7 @@ struct Expect
     double volume_tol = 0.005;                                    // relative
     int    patches    = 1;                                        // connected surface patches
     long   euler      = 2;                                        // Euler characteristic of the whole surface
+    bool   rays       = true;                                     // false when no sample point of the input can see the exact offset
 };
 
 indexed_triangle_set check_offset(const std::string &name, const indexed_triangle_set &input, double d, const Expect &e, double voxel_size = 0.)
@@ -45,7 +46,7 @@ indexed_triangle_set check_offset(const std::string &name, const indexed_triangl
     const test::OffsetMeasurement m = test::measure_offset(input, out, d);
     INFO("rays " << m.rays << ", misses " << m.misses << ", max ray error " << m.max_ray_error << ", max deviation "
                  << m.max_deviation << ", mean deviation " << m.mean_deviation << ", triangles " << out.indices.size());
-    CHECK(m.rays > 0);
+    CHECK((m.rays > 0) == e.rays);
     CHECK(m.misses == 0);
     CHECK(m.max_ray_error <= k_offset_tol);
     CHECK(m.max_deviation <= k_offset_tol);
@@ -229,7 +230,8 @@ TEST_CASE("Offset of convex solids follows the Steiner formula", "[MeshOffset]")
         const indexed_triangle_set cube = its_make_cube(20., 20., 20.);
         check_offset("cube 20", cube, 1., {test::steiner_volume(cube, 1.), 0.002});
         check_offset("cube 20", cube, -1., {18. * 18. * 18., 0.002});
-        check_offset("cube 20", cube, -8., {4. * 4. * 4., 0.01});
+        // Every sample point of the 12 triangles is closer than 8 mm to a second face, so no ray can be measured.
+        check_offset("cube 20", cube, -8., {4. * 4. * 4., 0.01, 1, 2, false});
     }
     SECTION("ellipsoid") {
         const indexed_triangle_set e = make_primitive(PrimitiveType::Ellipsoid, {10., 8., 6., 180., 90.});

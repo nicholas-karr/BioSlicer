@@ -111,7 +111,7 @@ inline double mean_curvature_integral(const indexed_triangle_set &its)
             // positive when the solid is convex along the edge.
             const Vec3d &n_other = it->second;
             const Vec3d  edge    = (its.vertices[b] - its.vertices[a]).cast<double>();
-            const double angle   = std::atan2(n_other.cross(n).dot(edge.normalized()), n_other.dot(n));
+            const double angle   = std::atan2(n.cross(n_other).dot(edge.normalized()), n_other.dot(n));
             m += 0.5 * edge.norm() * angle;
             normal_of_edge.erase(it);
         }

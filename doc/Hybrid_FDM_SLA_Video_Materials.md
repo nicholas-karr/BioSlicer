@@ -777,9 +777,15 @@ Select one object, right-click, **Shell and thickness tools**:
 - **Measure wall thickness**: reports the thinnest wall in mm and its X, Y, Z position on the bed. It casts rays against the
   surface normal from four points on every triangle, so it needs a closed surface.
 
-Each operation is one undo step. Offsets are voxel based; the voxel size is the larger of one eighth of the distance and
-1/500 of the model size, so the surface error is a fraction of a voxel. Tests: a sphere shell stays within 1 % of
-`4/3 pi (R^3 - r^3)` and its measured minimum wall is within 0.1 mm of the requested thickness.
+Each operation is one undo step. An offset starts as a voxel surface: the voxel size is the larger of a quarter of the
+distance and 1/500 of the model size, and is halved, up to three times, where the shape left over is thinner than a voxel.
+Every vertex is then moved onto the exact offset surface (the points exactly the distance away from the model), and edges
+are split where a triangle still cuts across a sharp crease, so that vertices, edge midpoints and triangle centres are
+within 0.2 % of the distance (the splitting stops when the triangle count has grown threefold). An opening is only cut where it reaches the cavity; an opening over a part of the wall
+that stays solid is refused with a message that names it. Tests: a sphere shell stays within 1 % of
+`4/3 pi (R^3 - r^3)` and its measured minimum wall is within 0.1 mm of the requested thickness;
+`tests/libslic3r/test_mesh_offset_robustness.cpp` checks spheres, cubes, cylinders, capsules, a torus, thin plates,
+slots and sharp concave corners against closed form volumes and distances.
 
 ### Dimensions report
 

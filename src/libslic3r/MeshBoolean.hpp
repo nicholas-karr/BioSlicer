@@ -69,6 +69,8 @@ void plus(CGALMesh &A, CGALMesh &B);
 void intersect(CGALMesh &A, CGALMesh &B);
 
 bool does_self_intersect(const TriangleMesh &mesh);
+// Pairs of faces (indices into its.indices) that intersect each other other than at a shared edge or vertex.
+std::vector<std::pair<size_t, size_t>> self_intersecting_faces(const indexed_triangle_set &its);
 bool does_self_intersect(const CGALMesh &mesh);
 
 bool does_bound_a_volume(const CGALMesh &mesh);

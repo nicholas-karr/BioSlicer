@@ -10,9 +10,10 @@
 namespace Slic3r {
 
 // Offset the surface of a closed mesh by distance_mm. Positive grows the solid, negative shrinks it.
-// The result is a new closed mesh. voxel_size_mm of 0 picks a size from the distance and the mesh
-// extent; the surface error is a fraction of the voxel size. An empty mesh is returned when the
-// offset removes the whole solid or the input cannot be voxelised.
+// The result is a new closed mesh. It starts from a voxel surface (voxel_size_mm of 0 picks a size from
+// the distance and the mesh extent, halved where the voxels are too coarse for the shape), whose
+// vertices are then moved onto the exact offset surface. An empty mesh is returned when the offset
+// removes the whole solid or the input cannot be voxelised.
 indexed_triangle_set mesh_offset(const indexed_triangle_set &its, double distance_mm, double voxel_size_mm = 0.);
 
 // Voxel size used by mesh_offset() and make_shell() when none is given.

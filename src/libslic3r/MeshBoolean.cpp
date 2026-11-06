@@ -316,6 +316,21 @@ bool does_self_intersect(const TriangleMesh &mesh)
     return CGALProc::does_self_intersect(cgalm.m);
 }
 
+std::vector<std::pair<size_t, size_t>> self_intersecting_faces(const indexed_triangle_set &its)
+{
+    CGALMesh cgalm;
+    triangle_mesh_to_cgal(its.vertices, its.indices, cgalm.m);
+    std::vector<std::pair<size_t, size_t>> out;
+    // A face CGAL could not add would shift the numbers of the faces after it.
+    if (cgalm.m.number_of_faces() != its.indices.size())
+        return out;
+    std::vector<std::pair<_EpicMesh::Face_index, _EpicMesh::Face_index>> pairs;
+    CGALProc::self_intersections(faces(cgalm.m), cgalm.m, std::back_inserter(pairs));
+    for (const auto &p : pairs)
+        out.emplace_back(size_t(p.first.idx()), size_t(p.second.idx()));
+    return out;
+}
+
 void CGALMeshDeleter::operator()(CGALMesh *ptr) { delete ptr; }
 
 bool does_bound_a_volume(const CGALMesh &mesh)
